@@ -1,0 +1,22 @@
+{
+  "guilds": {
+    "000000000000000000": {
+      "honeypotChannelIds": ["111111111111111111"],
+      "bypassRoleIds": ["222222222222222222"],
+      "bypassUserIds": [],
+      "honeypotTimeoutSeconds": 3600,
+      "duplicateWindowSeconds": 60,
+      "duplicateChannelThreshold": 2,
+      "scamAction": {
+        "type": "timeout",
+        "durationSeconds": 86400,
+        "reason": "Classified as scam by Honeybot"
+      },
+      "moderationLogChannelId": "333333333333333333"
+    }
+  },
+  "globalBanList": {
+    "enabled": false,
+    "endpoint": null
+  }
+}
