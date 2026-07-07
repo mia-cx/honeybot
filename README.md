@@ -23,11 +23,13 @@ After a trigger, the intended pipeline is:
 3. Run cheap evidence checks first:
    - exact normalized-text hash match
    - exact image byte hash match
+   - text MinHash/fuzzy match
    - image perceptual hash match
-4. If no exact match is decisive, embed text/images and retrieve nearby known scam entries.
+4. If no exact/fuzzy match is decisive, embed text/images and retrieve nearby known scam entries.
 5. Rerank retrieved evidence and build a short evidence summary.
-6. Ask the configured text/image classifier for scam likelihood, confidence, and reason.
-7. Apply the guild's configured policy: review, timeout, role, kick, or ban.
+6. Ask the configured text/image classifier for scam likelihood, confidence, and reason if needed.
+7. Either send the case to moderator review or, when review bypass is enabled and confidence crosses threshold, apply the guild's configured punishment: timeout, role, kick, or ban.
+8. If `punishment:dm_notify` is enabled, DM locally punished users with the decision, reason, and evidence attachments as uploaded files.
 
 The model does **not** decide moderation actions. It only reports likelihood/confidence/reason. Bot policy decides what to do.
 
@@ -59,7 +61,7 @@ Not implemented yet:
 ## Setup
 
 ```bash
-npm install
+pnpm install
 cp .env.example .env
 cp config/guilds.example.json config/guilds.json
 ```
@@ -68,11 +70,10 @@ Fill in `.env`:
 
 ```bash
 DISCORD_TOKEN=your-bot-token
-CONFIG_PATH=config/guilds.json
 LOG_LEVEL=info
 ```
 
-Edit `config/guilds.json` with real guild, channel, role, and log channel IDs.
+For the current scaffold, edit `config/guilds.json` with real guild, channel, role, and log channel IDs. This JSON config is temporary until the planned SQLite persistence layer lands.
 
 ## Discord app requirements
 
@@ -93,11 +94,11 @@ Invite the bot with permissions for the actions you enable:
 ## Scripts
 
 ```bash
-npm run dev       # run with tsx watch
-npm run typecheck # type-check only
-npm run build     # emit dist/
-npm start         # run dist/index.js
-npm run lint      # lint source
+pnpm dev       # run with tsx watch
+pnpm typecheck # type-check only
+pnpm build     # emit dist/
+pnpm start     # run dist/index.js
+pnpm lint      # lint source
 ```
 
 ## Hosting notes

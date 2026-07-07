@@ -77,6 +77,10 @@ src/
     evals.ts
   prompts/
     loadPrompt.ts
+  queues/
+    workQueue.ts                  # Honeybot queue interface hiding Effect internals
+    effectWorkQueue.ts            # Effect v4 beta implementation
+    rateLimits.ts
   reviewQueue/
     cases.ts
     images.ts
@@ -127,6 +131,7 @@ known_image:similarity_threshold
 known_text:similarity_threshold
 evidence:confidence_threshold
 review:bypass_enabled
+punishment:dm_notify
 retention:case_days
 crosschannel:max_entries_per_guild
 crosschannel:max_entries_per_user
@@ -144,6 +149,23 @@ policies
   updated_at
   primary key (guild_id, scope)
 ```
+
+Fresh guild defaults:
+
+| Scope/key | Default |
+| --- | --- |
+| `honeypot_prevention.action_type` | `timeout` |
+| `honeypot_prevention.duration_seconds` | `21600` (6 hours) |
+| `honeypot_prevention.delete_messages` | `true` |
+| `crosschannel_prevention.action_type` | `timeout` |
+| `crosschannel_prevention.duration_seconds` | `1800` (30 minutes) |
+| `crosschannel_prevention.delete_messages` | `true` |
+| `punishment.action_type` | `ban` |
+| `punishment.delete_messages` | `true` |
+| `punishment:dm_notify` | `true` |
+| `review:bypass_enabled` | `false` |
+| `evidence:confidence_threshold` | `0.90` |
+| `retention:case_days` | `180` |
 
 ```txt
 moderators
@@ -171,7 +193,7 @@ models
   provider           # openrouter | anthropic | openai | opencode | custom
   model_id
   encrypted_api_key  # nullable; env fallback when unset
-  api_key_hint       # nullable; last 4 chars or provider label for UI only
+  api_key_hint       # nullable; redacted first 4 + last 4 chars, or provider label for UI only
   api_key_nonce      # nullable; random per encrypted key
   api_key_auth_tag   # nullable; AES-GCM tag
   created_at
@@ -179,13 +201,13 @@ models
   primary key (guild_id, purpose)
 ```
 
-Each guild can route each model purpose to a different provider/model/key. Missing `models` rows fall back to deployment env defaults, e.g. `DEFAULT_TEXT_CLASSIFIER_PROVIDER`, `DEFAULT_TEXT_CLASSIFIER_MODEL`, `DEFAULT_IMAGE_CLASSIFIER_PROVIDER`, `DEFAULT_IMAGE_CLASSIFIER_MODEL`, `DEFAULT_TEXT_EMBEDDINGS_PROVIDER`, `DEFAULT_TEXT_EMBEDDINGS_MODEL`, `DEFAULT_IMAGE_EMBEDDINGS_PROVIDER`, `DEFAULT_IMAGE_EMBEDDINGS_MODEL`.
+Each guild can route classifier purposes to a different provider/model/key. Per-guild BYOK is supported in MVP as an override. Missing `models` rows fall back to deployment env defaults, e.g. `DEFAULT_TEXT_CLASSIFIER_PROVIDER`, `DEFAULT_TEXT_CLASSIFIER_MODEL`, `DEFAULT_IMAGE_CLASSIFIER_PROVIDER`, `DEFAULT_IMAGE_CLASSIFIER_MODEL`, `DEFAULT_TEXT_EMBEDDINGS_PROVIDER`, `DEFAULT_TEXT_EMBEDDINGS_MODEL`, `DEFAULT_IMAGE_EMBEDDINGS_PROVIDER`, `DEFAULT_IMAGE_EMBEDDINGS_MODEL`.
 
-Embedding model IDs are deployment-controlled for hosted providers because model choice defines vector dimensions and changing it requires re-embedding the corpus. Guilds can bring their own embedding API key and choose supported embedding providers, but cannot set arbitrary embedding model IDs unless the provider is `custom`/self-hosted. Default hosted embedding target: OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. OpenRouter documents it as mapping text and images into a unified vector space for cross-modal retrieval.
+Embedding model IDs are deployment-controlled, not per-guild, because model choice defines vector dimensions and changing it requires re-embedding the corpus. Self-hosters can choose a different deployment-wide embedding model before building their corpus, but Honeybot does not support different embedding models per guild. Guilds can bring their own embedding API key only for the deployment-selected embedding provider/model; arbitrary embedding model IDs are only allowed for deployment-level `custom`/self-hosted configuration. Default hosted embedding target: OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. OpenRouter documents it as mapping text and images into a unified vector space for cross-modal retrieval.
 
-BYOK values in `models.encrypted_api_key` are encrypted at rest with `API_KEY_ENCRYPTION_KEY`, never logged, and only decrypted at the provider boundary. Deployment-level API keys may be supplied by env vars as fallback defaults. Use AES-256-GCM with a random nonce per stored key; no salt/pepper scheme. The encryption key lives outside the DB in environment/config, so losing it makes stored BYOK keys unrecoverable.
+BYOK values in `models.encrypted_api_key` are encrypted at rest with `API_KEY_ENCRYPTION_KEY`, never logged, and only decrypted at the provider boundary. Deployment-level API keys may be supplied by env vars as fallback defaults. If both per-guild BYOK and env fallback keys are missing, model calls fail to moderator review. Use AES-256-GCM with a random nonce per stored key; no salt/pepper scheme. The encryption key lives outside the DB in environment/config, so losing it makes stored BYOK keys unrecoverable.
 
-API keys are never displayed in plaintext in Discord. Model/key listing only shows a redacted hint like `sk_12*********************eF` so the key owner can identify which key is configured for each purpose.
+API keys are never displayed in plaintext in Discord. Model/key listing only shows a redacted first-4-plus-last-4 hint like `sk_1****************abcd` so the key owner can identify which key is configured for each purpose.
 
 ### Cases/evidence
 
@@ -250,7 +272,7 @@ case_evidence
 ```txt
 case_events
   id
-  case_id
+  case_id             # stored as audit reference; no hard FK if cases may be deleted
   event_type          # triggered | prevention_applied | evidence_recorded | classified | reviewed | punished | dismissed | reverted | failed
   actor_type          # bot | user
   actor_id
@@ -364,6 +386,21 @@ global_bans
 
 Case confidence is the highest normalized confidence among evidence items, not a weighted sum, to avoid double-counting correlated signals. Tie priority: manual review > exact corpus match > fuzzy match > embedding rerank > classifier.
 
+Evidence confidence normalization:
+
+| Evidence type | Score |
+| --- | --- |
+| Manual moderator scam decision | `1.00` |
+| Exact approved text hash match | `1.00` |
+| Exact approved image `sha256` match | `1.00` |
+| Text MinHash/Jaccard fuzzy match | Jaccard overlap, only counted above `known_text:similarity_threshold` |
+| Image perceptual hash match | Normalize from Hamming distance: `1 - (distance / hash_bits)`, only counted above `known_image:similarity_threshold` |
+| Embedding retrieval/rerank | Normalized cosine similarity from reranked nearest approved corpus entry |
+| Classifier | Provider result mapped to `confidence * scam_likelihood` when both are present, otherwise the single returned confidence |
+| Weak/no retrieval | No score boost; not exonerating |
+
+`evidence:confidence_threshold` compares against the final case confidence.
+
 ### Latency/cost plan
 
 Run independent evidence lanes in parallel, but short-circuit expensive work when cheap exact matches are decisive.
@@ -448,18 +485,23 @@ Raid economics are handled without a raid/group table in MVP:
 - Each sender gets their own case, even when content is identical across users.
 - New messages from the same sender attach to their existing unresolved case instead of creating more cases.
 - Prevention policies usually stop repeated offenses. If prevention is only `log`, messages continue attaching to the same unresolved case until it is dismissed/reverted/punished.
-- Model/provider calls go through an Effect v4 beta queue/outbox that enforces env-level rolling-window limits for polite OpenRouter/provider use. If the limiter is exhausted, fail to moderator review instead of dropping the case.
-- Discord moderation actions also go through an Effect-managed queue/outbox with rolling-window limits so punishment bursts do not fight API limits.
+- Model/provider calls go through an Effect v4 beta queue/outbox that enforces deployment-global and per-guild rolling-window limits for polite OpenRouter/provider use.
+- Discord moderation actions also go through an Effect-managed queue/outbox with deployment-global and per-guild rolling-window limits so punishment bursts do not fight API limits.
+- Queues are guild-fair: jobs are partitioned by `guild_id` and scheduled round-robin across non-empty guild queues before checking per-guild and global limiters. One raided guild should not monopolize model or moderation action capacity while other guilds have pending work.
+- If a per-guild limiter is exhausted, that guild's jobs wait for the next window or fail that guild's cases to moderator review after the configured retry/deadline policy. If the deployment-global limiter is exhausted, all affected jobs wait or fail to review according to the same policy.
+- Evidence-ladder results are cached for the crosschannel window by exact/fuzzy content fingerprints (`text_hash`, image `sha256`, pHash/MinHash signatures). Different senders still get separate cases, but identical raid content can reuse evidence/classifier results instead of paying for N identical model calls.
 
 Env-level limits:
 
 ```txt
 MODEL_CALL_LIMIT
+MODEL_CALL_LIMIT_PER_GUILD
 MODEL_CALL_WINDOW_SECONDS
 MODEL_RETRY_MAX_ATTEMPTS
 MODEL_RETRY_INITIAL_DELAY_MS
 MODEL_RETRY_MAX_DELAY_MS
 MODERATION_ACTION_LIMIT
+MODERATION_ACTION_LIMIT_PER_GUILD
 MODERATION_ACTION_WINDOW_SECONDS
 GLOBAL_AUTH_MODE
 GLOBAL_AUTH_TEAM_ID
@@ -468,14 +510,15 @@ GLOBAL_AUTH_USER_IDS
 
 ### Case cleanup, retention, and revert semantics
 
-Retention is a storage policy, not primarily a privacy boundary. Evidence is expected to be scammer/raider material and should remain available for audit and corpus work.
+Retention is both a storage and trust policy.
 
 Retention rules:
 
-- Evidence messages, attachment metadata, and stored attachment files are retained indefinitely by default.
-- `retention:case_days` defaults to `180` days for case metadata/review lifecycle cleanup across all statuses.
-- Do not hard-delete case rows while evidence rows require them for referential integrity. If cases are compacted or hard-deleted later, evidence rows must retain original Discord IDs and nullable source references so they do not dangle.
-- Pending corpus rows copied from a dismissed/reverted case are deleted; approved corpus rows remain.
+- Dismissed/reverted cases are deleted after writing final audit events: delete the `cases` row, case messages, case attachments, stored temporary files, case evidence rows, and pending corpus rows copied from that case. Keep append-only `case_events` audit records.
+- Punished cases retain raw evidence messages, attachment metadata, stored attachment files, hashes, embeddings, and evidence summaries indefinitely by default for audit and corpus work.
+- `retention:case_days` defaults to `180` days for non-dismissed case metadata/review lifecycle compaction. Do not delete raw punished-case evidence by default.
+- Audit/event rows must retain enough original Discord IDs, actor IDs, and reason metadata to remain useful after dismissed/reverted case rows are deleted.
+- Approved corpus rows remain until disabled or removed.
 
 Corpus promotion is copy-on-promote: known text/image rows own their normalized text, copied image file, and embedding vector. They never share case message/attachment storage. Guild moderators can approve guild-scoped corpus rows for their own server. Global corpus promotion requires global authority. Pending corpus rows become `approved` when an authorized reviewer approves them; dismiss/revert deletes pending rows instead of leaving rejected corpus entries.
 
@@ -487,17 +530,33 @@ Corpus promotion is copy-on-promote: known text/image rows own their normalized 
 - `ban`: unban the user.
 - `delete_messages`: cannot undo Discord deletion; record as irreversible in `case_events`.
 
-Every revert attempt writes a `case_events` row with success/failure and irreversible-action metadata.
+Revert applies to both prevention and punishment actions. If prevention already timed out/role/kicked/banned a user, dismiss/revert attempts the same best-effort undo. Every revert attempt writes a `case_events` row with success/failure and irreversible-action metadata.
+
+If a prevention policy action is `kick` or `ban`, skip paid embeddings/classifier analysis by default. Preserve available evidence, post/update the moderation-channel case, and let moderators audit/revert if needed.
+
+### Punished user notifications
+
+If `punishment:dm_notify` is true, Honeybot DMs the punished user after applying a local punishment. The DM includes:
+
+- the server name
+- the moderation decision/action
+- the configured reason plus concise evidence reason
+- the triggering message content when available
+- relevant evidence attachments as actual Discord file attachments loaded from Honeybot's stored files, not links to bot-hosted/CDN evidence URLs
+
+DM failure must not block the punishment. Record success/failure in `case_events`. If attachment files exceed Discord DM limits or are unavailable, send the text notification and record omitted attachments in `case_events`.
+
+There is no local appeal workflow in MVP and no "copy appeal note" review button.
 
 ### Global bans
 
 Global bans are users only.
 
-Publishing is manual-only from case review components. No automatic global-ban publishing from punished cases. The publisher must pass the env-controlled global authority check.
+Publishing is manual-only from case review components. No automatic global-ban publishing from punished cases. The publisher must pass the env-controlled global authority check. Global ban appeals are out-of-band/operator-managed for MVP; Honeybot can track `appealed` status but does not provide an in-bot appeal flow.
 
 Global authority modes:
 
-- `GLOBAL_AUTH_MODE=team`: use Discord's `GET /oauth2/applications/@me` with the bot token. The returned application object includes `team`; verify `team.id === GLOBAL_AUTH_TEAM_ID` and check `team.members` for the interaction user's ID with `membership_state = 2` (`ACCEPTED`).
+- `GLOBAL_AUTH_MODE=team`: use Discord's `GET /oauth2/applications/@me` with the bot token. The returned application object includes `team`; verify `team.id === GLOBAL_AUTH_TEAM_ID` and check `team.members` for the interaction user's ID with `membership_state = 2` (`ACCEPTED`). This grants global authority to all accepted team members regardless of team role.
 - `GLOBAL_AUTH_MODE=users`: check the interaction user's ID against `GLOBAL_AUTH_USER_IDS`, a comma-separated allowlist.
 
 If the user does not pass the configured global authority check, hide/deny global-ban publish and global-corpus promotion actions.
@@ -529,7 +588,7 @@ Moderation trigger bypass rules:
 - Exempt server owner, members with `Manage Guild`, members with `Administrator`, and users/roles in `moderators`.
 - No separate bypass table for MVP; `moderators` doubles as the explicit bypass list.
 
-Case review is handled through Discord message components. Every case gets posted to the channel configured by `moderation:channel_id` with buttons/selects for reviewer actions. There are no `/review` slash commands.
+Case review is handled through Discord message components. Every case gets posted to the channel configured by `moderation:channel_id` with buttons/selects for reviewer actions. There are no `/review` slash commands. Reattached review images should be spoiler-wrapped by default because raid images may be NSFW, illegal, or otherwise harmful to display unprompted.
 
 Settings command rules:
 
@@ -604,7 +663,7 @@ Initial commands:
 - Implement honeypot pipeline.
 - Implement crosschannel pipeline.
 - Implement prevention/punishment policy resolver.
-- Implement dismissed/reverted cleanup for case messages, attachments, temp files, and pending corpus rows copied from the case.
+- Implement dismissed/reverted cleanup for case rows, case messages, case attachments, temp files, case evidence rows, and pending corpus rows copied from the case while keeping audit events.
 
 ### Phase 4: known evidence corpus
 
@@ -633,15 +692,21 @@ Initial commands:
   - Anthropic Claude API.
   - OpenAI API.
   - OpenCode/local/custom provider path if practical.
-- Use Effect v4 beta around provider calls for queue/outbox execution, rolling-window rate limits, exponential backoff retries, timeouts, typed errors, and fail-to-review handling.
+- Use pinned `effect@4.0.0-beta.93` behind Honeybot's own queue/outbox interface for provider calls: rolling-window rate limits, exponential backoff retries, timeouts, typed errors, and fail-to-review handling. Effect internals should not leak into classifier/moderation domain modules.
 - Add strict JSON prompt/contract with no `labels` field.
 - Classifier only reports scam/spam likelihood, confidence, and `reason`; it never chooses moderation action.
 - Reasons should be short and generic, e.g. `resembles known scam raid images`, `image depicts crypto payout`, `message promotes suspicious Discord invite`, `message points users to likely wallet drainer`.
 - Bot code compares confidence against guild settings and resolves the configured policy.
 - Store classifier result in case state + events.
-- Default hosted embeddings target is OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. First eval should verify shared text/image embedding space with a few controlled text↔image retrieval tests. If it fails, choose another OpenRouter-hosted multimodal embedding option rather than leaving OpenRouter as the default path.
+- Default hosted embeddings target is OpenRouter `google/gemini-embedding-2` for both text and image embeddings, using `1536` dimensions by default for a quality/storage/speed balance. First eval should verify shared text/image embedding space with a few controlled text↔image retrieval tests. If it fails, choose another OpenRouter-hosted multimodal embedding option rather than leaving OpenRouter as the default path.
+- Classifier eval candidates, in preference order:
+  1. OpenRouter free-tier Gemma 4 quant model as the cheap/default baseline; verify the current OpenRouter model slug during implementation.
+  2. Paid Gemma tier if the free tier hits rate limits or quality is close but capacity is insufficient.
+  3. Gemini 3.1 Flash Lite as a likely stronger/cheap classifier candidate.
+  4. Gemini 3.5 Flash as the stronger fallback candidate.
+  5. Another OpenRouter multimodal classifier if Gemma/Gemini quality is poor on the eval corpus.
 - Add corpus eval script using `EVAL_CORPUS_DIR`; local dev can point it at private corpora such as `~/Downloads/mrscam*` without making that path canonical.
-- Track eval results by model, prompt version, cost, latency, false positives, and false negatives.
+- Track eval results by model, prompt version, cost, latency, false positives, false negatives, and rate-limit behavior.
 
 ### Phase 6: global bans
 
@@ -664,9 +729,4 @@ Initial commands:
 
 ## Open questions
 
-- Exact default policies for fresh guilds.
-- Which OpenRouter models are good enough and cheap/free for image classification.
-- Which embedding dimensionality to use by default for `google/gemini-embedding-2` (768, 1536, or 3072).
-- How global-ban contribution/appeals work.
-- Whether known text/image corpus entries are instance-global only or can be guild-local later.
-- Whether per-server BYOK is required for MVP or env-level provider keys are enough initially.
+None currently.

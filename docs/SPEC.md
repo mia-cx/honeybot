@@ -43,6 +43,16 @@ Each guild has one punishment policy. If `review:bypass_enabled` is false, cases
 
 Separate prevention policies may run immediately after the trigger if configured: `honeypot_prevention` and `crosschannel_prevention`. Prevention is not evidence; it is logged as a bot action. Prevention actions may be `log`, `timeout`, `role`, `kick`, or `ban` for servers that want naive "trigger means punish" behavior. Punishment actions do not include `log`; they are `timeout`, `role`, `kick`, or `ban`. Message deletion is always a separate boolean on the policy.
 
+Fresh guild defaults:
+
+- Honeypot prevention: timeout for 6 hours and delete messages.
+- Crosschannel prevention: timeout for 30 minutes and delete messages.
+- Punishment: ban and delete messages.
+- Punishment DM notification: enabled.
+- Review bypass: disabled.
+- Evidence confidence threshold: `0.90`.
+- Case metadata retention: 180 days.
+
 Case statuses:
 
 - `pending_review`
@@ -50,11 +60,15 @@ Case statuses:
 - `dismissed`
 - `reverted`
 
-Evidence messages, attachment metadata, and stored images are retained indefinitely by default. `retention:case_days` defaults to 180 days for case metadata/review lifecycle cleanup across all statuses. This is mainly about storage use, not treating scammer evidence as sensitive user data. Pending corpus rows copied from dismissed/reverted cases are deleted; approved corpus rows remain.
+When a case is dismissed or reverted, Honeybot deletes the case row, case messages, case attachments, temporary files, case evidence rows, and pending corpus rows copied from that case. Append-only audit events remain.
 
-`reverted` means best-effort undo: remove active timeouts, remove punishment roles, and unban banned users. Kicks and deleted Discord messages cannot be undone, so Honeybot records them as irreversible in the audit trail.
+Punished cases retain raw evidence indefinitely by default for audit and corpus work. `retention:case_days` defaults to 180 days for non-dismissed case metadata/review lifecycle compaction, without deleting raw punished-case evidence by default.
 
-If case rows are compacted or hard-deleted after retention, evidence rows must retain original Discord IDs and nullable source references so stored evidence does not dangle.
+If `punishment:dm_notify` is true, Honeybot DMs locally punished users with the server name, decision/action, configured reason, concise evidence reason, triggering message content when available, and relevant evidence attachments as real Discord file attachments loaded from Honeybot's stored files. It must not send bot-hosted/CDN evidence links. DM failure or attachment-size limits do not block punishment; Honeybot records notification success/failure and omitted attachments in the audit trail. There is no local appeal workflow in MVP.
+
+`reverted` means best-effort undo: remove active timeouts, remove punishment roles, and unban banned users. Kicks and deleted Discord messages cannot be undone, so Honeybot records them as irreversible in the audit trail. Revert applies to both prevention and punishment actions.
+
+If a prevention policy action is `kick` or `ban`, Honeybot skips paid embeddings/classifier analysis by default. It preserves available evidence, posts/updates the moderation-channel case, and lets moderators audit/revert if needed.
 
 ## Evidence ladder
 
@@ -80,9 +94,15 @@ For a triggered case:
 
 Cost rule: run cheap exact checks before paid embeddings/classifier calls. Text and image lanes can run in parallel once needed.
 
-Raid cost rule: each sender gets their own case, even if multiple users send identical content. New messages from the same sender attach to that sender's unresolved case until it is dismissed/reverted/punished. If prevention is only `log`, repeated messages keep attaching to the same unresolved case. Model calls and Discord moderation actions are protected by env-level rolling-window rate limits; exhaustion fails to moderator review.
+Case confidence is the highest normalized confidence among evidence items, not a weighted sum. Exact approved corpus matches score `1.00`; fuzzy, perceptual-hash, embedding, and classifier evidence use normalized scores documented in the implementation plan.
 
-Classifier/embedding failures also fail to moderator review. Provider calls use an Effect v4 beta queue/outbox with rolling-window limits, exponential backoff retries for transient errors, 429/5xx, timeouts, and malformed structured output. Auth/config errors and exhausted model-call limiters fail immediately to review.
+Raid cost rule: each sender gets their own case, even if multiple users send identical content. New messages from the same sender attach to that sender's unresolved case until it is dismissed/reverted/punished. If prevention is only `log`, repeated messages keep attaching to the same unresolved case. Evidence-ladder results are cached for the crosschannel window by exact/fuzzy content fingerprints, so identical raid content across senders can reuse evidence/classifier results without merging cases. Model calls and Discord moderation actions are protected by deployment-global and per-guild rolling-window rate limits.
+
+Model/action queues are guild-fair: jobs are partitioned by guild and scheduled round-robin across non-empty guild queues before checking per-guild and global limiters. One raided guild should not monopolize capacity while other guilds have pending work. If a guild limiter is exhausted, that guild's jobs wait or fail that guild's cases to moderator review after retry/deadline policy; if the deployment-global limiter is exhausted, all affected jobs wait or fail to review.
+
+Classifier/embedding failures also fail to moderator review. Provider calls use a pinned Effect v4 beta queue/outbox, behind Honeybot's own queue interface, with rolling-window limits, exponential backoff retries for transient errors, 429/5xx, timeouts, and malformed structured output. Auth/config errors and exhausted model-call limiters fail immediately to review.
+
+Default hosted embeddings use OpenRouter `google/gemini-embedding-2` for text and images, with `1536` dimensions by default. Initial classifier evals should try OpenRouter's free-tier Gemma 4 quant model first, then paid Gemma if rate limits/quality require it, then Gemini 3.1 Flash Lite and Gemini 3.5 Flash as stronger fallback candidates.
 
 ## Known corpus
 
@@ -132,7 +152,9 @@ Model purposes:
 - `text_embeddings`
 - `image_embeddings`
 
-Classifier model IDs can be configured per guild. Embedding model IDs are deployment-controlled for hosted providers because changing dimensions requires re-embedding the corpus. Guilds can bring their own embedding API keys and choose supported embedding providers; arbitrary embedding model IDs are only allowed for custom/self-hosted providers.
+Classifier model IDs can be configured per guild. Per-guild BYOK is supported in MVP as an override; env-level keys are the fallback, and missing keys fail model calls to moderator review.
+
+Embedding model IDs are deployment-controlled, not per-guild, because changing embedding models/dimensions requires re-embedding the corpus. Self-hosters can choose a different deployment-wide embedding model before building their corpus, but Honeybot does not support different embedding models per guild. Guilds can bring their own embedding API key only for the deployment-selected embedding provider/model; arbitrary embedding model IDs are only allowed for deployment-level custom/self-hosted configuration.
 
 Default hosted embeddings target: OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. OpenRouter documents it as mapping text and images into a unified vector space for cross-modal retrieval. First eval should verify text↔image retrieval with controlled examples; if it fails, choose another OpenRouter-hosted multimodal embedding option.
 
@@ -140,11 +162,11 @@ API keys are stored per model purpose, encrypted with `API_KEY_ENCRYPTION_KEY`, 
 
 ## Global bans
 
-Global bans are users only. Publishing is manual-only from case review components; punished cases do not auto-publish.
+Global bans are users only. Publishing is manual-only from case review components; punished cases do not auto-publish. Global ban appeals are out-of-band/operator-managed for MVP; Honeybot can track `appealed` status but does not provide an in-bot appeal flow.
 
 Global ban publishing and global corpus promotion are controlled by env config:
 
-- `GLOBAL_AUTH_MODE=team`: verify accepted Discord Developer Team membership with `GET /oauth2/applications/@me`, checking `team.id` against `GLOBAL_AUTH_TEAM_ID`.
+- `GLOBAL_AUTH_MODE=team`: verify accepted Discord Developer Team membership with `GET /oauth2/applications/@me`, checking `team.id` against `GLOBAL_AUTH_TEAM_ID`. All accepted team members count, regardless of team role.
 - `GLOBAL_AUTH_MODE=users`: verify the interaction user ID against `GLOBAL_AUTH_USER_IDS`, a comma-separated allowlist.
 
 Global bans are checked on future member joins and swept across opted-in guilds when a new global ban is published.
@@ -181,4 +203,4 @@ Planned command groups:
 
 `/model`, singular, owns model/provider/API-key configuration.
 
-Case review is not a slash command. Each case is posted to the configured moderation channel with Discord message components for approve/dismiss/punish/revert and evidence approval/rejection.
+Case review is not a slash command. Each case is posted to the configured moderation channel with Discord message components for approve/dismiss/punish/revert and evidence approval/rejection. Reattached review images should be spoiler-wrapped by default.

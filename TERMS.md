@@ -38,6 +38,8 @@ Global ban publishing and global corpus promotion are restricted to authorized H
 
 Servers may opt into consuming global ban data. Server operators remain responsible for deciding whether global ban behavior is appropriate for their community.
 
+If you believe a global ban or global corpus entry is incorrect, contact the Honeybot maintainers through the support channel or project repository with enough information to identify the relevant Discord account, server, and case. Appeals may be accepted, rejected, or require additional evidence. Honeybot does not provide an in-bot appeal workflow in MVP.
+
 Do not knowingly submit false, misleading, or abusive evidence to Honeybot's shared corpus or global ban systems.
 
 ## API keys and third-party providers
@@ -61,11 +63,19 @@ You may not use Honeybot to:
 - Attempt to extract secrets, API keys, or private evidence from Honeybot.
 - Interfere with Honeybot's operation or hosting infrastructure.
 
-## Availability and changes
+## Availability, termination, and changes
 
 Honeybot is provided as-is. Features may change, break, or be removed. The bot may be unavailable due to maintenance, provider outages, Discord API issues, rate limits, or other causes.
 
+We may remove Honeybot from a server, disable access to hosted features, revoke global corpus/global ban publishing privileges, or refuse service if Honeybot is abused, misconfigured in a harmful way, used to violate these Terms, or creates operational/security risk.
+
 We may update these Terms from time to time. Continued use of Honeybot after changes means you accept the updated Terms.
+
+## Governing law and venue
+
+For the official upstream Honeybot instance operated by mia.cx, these Terms are governed by the laws of the Netherlands unless a different hosting/operator arrangement is published for that instance.
+
+For self-hosted or third-party hosted Honeybot instances, governing law and venue are determined by that hosted instance's operator.
 
 ## Disclaimer
 

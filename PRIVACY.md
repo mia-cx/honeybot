@@ -48,20 +48,30 @@ Global bans are user IDs only. Servers must opt in before Honeybot consumes glob
 
 Default retention policy:
 
-- Evidence messages, attachment metadata, stored images, hashes, and embeddings are retained indefinitely by default for audit and scam corpus use.
-- Case metadata is retained for 180 days by default unless configured otherwise.
-- Pending corpus rows from dismissed or reverted cases may be deleted.
+- Dismissed or reverted cases: raw message content, attachments, temporary files, case rows, case evidence rows, and pending corpus rows copied from the case are deleted after final audit events are written.
+- Punished cases: evidence messages, attachment metadata, stored images, hashes, and embeddings are retained indefinitely by default for audit and scam corpus use.
+- Non-dismissed case metadata may be compacted after 180 days by default unless configured otherwise.
 - Approved corpus entries remain until disabled or removed.
 - Cross-channel detector state is temporary and in-memory.
 - Server settings and encrypted API keys remain until removed by an authorized administrator.
 
-Retention is primarily intended to manage storage use, not because scammer evidence is treated as sensitive personal content.
+Retention is primarily intended to manage storage use and moderation auditability. Dismissed and reverted cases are treated differently because they may involve users who were cleared by moderators.
 
 ## Access and controls
 
 Server owners, members with appropriate Discord permissions, configured Honeybot moderators, and authorized Honeybot operators may access moderation tools according to Honeybot's authorization rules.
 
 Server administrators can configure policies, moderators, model settings, and opt-in global features.
+
+## Your rights and deletion requests
+
+Depending on where you live, you may have rights to access, correct, delete, or restrict processing of personal data associated with you. Honeybot stores Discord IDs and moderation evidence, so requests must include enough information to identify the relevant Discord account/server/case.
+
+For server-local moderation data, contact the server owner or moderators first; they control how Honeybot is configured in their server. For global ban or global corpus data, contact the Honeybot maintainers.
+
+Honeybot operators may need to retain limited audit logs, hashes, or abuse-prevention records where necessary for security, fraud prevention, legal compliance, or dispute handling.
+
+For EU/UK users, the server operator is generally the controller for server-local moderation data, and the Honeybot operator is the controller for global ban/global corpus services they operate.
 
 ## Data sharing
 
