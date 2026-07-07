@@ -4,12 +4,12 @@
       "honeypotChannelIds": ["111111111111111111"],
       "bypassRoleIds": ["222222222222222222"],
       "bypassUserIds": [],
-      "honeypotTimeoutSeconds": 3600,
+      "honeypotTimeoutSeconds": 21600,
       "duplicateWindowSeconds": 60,
       "duplicateChannelThreshold": 2,
       "scamAction": {
-        "type": "timeout",
-        "durationSeconds": 86400,
+        "type": "ban",
+        "deleteMessageSeconds": 604800,
         "reason": "Classified as scam by Honeybot"
       },
       "moderationLogChannelId": "333333333333333333"

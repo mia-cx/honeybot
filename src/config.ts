@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { env } from './env.js';
+const SCAFFOLD_CONFIG_PATH = 'config/guilds.json';
 
 const snowflakeSchema = z.string().regex(/^\d{17,20}$/);
 
@@ -34,11 +34,12 @@ const guildConfigSchema = z.object({
   honeypotChannelIds: z.array(snowflakeSchema).default([]),
   bypassRoleIds: z.array(snowflakeSchema).default([]),
   bypassUserIds: z.array(snowflakeSchema).default([]),
-  honeypotTimeoutSeconds: z.number().int().min(1).max(2419200).default(3600),
+  honeypotTimeoutSeconds: z.number().int().min(1).max(2419200).default(21600),
   duplicateWindowSeconds: z.number().int().min(1).default(60),
   duplicateChannelThreshold: z.number().int().min(2).default(2),
   scamAction: scamActionSchema.default({
-    type: 'logOnly',
+    type: 'ban',
+    deleteMessageSeconds: 604800,
     reason: 'Classified as scam by Honeybot',
   }),
   moderationLogChannelId: snowflakeSchema.optional(),
@@ -56,7 +57,7 @@ const configSchema = z.object({
 
 export type LoadedConfig = z.infer<typeof configSchema>;
 
-export async function loadConfig(path = env.CONFIG_PATH): Promise<LoadedConfig> {
+export async function loadConfig(path = SCAFFOLD_CONFIG_PATH): Promise<LoadedConfig> {
   const raw = await readFile(path, 'utf8');
   return configSchema.parse(JSON.parse(raw));
 }
