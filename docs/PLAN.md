@@ -7,7 +7,9 @@ Build a Discord slash-command bot that catches scam behavior from two triggers:
 1. `honeypot`: user posts in a configured honeypot channel.
 2. `crosschannel`: user posts the same/similar message in multiple channels inside a threshold window.
 
-After a trigger, the bot saves evidence, checks known scam images, optionally runs a multimodal classifier, then applies the guild's configured policy.
+After a trigger, the bot saves evidence, checks known scam text/images, optionally runs a multimodal classifier, then applies the guild's configured policy.
+
+Primary abuse pattern is public-server raid spam: repeated images/messages advertising Discord invites, suspicious websites, crypto payouts, wallet drainers, token stealers, or impersonation. The model/corpus should not assume neat targeted phishing structure.
 
 ## Locked decisions
 
@@ -39,8 +41,10 @@ src/
       settings.ts
       policies.ts
       moderators.ts
-      review.ts
       globalBans.ts
+    components/
+      caseReview.ts
+      evidenceReview.ts
     commandKit/
       command.ts
       registerCommands.ts
@@ -115,29 +119,30 @@ settings
 Scalar settings only:
 
 ```txt
-moderation_channel_id
-crosschannel_enabled
-crosschannel_window_seconds
-crosschannel_channel_threshold
-crosschannel_prevention_delete
-crosschannel_punishment_delete
-known_image_similarity_threshold
-classifier_confidence_threshold
-classifier_provider
-classifier_model
+moderation:channel_id
+crosschannel:enabled
+crosschannel:window_seconds
+crosschannel:channel_threshold
+known_image:similarity_threshold
+known_text:similarity_threshold
+evidence:confidence_threshold
+review:bypass_enabled
+retention:case_days
+crosschannel:max_entries_per_guild
+crosschannel:max_entries_per_user
 ```
 
 ```txt
 policies
   guild_id
-  detection_type      # honeypot | crosschannel | known_image_exact | known_image_similar | classifier
-  phase               # prevention | punishment
-  action_type         # review | timeout | role | kick | ban
+  scope               # honeypot_prevention | crosschannel_prevention | punishment
+  action_type         # prevention: log | timeout | role | kick | ban; punishment: timeout | role | kick | ban
   duration_seconds
   role_id
+  delete_messages     # separate bool; can be true for prevention or punishment
   created_at
   updated_at
-  primary key (guild_id, detection_type, phase)
+  primary key (guild_id, scope)
 ```
 
 ```txt
@@ -147,6 +152,8 @@ moderators
   id
   created_at
   primary key (guild_id, type, id)
+
+Users/roles in `moderators` can manage Honeybot and are exempt from moderation triggers. A compromised moderator account is outside Honeybot's automated enforcement model and should be handled by server staff.
 ```
 
 ```txt
@@ -158,17 +165,27 @@ honeypots
 ```
 
 ```txt
-api_keys
+models
   guild_id
+  purpose            # text_classifier | image_classifier | text_embeddings | image_embeddings
   provider           # openrouter | anthropic | openai | opencode | custom
-  encrypted_key
-  key_hint           # last 4 chars or provider label for UI only
+  model_id
+  encrypted_api_key  # nullable; env fallback when unset
+  api_key_hint       # nullable; last 4 chars or provider label for UI only
+  api_key_nonce      # nullable; random per encrypted key
+  api_key_auth_tag   # nullable; AES-GCM tag
   created_at
   updated_at
-  primary key (guild_id, provider)
+  primary key (guild_id, purpose)
 ```
 
-API keys are BYOK, encrypted at rest with `API_KEY_ENCRYPTION_KEY`, never logged, and only decrypted at the provider boundary. Deployment-level API keys may be supplied by env vars as fallback defaults. Use AES-256-GCM with a random nonce per stored key; no salt/pepper scheme. The encryption key lives outside the DB in environment/config, so losing it makes stored BYOK keys unrecoverable.
+Each guild can route each model purpose to a different provider/model/key. Missing `models` rows fall back to deployment env defaults, e.g. `DEFAULT_TEXT_CLASSIFIER_PROVIDER`, `DEFAULT_TEXT_CLASSIFIER_MODEL`, `DEFAULT_IMAGE_CLASSIFIER_PROVIDER`, `DEFAULT_IMAGE_CLASSIFIER_MODEL`, `DEFAULT_TEXT_EMBEDDINGS_PROVIDER`, `DEFAULT_TEXT_EMBEDDINGS_MODEL`, `DEFAULT_IMAGE_EMBEDDINGS_PROVIDER`, `DEFAULT_IMAGE_EMBEDDINGS_MODEL`.
+
+Embedding model IDs are deployment-controlled for hosted providers because model choice defines vector dimensions and changing it requires re-embedding the corpus. Guilds can bring their own embedding API key and choose supported embedding providers, but cannot set arbitrary embedding model IDs unless the provider is `custom`/self-hosted. Default hosted embedding target: OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. OpenRouter documents it as mapping text and images into a unified vector space for cross-modal retrieval.
+
+BYOK values in `models.encrypted_api_key` are encrypted at rest with `API_KEY_ENCRYPTION_KEY`, never logged, and only decrypted at the provider boundary. Deployment-level API keys may be supplied by env vars as fallback defaults. Use AES-256-GCM with a random nonce per stored key; no salt/pepper scheme. The encryption key lives outside the DB in environment/config, so losing it makes stored BYOK keys unrecoverable.
+
+API keys are never displayed in plaintext in Discord. Model/key listing only shows a redacted hint like `sk_12*********************eF` so the key owner can identify which key is configured for each purpose.
 
 ### Cases/evidence
 
@@ -179,11 +196,14 @@ cases
   user_id
   trigger_type        # honeypot | crosschannel
   status              # pending_review | punished | dismissed | reverted
-  action_taken        # review | timeout | role | kick | ban | dismiss | revert; resolved by bot policy, not model
+  action_taken        # actual punishment: timeout | role | kick | ban; nullable for review/dismiss/revert
   reason              # latest templated bot reason
+  evidence_summary_json
   created_at
   updated_at
 ```
+
+Unresolved-case uniqueness: one active case per `guild_id + user_id + trigger_type`. New messages from the same user/trigger attach to the existing unresolved case until it is resolved. A dismissed/reverted/punished case is resolved; a later message opens a new case. Different authors always get separate cases, even if they send identical text/attachments.
 
 ```txt
 case_messages
@@ -194,6 +214,7 @@ case_messages
   author_id
   content
   normalized_content
+  text_hash
   deleted
   created_at
 ```
@@ -205,12 +226,24 @@ case_attachments
   case_message_id
   discord_attachment_id
   original_url
+  review_attachment_url
   content_type
   size_bytes
   sha256
   perceptual_hash
-  embedding_id
   storage_key
+  created_at
+```
+
+```txt
+case_evidence
+  id
+  case_id
+  evidence_type       # exact_match | fuzzy_match | embedding_retrieval | classifier | manual_review
+  matched             # true | false
+  score
+  summary
+  metadata_json
   created_at
 ```
 
@@ -218,7 +251,7 @@ case_attachments
 case_events
   id
   case_id
-  event_type          # triggered | image_matched | classified | reviewed | punished | dismissed | reverted | failed
+  event_type          # triggered | prevention_applied | evidence_recorded | classified | reviewed | punished | dismissed | reverted | failed
   actor_type          # bot | user
   actor_id
   reason
@@ -226,12 +259,13 @@ case_events
   created_at
 ```
 
-### Images/global bans
+### Text/images/global bans
 
 ```txt
-image_reviews
+evidence_reviews
   id
-  case_attachment_id
+  target_type         # text | image
+  target_id           # known_texts.id or known_images.id with status=pending
   status              # pending | approved | rejected
   reviewer_id
   note
@@ -240,26 +274,46 @@ image_reviews
 ```
 
 ```txt
+known_texts
+  id
+  normalized_text
+  text_hash
+  embedding_provider
+  embedding_model
+  embedding_dimensions
+  embedding_vector_json # SQLite MVP; pgvector later if Postgres
+  description           # what the message is doing, e.g. "spams invite link"
+  scam_reason           # why it is treated as scam/spam evidence
+  source_case_id
+  source_discord_message_id
+  approved_by
+  scope                 # guild | global
+  guild_id              # nullable for global rows
+  status                # pending | approved | disabled
+  created_at
+  updated_at
+```
+
+```txt
 known_images
   id
   sha256
   perceptual_hash
-  embedding_id
-  storage_key
+  storage_key           # corpus-owned file copy, not case attachment file
+  embedding_provider
+  embedding_model
+  embedding_dimensions
+  embedding_vector_json # SQLite MVP; pgvector later if Postgres
+  description           # what the image depicts, e.g. "crypto payout promo"
+  scam_reason           # why it is treated as scam/spam evidence
   source_case_id
-  source_attachment_id
+  source_discord_attachment_id
   approved_by
-  status              # active | disabled
+  scope                 # guild | global
+  guild_id              # nullable for global rows
+  status                # pending | approved | disabled
   created_at
-```
-
-```txt
-image_embeddings
-  id
-  model
-  dimensions
-  vector_json         # SQLite MVP; pgvector later if Postgres
-  created_at
+  updated_at
 ```
 
 ```txt
@@ -267,6 +321,7 @@ global_bans
   id
   user_id
   source_case_id
+  published_by_user_id # must pass global authority check
   status              # active | removed | appealed
   reason
   created_at
@@ -278,40 +333,229 @@ global_bans
 ### Honeypot
 
 1. Message arrives in `messageCreate`.
-2. If channel is in `honeypots`, create `case` with `trigger_type = honeypot`.
-3. Cache message + attachments.
-4. Apply prevention policy for `honeypot/prevention`.
-5. Analyze case:
-   - exact image hash match
-   - perceptual hash match
-   - optional embedding similarity
-   - multimodal classifier if no known-image match
-6. Apply punishment policy or send to review.
-7. Write `case_events` for every step.
+2. If channel is in `honeypots`, cancel/skip crosschannel detection for this message because honeypot is the stronger trigger.
+3. Create `case` with `trigger_type = honeypot`.
+4. Cache message + attachments.
+5. Preserve original attachments in storage and reattach/link them in the moderation-channel case post so reviewers can inspect the actual images.
+6. Apply the guild `honeypot_prevention` policy if present.
+7. Analyze case with the evidence ladder below.
+8. If `review:bypass_enabled` is true and evidence crosses thresholds, apply the guild punishment policy. Otherwise post/keep the case for moderator review.
+9. Write `case_events` for every step.
+
+### Evidence ladder
+
+1. Record exact match evidence:
+   - normalized text hash against `known_texts.text_hash`
+   - attachment byte hash against `known_images.sha256`
+2. Record fuzzy match evidence:
+   - text shingle/MinHash match, if available
+   - image perceptual hash match
+3. If no exact/fuzzy match is decisive, embed the message/image.
+4. Retrieve nearest known scam entries by embedding proximity.
+5. Rerank retrieved entries with stricter similarity checks and stored `description`/`scam_reason`.
+6. Produce an evidence summary visible to moderators:
+   - exact match true/false for text and image
+   - fuzzy match true/false for text and image
+   - nearest known examples
+   - similarity scores
+   - explicit note when retrieval is weak, e.g. `embedding retrieval did not find close known scams; this may still be a novel scam`
+7. Classify with the message, attachments, and evidence summary in context.
+8. Store classifier verdict/confidence/reason as evidence; bot policy decides review vs punishment from `evidence:confidence_threshold`.
+
+Case confidence is the highest normalized confidence among evidence items, not a weighted sum, to avoid double-counting correlated signals. Tie priority: manual review > exact corpus match > fuzzy match > embedding rerank > classifier.
+
+### Latency/cost plan
+
+Run independent evidence lanes in parallel, but short-circuit expensive work when cheap exact matches are decisive.
+
+Parallel before analysis:
+
+- create case row
+- cache message rows
+- normalize text and compute text hashes
+- download attachments
+- store attachment files
+- compute image byte hashes
+- compute perceptual hashes
+
+Parallel evidence checks:
+
+- exact text hash lookup
+- exact image `sha256` lookup
+- perceptual hash candidate lookup
+
+If exact/fuzzy evidence is decisive, skip embeddings and classifier. Otherwise run text/image embedding lanes in parallel:
+
+- embed text and images
+- retrieve nearest known text/image entries
+- rerank candidates
+- build one evidence summary
+- make one classifier call
+
+Default optimization is cost-first, not absolute latency: do not start paid embeddings/classifier calls until exact hash checks fail.
+
+### Classifier/embedding failure mode
+
+Model provider calls use an Effect v4 beta queue/outbox for typed retries, timeouts, structured failure handling, and rolling-window rate limiting.
+
+Retry policy:
+
+- Exponential backoff with jitter.
+- Configured by `MODEL_RETRY_MAX_ATTEMPTS`, `MODEL_RETRY_INITIAL_DELAY_MS`, and `MODEL_RETRY_MAX_DELAY_MS`.
+- Retry transient network errors, provider 429/5xx, timeouts, and malformed/invalid structured output.
+- Do not retry permanent auth/config errors; fail immediately to review.
+- If the env rolling-window model limiter is exhausted, do not retry; fail to review.
+
+Failure result:
+
+- Keep/create the case as `pending_review`.
+- Set case reason to `model provider unavailable; sent for moderator review` or a similarly templated reason.
+- Write `case_evidence` with `evidence_type = classifier`, `matched = false`, `score = null`, and error metadata.
+- Write `case_events` with `event_type = failed` and provider/retry metadata.
 
 ### Crosschannel
 
-1. Message arrives in `messageCreate`.
-2. If crosschannel enabled, record normalized content in detector.
-3. If threshold is hit, create one `case` with all matching messages.
-4. Apply prevention policy for `crosschannel/prevention`.
-5. Analyze case.
-6. Apply punishment policy or send to review.
-7. Write `case_events` for every step.
+Crosschannel uses exact + cheap fuzzy pre-trigger detection. It does not run embeddings or classifiers before a trigger.
 
-### Member join
+Cheap fingerprints:
+
+- normalized text hash
+- URL/domain hash, when links are present
+- attachment byte hash, after download
+- image perceptual hash, for near-identical image spam
+- optional text shingle/MinHash fingerprint for near-duplicate text
+
+Detector state is in-memory for MVP, bounded by `crosschannel:window_seconds`, `crosschannel:max_entries_per_guild`, and `crosschannel:max_entries_per_user`. Restarting the bot drops detector state.
+
+Flow:
+
+1. Message arrives in `messageCreate`.
+2. If the message already triggered honeypot, stop; honeypot owns the case.
+3. If crosschannel enabled, compute cheap fingerprints.
+4. Record fingerprints in the in-memory detector.
+5. If enough distinct channels match within the configured window, find or create the user's unresolved `crosschannel` case.
+6. Attach all matching messages to that case.
+7. Cache messages/attachments and preserve attachments for the moderation-channel case post.
+8. Apply the guild `crosschannel_prevention` policy if present.
+9. Analyze case.
+10. If `review:bypass_enabled` is true and evidence crosses thresholds, apply the guild punishment policy. Otherwise post/keep the case for moderator review.
+11. Write `case_events` for every step.
+
+### Raid economics and rate limits
+
+Raid economics are handled without a raid/group table in MVP:
+
+- Each sender gets their own case, even when content is identical across users.
+- New messages from the same sender attach to their existing unresolved case instead of creating more cases.
+- Prevention policies usually stop repeated offenses. If prevention is only `log`, messages continue attaching to the same unresolved case until it is dismissed/reverted/punished.
+- Model/provider calls go through an Effect v4 beta queue/outbox that enforces env-level rolling-window limits for polite OpenRouter/provider use. If the limiter is exhausted, fail to moderator review instead of dropping the case.
+- Discord moderation actions also go through an Effect-managed queue/outbox with rolling-window limits so punishment bursts do not fight API limits.
+
+Env-level limits:
+
+```txt
+MODEL_CALL_LIMIT
+MODEL_CALL_WINDOW_SECONDS
+MODEL_RETRY_MAX_ATTEMPTS
+MODEL_RETRY_INITIAL_DELAY_MS
+MODEL_RETRY_MAX_DELAY_MS
+MODERATION_ACTION_LIMIT
+MODERATION_ACTION_WINDOW_SECONDS
+GLOBAL_AUTH_MODE
+GLOBAL_AUTH_TEAM_ID
+GLOBAL_AUTH_USER_IDS
+```
+
+### Case cleanup, retention, and revert semantics
+
+Retention is a storage policy, not primarily a privacy boundary. Evidence is expected to be scammer/raider material and should remain available for audit and corpus work.
+
+Retention rules:
+
+- Evidence messages, attachment metadata, and stored attachment files are retained indefinitely by default.
+- `retention:case_days` defaults to `180` days for case metadata/review lifecycle cleanup across all statuses.
+- Do not hard-delete case rows while evidence rows require them for referential integrity. If cases are compacted or hard-deleted later, evidence rows must retain original Discord IDs and nullable source references so they do not dangle.
+- Pending corpus rows copied from a dismissed/reverted case are deleted; approved corpus rows remain.
+
+Corpus promotion is copy-on-promote: known text/image rows own their normalized text, copied image file, and embedding vector. They never share case message/attachment storage. Guild moderators can approve guild-scoped corpus rows for their own server. Global corpus promotion requires global authority. Pending corpus rows become `approved` when an authorized reviewer approves them; dismiss/revert deletes pending rows instead of leaving rejected corpus entries.
+
+`reverted` means best-effort undo for reversible bot actions:
+
+- `timeout`: remove timeout if still active.
+- `role`: remove the configured punishment role.
+- `kick`: cannot undo; record as irreversible in `case_events`.
+- `ban`: unban the user.
+- `delete_messages`: cannot undo Discord deletion; record as irreversible in `case_events`.
+
+Every revert attempt writes a `case_events` row with success/failure and irreversible-action metadata.
+
+### Global bans
+
+Global bans are users only.
+
+Publishing is manual-only from case review components. No automatic global-ban publishing from punished cases. The publisher must pass the env-controlled global authority check.
+
+Global authority modes:
+
+- `GLOBAL_AUTH_MODE=team`: use Discord's `GET /oauth2/applications/@me` with the bot token. The returned application object includes `team`; verify `team.id === GLOBAL_AUTH_TEAM_ID` and check `team.members` for the interaction user's ID with `membership_state = 2` (`ACCEPTED`).
+- `GLOBAL_AUTH_MODE=users`: check the interaction user's ID against `GLOBAL_AUTH_USER_IDS`, a comma-separated allowlist.
+
+If the user does not pass the configured global authority check, hide/deny global-ban publish and global-corpus promotion actions.
+
+On member join:
 
 1. `guildMemberAdd` fires.
 2. If guild opted into consuming global bans, check `global_bans` by `user_id`.
 3. Apply configured global-ban policy or notify moderators.
 
-## Slash commands
+On global-ban publish:
+
+1. Insert `global_bans` row with `published_by_user_id`.
+2. For opted-in guilds, sweep existing members for that user ID.
+3. Apply configured global-ban policy or notify moderators for matches.
+
+## Slash commands and components
+
+Authorization rules:
+
+- Server owner, members with `Manage Guild`, and members with `Administrator` can manage Honeybot by default.
+- Users/roles in `moderators` can manage Honeybot after being added with `/moderators` and are exempt from moderation triggers.
+- Globally authorized Honeybot operators can manage Honeybot on any server for debugging/support. Use the same global authority config as global-ban/corpus publishing: `GLOBAL_AUTH_MODE=team|users`, with `GLOBAL_AUTH_TEAM_ID` or `GLOBAL_AUTH_USER_IDS`.
+- All slash commands and review components must pass this authorization check unless a command is intentionally read-only/public.
+
+Moderation trigger bypass rules:
+
+- Always ignore the bot's own messages, bot users, webhooks, DMs, and non-guild messages.
+- Exempt server owner, members with `Manage Guild`, members with `Administrator`, and users/roles in `moderators`.
+- No separate bypass table for MVP; `moderators` doubles as the explicit bypass list.
+
+Case review is handled through Discord message components. Every case gets posted to the channel configured by `moderation:channel_id` with buttons/selects for reviewer actions. There are no `/review` slash commands.
+
+Settings command rules:
+
+- `/settings` opens a paginated Discord message-components v2 UI.
+- Settings are edited with dropdowns, buttons, and modals as needed; no free-form `/settings set <key> <value>` command.
+- The DB remains arbitrary `settings(guild_id, key, value)`, but the UI schema is explicit and typed.
+- The settings UI registry defines each setting's page, label, description, type, default, validation, parser, and formatter.
+- Unknown keys can exist in the DB for forward compatibility, but the UI only exposes known settings.
+
+Model command rules:
+
+- Use `/model`, not `/models`.
+- `/model set` requires only `purpose`; `provider`, `model_id`, and `enter_api_key` are optional.
+- If `enter_api_key=true`, the command opens a modal for API-key entry. If false/omitted, no modal appears.
+- `/model set` responses can be public because API keys are never included in command args or response content.
+- If no provider/model is already configured for a classifier purpose, `/model set` must require both `provider` and `model_id`.
+- If `provider` is supplied for a classifier purpose, validate `model_id` against that provider.
+- If `provider` is omitted for a classifier purpose, validate `model_id` against the purpose's existing provider.
+- For embedding purposes, provider/key can be changed but model IDs are fixed by supported provider profiles unless provider is `custom`/self-hosted.
+- API keys are submitted through the modal, encrypted immediately, and never echoed back in plaintext.
+- `/model keys` shows only redacted key hints per purpose.
 
 Initial commands:
 
 ```txt
-/settings set <key> <value>
-/settings get [key]
+/settings
 
 /honeypot add <channel>
 /honeypot remove <channel>
@@ -323,15 +567,14 @@ Initial commands:
 /moderators remove-role <role>
 /moderators list
 
-/policies set <detection> <phase> <action> [duration] [role]
+/policies set <scope> <action> [duration] [role] [delete_messages]
 /policies list
 
-/review next
-/review approve <case>
-/review dismiss <case>
-/review punish <case>
-/review approve-image <image_review>
-/review reject-image <image_review>
+/model set <purpose> [provider] [model_id] [enter_api_key]
+/model clear-key <purpose>
+/model clear <purpose>
+/model list
+/model keys
 
 /global-bans status
 /global-bans opt-in
@@ -361,15 +604,18 @@ Initial commands:
 - Implement honeypot pipeline.
 - Implement crosschannel pipeline.
 - Implement prevention/punishment policy resolver.
+- Implement dismissed/reverted cleanup for case messages, attachments, temp files, and pending corpus rows copied from the case.
 
-### Phase 4: known image system
+### Phase 4: known evidence corpus
 
 - Download/store image attachments.
-- Compute `sha256`.
-- Compute perceptual hash.
-- Add known image lookup.
-- Add `image_reviews` queue.
-- Add review commands to approve/reject known scam images.
+- Compute normalized text hashes and image `sha256` hashes.
+- Compute perceptual image hashes.
+- Add known text/image exact lookup.
+- Add embedding retrieval for known text/image entries.
+- Create pending `known_texts`/`known_images` rows for review candidates, with corpus-owned copies of text/image data and embeddings.
+- Post cases/evidence reviews to the configured moderation channel.
+- Handle approve/dismiss/punish/revert/approve-evidence/reject-evidence through Discord message components, not slash commands.
 
 ### Phase 5: classifier
 
@@ -377,29 +623,41 @@ Initial commands:
   - `prompts/scam-text.md`
   - `prompts/scam-image.md`
 - Load prompts as text; no componentized prompt framework unless prompt complexity actually grows.
+- Add provider/model routing per purpose:
+  - `text_classifier`
+  - `image_classifier`
+  - `text_embeddings`
+  - `image_embeddings`
 - Add classifier provider adapters:
   - OpenRouter for cheap/free model trials.
   - Anthropic Claude API.
   - OpenAI API.
   - OpenCode/local/custom provider path if practical.
-- Add strict JSON prompt/contract.
-- Classifier only reports scam likelihood/confidence and rationale; it never chooses moderation action.
+- Use Effect v4 beta around provider calls for queue/outbox execution, rolling-window rate limits, exponential backoff retries, timeouts, typed errors, and fail-to-review handling.
+- Add strict JSON prompt/contract with no `labels` field.
+- Classifier only reports scam/spam likelihood, confidence, and `reason`; it never chooses moderation action.
+- Reasons should be short and generic, e.g. `resembles known scam raid images`, `image depicts crypto payout`, `message promotes suspicious Discord invite`, `message points users to likely wallet drainer`.
 - Bot code compares confidence against guild settings and resolves the configured policy.
 - Store classifier result in case state + events.
-- Add corpus eval script using `~/Downloads/mrscam*` images for prompt/model trials.
+- Default hosted embeddings target is OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. First eval should verify shared text/image embedding space with a few controlled text↔image retrieval tests. If it fails, choose another OpenRouter-hosted multimodal embedding option rather than leaving OpenRouter as the default path.
+- Add corpus eval script using `EVAL_CORPUS_DIR`; local dev can point it at private corpora such as `~/Downloads/mrscam*` without making that path canonical.
 - Track eval results by model, prompt version, cost, latency, false positives, and false negatives.
 
 ### Phase 6: global bans
 
 - Add `global_bans` store.
+- Add env-controlled global authority: `GLOBAL_AUTH_MODE=team|users`, with `GLOBAL_AUTH_TEAM_ID` or `GLOBAL_AUTH_USER_IDS`.
+- For team mode, verify accepted Team membership via `GET /oauth2/applications/@me`.
+- Add manual global-ban publish action to case review components, visible/usable only by globally authorized users.
 - Add `guildMemberAdd` event.
 - Add opt-in slash commands.
 - Add join-time policy handling.
+- Add sweep of opted-in guilds when a global ban is published.
 
 ### Phase 7: ops hardening
 
 - Add Dockerfile and Railway notes.
-- Add retention cleanup job.
+- Add retention/compaction job for case metadata using `retention:case_days`, while keeping evidence messages/images indefinitely by default.
 - Add backup/export command.
 - Add audit/log embeds.
 - Add tests around policy resolution and pipelines.
@@ -408,7 +666,7 @@ Initial commands:
 
 - Exact default policies for fresh guilds.
 - Which OpenRouter models are good enough and cheap/free for image classification.
-- Whether image embeddings are MVP or post-MVP.
+- Which embedding dimensionality to use by default for `google/gemini-embedding-2` (768, 1536, or 3072).
 - How global-ban contribution/appeals work.
-- Whether known images are instance-global only or can be guild-local later.
+- Whether known text/image corpus entries are instance-global only or can be guild-local later.
 - Whether per-server BYOK is required for MVP or env-level provider keys are enough initially.
