@@ -1,0 +1,5 @@
+overrides:
+  undici: 6.27.0
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: true
