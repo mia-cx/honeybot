@@ -1,23 +1,60 @@
 # Honeybot
 
-Discord.js scaffold for a honeypot moderation bot.
+Honeybot is a Discord moderation bot for catching scam/spam raids with honeypot channels, cross-channel repeat detection, known scam evidence, and configurable per-server punishments.
 
-See [`docs/PLAN.md`](docs/PLAN.md) for the current implementation plan and schema draft.
+The current codebase is an early Discord.js scaffold. Key docs:
 
-## What is scaffolded
+- [`docs/SPEC.md`](docs/SPEC.md) — current product and architecture notes
+- [`docs/PLAN.md`](docs/PLAN.md) — implementation plan and schema draft
+- [`PRIVACY.md`](PRIVACY.md) — privacy policy
+- [`TERMS.md`](TERMS.md) — terms of service
 
-- Discord.js v14 TypeScript bot entrypoint.
-- Per-guild JSON configuration.
+## How it works
+
+Honeybot only reacts after one of two triggers:
+
+1. **Honeypot trigger** — a user posts in a configured honeypot channel.
+2. **Cross-channel trigger** — a user posts repeated/similar content across multiple channels within a configured window.
+
+After a trigger, the intended pipeline is:
+
+1. Create a moderation case.
+2. Cache involved messages and attachments, preserving original attachment files for moderation review.
+3. Run cheap evidence checks first:
+   - exact normalized-text hash match
+   - exact image byte hash match
+   - image perceptual hash match
+4. If no exact match is decisive, embed text/images and retrieve nearby known scam entries.
+5. Rerank retrieved evidence and build a short evidence summary.
+6. Ask the configured text/image classifier for scam likelihood, confidence, and reason.
+7. Apply the guild's configured policy: review, timeout, role, kick, or ban.
+
+The model does **not** decide moderation actions. It only reports likelihood/confidence/reason. Bot policy decides what to do.
+
+## Current scaffold
+
+Implemented now:
+
+- Discord.js v14 TypeScript entrypoint.
+- JSON config scaffold.
 - Honeypot channel detection.
 - Bypass checks for users, roles, and members with `ModerateMembers`.
-- Immediate timeout + message delete pipeline for honeypot messages.
-- Duplicate-message threshold detection across channels.
-- Cached message metadata, including attachment URLs.
-- Classifier interface with a safe placeholder implementation.
-- Configurable scam punishments: ban, timeout, role, delete-only, or log-only.
-- Opt-in global ban list interface with a no-op implementation.
+- Immediate honeypot timeout/delete pipeline.
+- Duplicate-message threshold detector.
+- Message/attachment metadata cache.
+- Placeholder classifier that always returns `needs_review`.
+- Configurable action types: ban, timeout, role, delete-only, log-only.
+- Prompt files under `prompts/` as placeholders.
 
-The classifier is intentionally not wired yet. The placeholder returns `needs_review`, so AI-based punishment is disabled until we choose the model and moderation policy.
+Not implemented yet:
+
+- Drizzle/SQLite persistence.
+- Slash command registration/handlers.
+- Known scam text/image corpus.
+- Embeddings and similarity retrieval.
+- Real classifier providers.
+- Moderation-channel case posts with message-component review actions.
+- Global user ban checks.
 
 ## Setup
 
@@ -60,117 +97,15 @@ npm run dev       # run with tsx watch
 npm run typecheck # type-check only
 npm run build     # emit dist/
 npm start         # run dist/index.js
+npm run lint      # lint source
 ```
 
-## Proposed codebase shape
+## Hosting notes
 
-```text
-src/
-  index.ts                         # bootstrap only: config, client, registries
-  discord/
-    client.ts                      # client construction + intents
-    events/
-      messageCreate.ts             # message pipeline entrypoint only
-      interactionCreate.ts         # slash command dispatcher only
-      ready.ts                     # startup logging / command registration hook
-    commands/
-      index.ts                     # exports command registry
-      honeypot.ts                  # /honeypot configure/status
-      punishments.ts               # /punishment configure/show
-      reviewQueue.ts               # /review next/approve/reject
-      globalBanList.ts             # /global-ban opt-in/status
-    commandKit/
-      command.ts                   # shared SlashCommand module interface
-      registerCommands.ts          # deploy guild/global slash commands
-      permissions.ts               # command permission helpers
-  moderation/
-    pipelines/
-      handleHoneypotMessage.ts
-      handleDuplicateMessage.ts
-      classifyAndPunish.ts
-    policies/
-      bypassPolicy.ts
-      punishmentPolicy.ts
-      duplicatePolicy.ts
-    actions/
-      deleteMessage.ts
-      punishMember.ts
-      logModerationEvent.ts
-  classification/
-    scamClassifier.ts              # semantic/multimodal classifier interface
-    classifierPrompt.ts
-    knownScamImages.ts             # exact + similarity match before AI
-  reviewQueue/
-    reviewQueue.ts                 # admin queue domain API
-    scamImageReviewQueue.ts
-  persistence/
-    guildConfigStore.ts
-    messageCacheStore.ts
-    knownScamImageStore.ts
-    globalBanListStore.ts
-  config/
-    env.ts
-    schema.ts
-  shared/
-    logger.ts
-    result.ts                      # only if we choose Result-style boundaries
-    ids.ts
-```
+Planned default deployment shape:
 
-Slash commands should be standalone modules that export their Discord command definition plus handler. Shared behavior should live in deeper domain modules, not in the command files. Message events stay focused on detection and moderation; no text-command parsing.
+- SQLite database at `data/honeybot.sqlite`
+- local image/evidence storage under `data/images/`
+- `data/` mounted as a persistent Docker/Railway volume
 
-## Data/storage proposal
-
-Use Drizzle with SQLite as the default durable store so self-hosters only need a writable volume. Keep image bytes out of the relational tables by default: store evidence and known scam image files in a bot-managed filesystem directory, with SQLite rows holding hashes, file keys, status, and moderation metadata. Keep the storage behind an adapter so larger deployments can move images to S3/R2/MinIO later.
-
-Core tables:
-
-- `settings`: per-guild scalar settings like moderation channel, thresholds, and feature flags.
-- `honeypots`: honeypot channel rows.
-- `moderators`: moderator user/role rows.
-- `policies`: structured action policies like review, timeout, role, kick, or ban.
-- `cases`: honeypot/crosschannel incidents with current state, latest reason, and active action summary.
-- `case_messages`: messages involved in a case, including normalized content and deletion state.
-- `case_attachments`: attachment metadata, byte hash, perceptual hash, optional embedding id, content type, storage key, and retention status.
-- `case_events`: append-only audit log for detections, classifier results, moderator decisions, and bot actions.
-- `image_reviews`: admin queue for scam-classified images before they become known-bad.
-- `known_images`: approved known scam images with `sha256`, perceptual hash, optional embedding vector, source case, reviewer, and storage key.
-- `global_bans`: opt-in global user ban list entries only; checked on member join.
-
-Case state:
-
-- `trigger_type`: `honeypot` or `crosschannel` only.
-- `status`: `pending_review`, `punished`, `dismissed`, or `reverted`.
-- `action_taken`: latest action category, including `review`, `timeout`, `role`, `kick`, `ban`, `dismiss`, or `revert`.
-- `reason`: latest templated reason, such as `classifier identified potential scam. confidence: 94%` or `image matches corpus. similarity: 98%`.
-- `case_events` stores the full append-only history.
-
-Image storage should be hidden behind an adapter interface so local disk, SQLite blobs, S3, R2, or MinIO can be swapped without touching moderation logic. Default filesystem layout:
-
-- `data/honeybot.sqlite` for the SQLite database.
-- `data/images/evidence/{guildId}/{caseId}/{attachmentId}` for temporary case evidence.
-- `data/images/known-scam-images/{sha256}` for approved known-bad images.
-
-For Docker/Railway, mount `data/` as the persistent volume. Without a volume, restarts or redeploys can lose config, moderation cases, and known scam images.
-
-Known scam image lookup should run after a honeypot or crosschannel trigger and before the multimodal classifier:
-
-1. Compute `sha256` for exact byte match.
-2. Compute a perceptual hash for image-level similarity.
-3. Optionally compute/store a high-dimensional image embedding for semantic similarity exploration and admin tooling.
-4. If exact match exists, immediately apply the configured scam action.
-5. If perceptual hash is within a very strict Hamming-distance threshold, immediately apply the configured scam action.
-6. Otherwise, fall through to the semantic/multimodal classifier.
-
-## Next planning topics
-
-1. Classifier provider and prompt contract.
-2. Attachment fetching/storage policy.
-3. Moderator review flow and log channel embeds.
-4. Global ban list consent, API shape, and appeal process.
-5. Safety thresholds before destructive actions.
-6. Known scam image database:
-   - Images classified as scam should enter an admin review queue.
-   - Approved images are stored as known scam images with byte hashes and perceptual/similarity hashes.
-   - New messages with byte-identical images, or images above a very high similarity threshold, can bypass the semantic classifier and go straight to the configured scam action.
-   - This should reduce multimodal token spend while keeping humans in the loop for adding new known-bad images.
+Without a persistent volume, redeploys can lose config, cases, and known scam evidence.
