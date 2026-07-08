@@ -1,0 +1,988 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Collection } from 'discord.js';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { registerCommands } from '../src/commands/register.js';
+import {
+  caseReviewMessage,
+  caseReviewResolutionUpdate,
+  caseReviewRevertUpdate,
+  type CaseReviewInput,
+} from '../src/interactions/caseReviewUi.js';
+import { OpenRouterScamClassifier } from '../src/services/classifier.js';
+import { OpenRouterEmbeddings } from '../src/services/embeddings.js';
+import { GlobalBanService } from '../src/services/globalBanList.js';
+import {
+  applyPolicyForUser,
+  deleteMessage,
+  dmPunishedUser,
+  revertPolicyForUser,
+} from '../src/services/moderation.js';
+import { loadClassifierPrompt } from '../src/services/prompts.js';
+import { FileStorage } from '../src/storage/fileStorage.js';
+import { testDatabase } from './helpers.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe('command registration', () => {
+  it('registers only the combined settings command plus user-installed global admin actions', async () => {
+    const guildSet = vi.fn();
+    const appSet = vi.fn((commands) =>
+      collection(
+        commands.map(
+          (command: { name: string; type?: number }, index: number) => ({
+            ...command,
+            id: String(index),
+          }),
+        ),
+      ),
+    );
+    const client = {
+      guilds: {
+        cache: new Map([
+          [
+            'guild',
+            {
+              commands: {
+                fetch: vi.fn(async () =>
+                  collection([{ name: 'stale', type: 1 }]),
+                ),
+                set: guildSet,
+              },
+            },
+          ],
+        ]),
+      },
+      application: {
+        commands: {
+          fetch: vi.fn(async () => collection([{ name: 'old', type: 1 }])),
+          set: appSet,
+        },
+      },
+    };
+
+    await registerCommands(client as any);
+
+    expect(guildSet).toHaveBeenCalledWith([]);
+    const commands = appSet.mock.calls[0]?.[0] as Array<{
+      name: string;
+      type?: number;
+      integrationTypes?: number[];
+      options?: Array<{ name: string }>;
+    }>;
+    expect(commands.map((command) => command.name)).toEqual([
+      'settings',
+      'admin',
+      'Mark case as known scam',
+      'Ban transgressor globally',
+    ]);
+    expect(
+      commands
+        .find((command) => command.name === 'admin')
+        ?.options?.map((option: { name: string }) => option.name),
+    ).toEqual(['add', 'corpus']);
+    expect(
+      commands.find((command) => command.name === 'settings')?.integrationTypes,
+    ).toEqual([0]);
+    expect(
+      commands
+        .filter((command) => command.name !== 'settings')
+        .map((command) => command.integrationTypes),
+    ).toEqual([[1], [1], [1]]);
+  });
+});
+
+describe('case review UI', () => {
+  it('builds pending case messages with stable case, signal, and action containers', () => {
+    const message = caseReviewMessage(caseInput());
+    const components = message.components as Array<any>;
+
+    expect(message.flags).toBe(1 << 15);
+    expect(message.allowedMentions).toEqual({
+      users: ['user', 'mod-user'],
+      roles: ['mod-role'],
+    });
+    expect(components).toHaveLength(4);
+    expect(textContent(components)).toContain('# 🍯 Case `case1`');
+    expect(textContent(components)).toContain(
+      'Likelihood of being a scam: 88%',
+    );
+    expect(customIds(components)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
+    ]);
+  });
+
+  it('renders prevention and resolution variants for every policy type', () => {
+    const roleCase = caseReviewMessage(
+      caseInput({
+        prevention: policy('role', { roleId: 'role' }),
+        analysis: null,
+        triggerType: 'crosschannel',
+        duplicateChannelIds: ['other'],
+        triggerMessageDeleted: false,
+      }),
+    ).components as Array<any>;
+    expect(textContent(roleCase)).toContain('<@user> was given <@&role>');
+    expect(textContent(roleCase)).toContain(
+      'duplicate messages across <#channel>, <#other>',
+    );
+    expect(textContent(roleCase)).toContain(
+      'Likelihood of being a scam: pending',
+    );
+
+    const logCase = caseReviewMessage(
+      caseInput({
+        prevention: policy('log'),
+        messageContent: '',
+        moderatorUserIds: [],
+        moderatorRoleIds: [],
+      }),
+    ).components as Array<any>;
+    expect(textContent(logCase)).toContain('@moderators new case triggered');
+    expect(textContent(logCase)).toContain('case was logged for review');
+    expect(textContent(logCase)).toContain('_empty or attachment-only_');
+
+    for (const action of ['kick', 'timeout', 'role', 'log'] as const) {
+      const resolved = caseReviewResolutionUpdate(
+        caseReviewMessage(caseInput()).components as Array<any>,
+        {
+          caseId: 'case1',
+          status: 'punished',
+          actorId: 'actor',
+          userId: 'user',
+          detail: 'done',
+          punishment: policy(action, {
+            roleId: action === 'role' ? 'role' : null,
+          }),
+          canRevert: true,
+        },
+      ).components as Array<any>;
+      expect(textContent(resolved)).toContain('Resolved by <@actor>');
+    }
+  });
+
+  it('adds and removes resolution containers without mutating case and signal containers', () => {
+    const existing = caseReviewMessage(caseInput()).components as Array<any>;
+    const resolved = caseReviewResolutionUpdate(existing, {
+      caseId: 'case1',
+      status: 'punished',
+      actorId: 'actor',
+      userId: 'user',
+      detail: 'done',
+      punishment: policy('ban'),
+      canRevert: true,
+    }).components as Array<any>;
+    expect(textContent(resolved)).toContain('# 🔨 <@user> banned');
+    expect(customIds(resolved)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
+      'case:revert:case1',
+    ]);
+
+    const reverted = caseReviewRevertUpdate(resolved, {
+      caseId: 'case1',
+      punishment: policy('ban'),
+    }).components as Array<any>;
+    expect(textContent(reverted)).not.toContain('Resolved by');
+    expect(customIds(reverted)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
+    ]);
+  });
+});
+
+describe('OpenRouterScamClassifier', () => {
+  it('returns needs_review when provider/model/key is not configured', async () => {
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'custom',
+          modelId: null,
+          apiKey: null,
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    await expect(
+      classifier.classify(cachedMessage(), classifierContext()),
+    ).resolves.toEqual({
+      verdict: 'needs_review',
+      confidence: 0,
+      rationale: 'Classifier provider/model/key is not configured.',
+      labels: [],
+    });
+  });
+
+  it('keeps text classifier payload text-only even when proximal refs have images', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  likelihood: 'not_scam',
+                  confidence: 0.9,
+                  reason: 'parody text',
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    await classifier.classify(
+      cachedMessage({ content: 'totally real free nitro wink' }),
+      classifierContext({
+        proximalKnownScams: [
+          {
+            id: 'known',
+            sourceCaseId: 'case',
+            score: 0.75,
+            description: 'Fake Nitro',
+            scamReason: 'phishing',
+            normalizedText: 'free nitro claim',
+            images: [
+              {
+                id: 'img',
+                storageKey: 'known.png',
+                contentType: 'image/png',
+                sizeBytes: 3,
+                dataUrl: 'data:image/png;base64,a25vd24=',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.messages[1].content).toHaveLength(1);
+    expect(body.messages[1].content).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'image_url' })]),
+    );
+    expect(JSON.parse(body.messages[1].content[0].text)).toMatchObject({
+      currentCase: { message: 'totally real free nitro wink' },
+      proximalKnownScams: [
+        expect.not.objectContaining({ images: expect.anything() }),
+      ],
+    });
+  });
+
+  it('parses successful JSON responses and sends image attachments', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  likelihood: 'scam',
+                  confidence: 0.97,
+                  reason: 'fake nitro',
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    const result = await classifier.classify(
+      cachedMessage({
+        attachments: [
+          {
+            id: 'current',
+            name: 'current.png',
+            contentType: 'image/png',
+            url: 'https://cdn.test/image.png',
+            proxyUrl: 'https://proxy.test/image.png',
+            dataUrl: 'data:image/png;base64,Y3VycmVudA==',
+          },
+          {
+            id: 'current-2',
+            name: 'current-2.jpg',
+            contentType: 'image/jpeg',
+            url: 'https://cdn.test/image-2.jpg',
+            proxyUrl: 'https://proxy.test/image-2.jpg',
+          },
+        ] as any,
+      }),
+      classifierContext({
+        evidenceSummary: 'evidence',
+        proximalKnownScams: [
+          {
+            id: 'known',
+            sourceCaseId: 'case',
+            score: 0.82,
+            description: 'Fake Nitro',
+            scamReason: 'phishing',
+            normalizedText: 'free nitro claim',
+            images: [
+              {
+                id: 'img',
+                storageKey: 'known.png',
+                contentType: 'image/png',
+                sizeBytes: 3,
+                dataUrl: 'data:image/png;base64,a25vd24=',
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual({
+      verdict: 'scam',
+      confidence: 0.97,
+      rationale: 'fake nitro',
+      labels: [],
+    });
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(
+      body.messages[1].content.filter(
+        (part: { type?: string }) => part.type === 'image_url',
+      ),
+    ).toEqual([
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,Y3VycmVudA==' },
+      },
+      {
+        type: 'image_url',
+        image_url: { url: 'https://proxy.test/image-2.jpg' },
+      },
+      {
+        type: 'image_url',
+        image_url: { url: 'data:image/png;base64,a25vd24=' },
+      },
+    ]);
+    expect(body.messages[1].content).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'text',
+          text: expect.stringContaining('Known scam 1 image 1'),
+        }),
+      ]),
+    );
+    const promptJson = JSON.parse(body.messages[1].content[0].text);
+    expect(promptJson).toEqual(
+      expect.not.objectContaining({ evidenceSummary: expect.anything() }),
+    );
+    expect(promptJson.proximalKnownScams[0]).toMatchObject({
+      reference: 'known_scam_1',
+      similarity: 0.82,
+      scamReason: 'phishing',
+    });
+  });
+
+  it('runs text additional signal models with the same text primary prompt payload', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'scam',
+                    confidence: 0.7,
+                    reason: 'second opinion',
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'primary-model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+        providerConfig: vi.fn((provider: string, modelId: string | null) => ({
+          provider,
+          modelId,
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+      {
+        text: { provider: 'openrouter', models: ['extra-a', 'extra-b'] },
+        image: { provider: 'openrouter', models: ['image-extra'] },
+      },
+    );
+
+    const results = await classifier.additionalSignals?.(
+      cachedMessage({ content: 'free nitro' }),
+      classifierContext({ evidenceSummary: 'same evidence' }),
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        modelId: 'extra-a',
+        rationale: 'second opinion',
+      }),
+      expect.objectContaining({
+        modelId: 'extra-b',
+        rationale: 'second opinion',
+      }),
+    ]);
+    const bodies = fetchMock.mock.calls.map((call) =>
+      JSON.parse(String(call[1]?.body)),
+    );
+    expect(bodies.map((body) => body.model)).toEqual(['extra-a', 'extra-b']);
+    expect(bodies[0].messages[1].content).toEqual(
+      bodies[1].messages[1].content,
+    );
+    expect(JSON.parse(bodies[0].messages[1].content[0].text)).toEqual(
+      expect.not.objectContaining({ evidenceSummary: expect.anything() }),
+    );
+  });
+
+  it('runs image additional signal models for multimodal cases', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'scam',
+                    confidence: 0.8,
+                    reason: 'image second opinion',
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'primary-model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+        providerConfig: vi.fn((provider: string, modelId: string | null) => ({
+          provider,
+          modelId,
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+      {
+        text: { provider: 'openrouter', models: ['text-extra'] },
+        image: { provider: 'openrouter', models: ['image-extra'] },
+      },
+    );
+
+    const results = await classifier.additionalSignals?.(
+      cachedMessage({
+        attachments: [
+          {
+            id: 'current',
+            name: 'current.png',
+            contentType: 'image/png',
+            url: 'https://cdn.test/image.png',
+          },
+        ] as any,
+      }),
+      classifierContext(),
+    );
+
+    expect(results).toEqual([
+      expect.objectContaining({
+        modelId: 'image-extra',
+        rationale: 'image second opinion',
+      }),
+    ]);
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    expect(body.model).toBe('image-extra');
+    expect(body.messages[1].content).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'image_url' })]),
+    );
+  });
+
+  it('turns OpenRouter failures into review reasons with rate-limit hints', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('slow down', {
+        status: 429,
+        headers: { 'retry-after': '12' },
+      }),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    const result = await classifier.classify(
+      cachedMessage(),
+      classifierContext(),
+    );
+    expect(result.verdict).toBe('needs_review');
+    expect(result.rationale).toContain('HTTP 429');
+    expect(result.rationale).toContain('Retry after 12s');
+  });
+});
+
+describe('OpenRouterEmbeddings', () => {
+  it('requests text and image embeddings with configured dimensions', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0] }] }), {
+          status: 200,
+        }),
+    );
+    const embedder = new OpenRouterEmbeddings(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'embed-model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+      3,
+    );
+
+    await expect(embedder.embedText('guild', 'free nitro')).resolves.toEqual({
+      provider: 'openrouter',
+      model: 'embed-model',
+      dimensions: 3,
+      vector: [1, 0, 0],
+    });
+    await expect(
+      embedder.embedImage('guild', {
+        contentType: 'image/png',
+        name: 'proof.png',
+        url: 'https://cdn.test/proof.png',
+      }),
+    ).resolves.toMatchObject({ vector: [1, 0, 0] });
+
+    const bodies = fetchMock.mock.calls.map((call) =>
+      JSON.parse(String(call[1]?.body)),
+    );
+    expect(bodies[0]).toMatchObject({
+      model: 'embed-model',
+      input: 'free nitro',
+      dimensions: 3,
+    });
+    expect(bodies[1].input[0].content).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'image_url' })]),
+    );
+  });
+});
+
+describe('moderation actions', () => {
+  it('applies and reverts policy actions at Discord boundaries', async () => {
+    const member = fakeMember();
+    const guild = fakeGuild(member);
+
+    await expect(
+      applyPolicyForUser(
+        guild,
+        'user',
+        policy('timeout', { durationSeconds: 999999999 }),
+        'reason',
+      ),
+    ).resolves.toBe('timeout applied');
+    expect(member.timeout).toHaveBeenCalledWith(
+      28 * 24 * 60 * 60 * 1000,
+      'reason',
+    );
+    await expect(
+      applyPolicyForUser(
+        guild,
+        'user',
+        policy('role', { roleId: 'role' }),
+        'reason',
+      ),
+    ).resolves.toBe('role applied');
+    expect(member.roles.add).toHaveBeenCalledWith('role', 'reason');
+    await expect(
+      applyPolicyForUser(guild, 'user', policy('kick'), 'reason'),
+    ).resolves.toBe('user kicked');
+    await expect(
+      applyPolicyForUser(
+        guild,
+        'user',
+        policy('ban', { deleteMessages: true }),
+        'reason',
+      ),
+    ).resolves.toBe('user banned');
+    expect(guild.members.ban).toHaveBeenCalledWith(
+      'user',
+      expect.objectContaining({ deleteMessageSeconds: 604800 }),
+    );
+
+    await expect(
+      revertPolicyForUser(guild, 'user', policy('timeout'), 'undo'),
+    ).resolves.toBe('timeout removed');
+    await expect(
+      revertPolicyForUser(
+        guild,
+        'user',
+        policy('role', { roleId: 'role' }),
+        'undo',
+      ),
+    ).resolves.toBe('role removed');
+    await expect(
+      revertPolicyForUser(guild, 'user', policy('kick'), 'undo'),
+    ).resolves.toBe('kick cannot be undone');
+  });
+
+  it('handles missing members, missing roles, and message deletion', async () => {
+    const guild = fakeGuild(null);
+    await expect(
+      applyPolicyForUser(guild, 'user', policy('timeout'), 'reason'),
+    ).resolves.toContain('no longer in the guild');
+    await expect(
+      applyPolicyForUser(guild, 'user', policy('role'), 'reason'),
+    ).rejects.toThrow('missing role_id');
+    await expect(
+      revertPolicyForUser(guild, 'user', policy('role'), 'undo'),
+    ).resolves.toBe('role policy had no role');
+
+    await expect(
+      deleteMessage({ deletable: false, delete: vi.fn() } as any),
+    ).resolves.toBe(false);
+    const deletable = { deletable: true, delete: vi.fn(async () => undefined) };
+    await expect(deleteMessage(deletable as any)).resolves.toBe(true);
+    expect(deletable.delete).toHaveBeenCalled();
+  });
+
+  it('sends Components V2 punishment DMs and records failures', async () => {
+    const caseStore = {
+      listCaseMessages: vi.fn(async () => [{ content: 'bad message' }]),
+      listCaseAttachments: vi.fn(async () => [
+        {
+          id: 1,
+          storageKey: 'stored.png',
+          contentType: 'image/png',
+          sizeBytes: 10,
+          discordAttachmentId: 'att',
+          name: 'proof.png',
+        },
+      ]),
+      addEvent: vi.fn(async () => undefined),
+    };
+    const member = fakeMember();
+    await dmPunishedUser({
+      member,
+      caseId: 'case1',
+      action: 'ban',
+      reason: 'reason',
+      caseStore: caseStore as any,
+      storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+    });
+    expect(member.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        flags: 1 << 15,
+        components: expect.any(Array),
+      }),
+    );
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'dm_notified',
+      'bot',
+      null,
+      'Punishment DM sent',
+      expect.any(Object),
+    );
+
+    member.send.mockRejectedValueOnce(new Error('closed'));
+    await dmPunishedUser({
+      member,
+      caseId: 'case1',
+      action: 'kick',
+      reason: 'reason',
+      caseStore: caseStore as any,
+      storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+    });
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      expect.objectContaining({ error: 'closed' }),
+    );
+  });
+});
+
+describe('FileStorage and prompts', () => {
+  it('stores downloaded files safely and removes them', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(Buffer.from('hello'), { status: 200 }),
+    );
+    const storage = new FileStorage(root);
+
+    const stored = await storage.saveFromUrl(
+      'https://cdn.test/file',
+      ['guild', 'case'],
+      '../bad name.png',
+    );
+    expect(stored.storageKey).toMatch(
+      /^guild\/case\/[a-f0-9]{64}-bad_name\.png$/,
+    );
+    await expect(storage.read(stored.storageKey)).resolves.toEqual(
+      Buffer.from('hello'),
+    );
+    await storage.remove(stored.storageKey);
+    await expect(readFile(stored.path)).rejects.toThrow();
+    await storage.remove(null);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('normalizes downloaded model evidence images to webp', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const svg = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="red"/></svg>',
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(svg, {
+        status: 200,
+        headers: { 'content-type': 'image/svg+xml' },
+      }),
+    );
+    const storage = new FileStorage(root);
+
+    const stored = await storage.saveFromUrl(
+      'https://cdn.test/image.png',
+      ['guild', 'case'],
+      'image.svg',
+      { contentType: 'image/svg+xml' },
+    );
+
+    expect(stored.contentType).toBe('image/webp');
+    expect(stored.fileName).toBe('image.webp');
+    expect(stored.normalized).toBe(true);
+    expect(stored.storageKey).toMatch(/\.webp$/);
+    await expect(storage.read(stored.storageKey)).resolves.not.toEqual(svg);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('loads bundled classifier prompts', async () => {
+    await expect(loadClassifierPrompt('scam-text')).resolves.toContain(
+      'text classifier inside Honeybot',
+    );
+    await expect(loadClassifierPrompt('scam-image')).resolves.toContain(
+      'multimodal classifier inside Honeybot',
+    );
+  });
+});
+
+describe('GlobalBanService', () => {
+  it('bans joining users when their guild opted in', async () => {
+    const database = testDatabase();
+    database.sqlite
+      .prepare(
+        'insert into global_bans (id, user_id, published_by_user_id, status, reason, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?)',
+      )
+      .run('ban1', 'user', 'admin', 'active', 'bad', 'now', 'now');
+    const configStore = {
+      getGuildConfig: vi.fn(async () => ({ globalBansEnabled: true })),
+    };
+    const queue = {
+      enqueue: vi.fn(async (_guildId: string, run: () => Promise<unknown>) =>
+        run(),
+      ),
+    };
+    const service = new GlobalBanService(
+      database.db,
+      configStore as any,
+      queue as any,
+    );
+    const member = fakeMember();
+
+    await service.handleJoin(member as any);
+
+    expect(member.guild.members.ban).toHaveBeenCalledWith('user', {
+      reason: 'Honeybot global ban: bad',
+    });
+    database.sqlite.close();
+  });
+});
+
+function immediateQueue() {
+  return {
+    enqueue: async (_guildId: string, run: () => Promise<unknown>) => run(),
+  } as any;
+}
+
+function classifierContext(overrides: Record<string, unknown> = {}) {
+  return { evidenceSummary: '', proximalKnownScams: [], ...overrides } as any;
+}
+
+function cachedMessage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'message',
+    guildId: 'guild',
+    channelId: 'channel',
+    authorId: 'user',
+    content: 'free nitro',
+    normalizedContent: 'free nitro',
+    textHash: 'hash',
+    attachments: [],
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    reason: 'honeypot',
+    ...overrides,
+  } as any;
+}
+
+function caseInput(overrides: Partial<CaseReviewInput> = {}): CaseReviewInput {
+  return {
+    caseId: 'case1',
+    userId: 'user',
+    channelId: 'channel',
+    triggerType: 'honeypot',
+    duplicateChannelIds: [],
+    moderatorUserIds: ['mod-user'],
+    moderatorRoleIds: ['mod-role'],
+    status: 'pending_review',
+    reason: 'reason',
+    messageContent: 'free nitro',
+    attachments: [],
+    storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+    prevention: policy('timeout'),
+    punishment: policy('ban'),
+    preventionApplied: true,
+    preventionAppliedAtMs: 1_700_000_000_000,
+    triggerMessageDeleted: true,
+    analysis: {
+      confidence: 0.88,
+      reason: 'classifier',
+      shouldPunish: false,
+      evidence: [
+        {
+          type: 'classifier',
+          matched: true,
+          score: 0.88,
+          summary: 'fake nitro',
+          metadata: { verdict: 'scam' },
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+function policy(actionType: any, overrides: Record<string, unknown> = {}) {
+  return {
+    scope: 'punishment',
+    actionType,
+    durationSeconds: 1_800,
+    roleId: null,
+    deleteMessages: true,
+    ...overrides,
+  } as any;
+}
+
+function fakeMember() {
+  const member = {
+    id: 'user',
+    timeout: vi.fn(async () => undefined),
+    kick: vi.fn(async () => undefined),
+    roles: {
+      add: vi.fn(async () => undefined),
+      remove: vi.fn(async () => undefined),
+    },
+    send: vi.fn(async () => undefined),
+    guild: { id: 'guild', name: 'Guild', members: undefined as any },
+  };
+  member.guild.members = {
+    fetch: vi.fn(async () => member),
+    ban: vi.fn(async () => undefined),
+    unban: vi.fn(async () => undefined),
+  };
+  return member as any;
+}
+
+function fakeGuild(member: any) {
+  return {
+    members: {
+      fetch: vi.fn(async () => member),
+      ban: vi.fn(async () => undefined),
+      unban: vi.fn(async () => undefined),
+    },
+  } as any;
+}
+
+function collection(items: Array<any>) {
+  return new Collection(
+    items.map((item, index) => [item.id ?? `${item.name}-${index}`, item]),
+  );
+}
+
+function textContent(components: Array<any>): string {
+  const result: string[] = [];
+  const visit = (component: any) => {
+    if (typeof component.content === 'string') result.push(component.content);
+    for (const child of component.components ?? []) visit(child);
+  };
+  for (const component of components) visit(component);
+  return result.join('\n');
+}
+
+function customIds(components: Array<any>): string[] {
+  const result: string[] = [];
+  const visit = (component: any) => {
+    if (typeof component.custom_id === 'string')
+      result.push(component.custom_id);
+    for (const child of component.components ?? []) visit(child);
+  };
+  for (const component of components) visit(component);
+  return result;
+}

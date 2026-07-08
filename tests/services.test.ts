@@ -1,0 +1,1052 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
+import {
+  cases,
+  caseEvents,
+  caseMessages,
+  knownImages,
+  knownTexts,
+} from '../src/db/schema.js';
+import { defaultGuildConfig } from '../src/domain/defaults.js';
+import { FairQueue } from '../src/queues/fairQueue.js';
+import { CaseStore } from '../src/services/caseStore.js';
+import { DuplicateDetector } from '../src/services/duplicateDetector.js';
+import type { EmbeddingResult } from '../src/services/embeddings.js';
+import {
+  EvidenceAnalyzer,
+  type AnalysisProgress,
+} from '../src/services/evidenceAnalyzer.js';
+import { MessageCache } from '../src/services/messageCache.js';
+import { ModelStore } from '../src/services/modelStore.js';
+import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
+import type { CachedMessage, ClassificationResult } from '../src/types.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  cleanupTempDirs();
+});
+
+describe('MessageCache', () => {
+  it('normalizes text and preserves stored attachment metadata', () => {
+    const cache = new MessageCache();
+    const message = fakeMessage({
+      content: ' FREE   Nitro!!! ',
+      attachments: [],
+    });
+    const cached = cache.cache(message, 'honeypot', [
+      storedAttachment({ id: 'att' }),
+    ]);
+
+    expect(cached.normalizedContent).toBe('free nitro');
+    expect(cached.textHash).toHaveLength(64);
+    expect(cached.attachments).toEqual([
+      expect.objectContaining({ id: 'att', sha256: 'sha' }),
+    ]);
+    expect(cache.get(message.id)).toBe(cached);
+  });
+
+  it('trims old entries after the fixed cache limit', () => {
+    const cache = new MessageCache();
+    for (let i = 0; i < 501; i += 1)
+      cache.cache(fakeMessage({ id: `m${i}` }), 'crosschannel');
+
+    expect(cache.get('m0')).toBeNull();
+    expect(cache.get('m500')?.id).toBe('m500');
+  });
+});
+
+describe('DuplicateDetector', () => {
+  it('matches repeated content across distinct channels within the window', () => {
+    const detector = new DuplicateDetector();
+    const config = defaultGuildConfig({
+      crosschannelChannelThreshold: 2,
+      crosschannelWindowSeconds: 60,
+    });
+
+    expect(
+      detector.record(
+        fakeMessage({ channelId: 'c1', content: 'free nitro' }),
+        config,
+      ),
+    ).toEqual({ matched: false, channelIds: ['c1'] });
+    expect(
+      detector.record(
+        fakeMessage({ channelId: 'c2', content: 'FREE   NITRO!!!' }),
+        config,
+      ),
+    ).toEqual({ matched: true, channelIds: ['c1', 'c2'] });
+  });
+
+  it('ignores disabled or empty cross-channel signals and sweeps expired entries', () => {
+    const detector = new DuplicateDetector();
+    const disabled = defaultGuildConfig({ crosschannelEnabled: false });
+    expect(detector.record(fakeMessage({ content: 'same' }), disabled)).toEqual(
+      { matched: false, channelIds: [] },
+    );
+
+    const now = vi.spyOn(Date, 'now');
+    now.mockReturnValue(1_000);
+    const config = defaultGuildConfig({
+      crosschannelChannelThreshold: 2,
+      crosschannelWindowSeconds: 1,
+    });
+    detector.record(fakeMessage({ channelId: 'c1', content: 'same' }), config);
+    now.mockReturnValue(3_000);
+    detector.sweep(1_000);
+    expect(
+      detector.record(
+        fakeMessage({ channelId: 'c2', content: 'same' }),
+        config,
+      ),
+    ).toEqual({ matched: false, channelIds: ['c2'] });
+  });
+});
+
+describe('FairQueue', () => {
+  it('runs successful jobs and propagates failures', async () => {
+    const queue = new FairQueue({
+      name: 'test',
+      globalLimit: 10,
+      perGuildLimit: 10,
+      windowMs: 1_000,
+    });
+
+    await expect(queue.enqueue('guild', async () => 'ok')).resolves.toBe('ok');
+    await expect(
+      queue.enqueue('guild', async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+  });
+});
+
+describe('ModelStore', () => {
+  it('uses bot defaults without leaking default API-key hints', async () => {
+    const database = testDatabase();
+    const store = new ModelStore(database.db, testModelDefaults());
+
+    await expect(store.get('guild', 'text_classifier')).resolves.toMatchObject({
+      provider: 'openrouter',
+      modelId: 'text-model',
+      apiKey: 'default-openrouter-key',
+      apiKeyHint: null,
+    });
+
+    database.sqlite.close();
+  });
+
+  it('stores, hints, decrypts, and clears guild BYOK keys', async () => {
+    const database = testDatabase();
+    const store = new ModelStore(database.db, testModelDefaults());
+
+    await store.setModel(
+      'guild',
+      'text_classifier',
+      'openrouter',
+      'override-model',
+    );
+    await store.setApiKey('guild', 'text_classifier', 'sk-1234567890');
+    await expect(store.get('guild', 'text_classifier')).resolves.toMatchObject({
+      provider: 'openrouter',
+      modelId: 'override-model',
+      apiKey: 'sk-1234567890',
+      apiKeyHint: 'sk-1*****7890',
+    });
+
+    await store.clearApiKey('guild', 'text_classifier');
+    await expect(store.get('guild', 'text_classifier')).resolves.toMatchObject({
+      apiKey: 'default-openrouter-key',
+      apiKeyHint: null,
+    });
+
+    database.sqlite.close();
+  });
+
+  it('requires a valid encryption key before storing BYOK keys', async () => {
+    const database = testDatabase();
+    const missing = new ModelStore(
+      database.db,
+      testModelDefaults({ encryptionKeyBase64: null }),
+    );
+    await expect(
+      missing.setApiKey('guild', 'text_classifier', 'secret'),
+    ).rejects.toThrow('API_KEY_ENCRYPTION_KEY is required');
+
+    const invalid = new ModelStore(
+      database.db,
+      testModelDefaults({
+        encryptionKeyBase64: Buffer.alloc(8).toString('base64'),
+      }),
+    );
+    await expect(
+      invalid.setApiKey('guild', 'text_classifier', 'secret'),
+    ).rejects.toThrow('must be base64 encoded 32 bytes');
+
+    database.sqlite.close();
+  });
+});
+
+describe('EvidenceAnalyzer', () => {
+  it('keeps exact known text evidence decisive while still recording classifier reasoning', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const cached = cachedMessage({ content: 'Free Nitro', textHash: 'hash' });
+    await database.db.insert(knownTexts).values({
+      id: 'known',
+      normalizedText: 'free nitro',
+      textHash: 'hash',
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([1, 0, 0]),
+      description: 'known',
+      scamReason: 'fake giveaway',
+      sourceCaseId: null,
+      sourceDiscordMessageId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const classifier = {
+      classify: vi.fn(async (): Promise<ClassificationResult> => ({
+        verdict: 'needs_review',
+        confidence: 0,
+        rationale: 'unused',
+        labels: [],
+      })),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier);
+    const progress: AnalysisProgress[] = [];
+
+    const result = await analyzer.analyze(
+      caseRow.id,
+      cached,
+      defaultGuildConfig({ evidenceConfidenceThreshold: 0.9 }),
+      async (update) => {
+        progress.push(update);
+      },
+    );
+
+    expect(progress.map((update) => update.phase)).toEqual([
+      'matches',
+      'embeddings',
+      'classifier',
+    ]);
+    expect(progress[0]?.result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'exact_match', matched: true }),
+        expect.objectContaining({ type: 'fuzzy_match', matched: true }),
+      ]),
+    );
+    expect(
+      progress[0]?.result.evidence.some((item) => item.type === 'classifier'),
+    ).toBe(false);
+    expect(progress[1]?.result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'embedding_retrieval',
+          matched: false,
+          summary:
+            'Embedding retrieval skipped: no embedding provider is configured.',
+        }),
+      ]),
+    );
+    expect(result).toMatchObject({ confidence: 1, shouldPunish: true });
+    expect(result.reason).toContain('Exact known text match: fake giveaway');
+    expect(classifier.classify).toHaveBeenCalledWith(
+      expect.objectContaining({ textHash: 'hash' }),
+      expect.objectContaining({
+        evidenceSummary: expect.stringContaining(
+          'Exact known text match: fake giveaway',
+        ),
+        proximalKnownScams: [
+          expect.objectContaining({ id: 'known', source: 'text_fuzzy' }),
+        ],
+      }),
+    );
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      reason: expect.stringContaining('fake giveaway'),
+    });
+
+    database.sqlite.close();
+  });
+
+  it('starts embeddings before publishing cheap match progress', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    await database.db.insert(knownTexts).values({
+      id: 'known-progress',
+      normalizedText: 'free nitro',
+      textHash: 'hash-progress',
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([1, 0, 0]),
+      description: 'known',
+      scamReason: 'fake giveaway',
+      sourceCaseId: null,
+      sourceDiscordMessageId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const events: string[] = [];
+    let resolveEmbedding!: (value: EmbeddingResult) => void;
+    const embedding = new Promise<EmbeddingResult>((resolve) => {
+      resolveEmbedding = resolve;
+    });
+    const classifier = {
+      classify: vi.fn(async (): Promise<ClassificationResult> => ({
+        verdict: 'needs_review',
+        confidence: 0,
+        rationale: 'classifier finished',
+        labels: [],
+      })),
+    };
+    const embedder = {
+      embedText: vi.fn(() => {
+        events.push('embedding-started');
+        return embedding;
+      }),
+      embedImage: vi.fn(async () => null),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier, embedder);
+
+    await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({ content: 'free nitro', textHash: 'hash-progress' }),
+      defaultGuildConfig({ evidenceConfidenceThreshold: 0.9 }),
+      async (update) => {
+        events.push(`progress:${update.phase}`);
+        if (update.phase === 'matches') {
+          expect(update.result.confidence).toBe(1);
+          expect(
+            update.result.evidence.some((item) => item.type === 'classifier'),
+          ).toBe(false);
+          resolveEmbedding({
+            provider: 'openrouter',
+            model: 'embed-model',
+            dimensions: 3,
+            vector: [1, 0, 0],
+          });
+        }
+      },
+    );
+
+    expect(events.slice(0, 2)).toEqual([
+      'embedding-started',
+      'progress:matches',
+    ]);
+    expect(events).toContain('progress:embeddings');
+
+    database.sqlite.close();
+  });
+
+  it('embeds every image attachment before proximal lookup', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const classifier = {
+      classify: vi.fn(async (): Promise<ClassificationResult> => ({
+        verdict: 'needs_review',
+        confidence: 0,
+        rationale: 'done',
+        labels: [],
+      })),
+    };
+    const embedder = {
+      embedText: vi.fn(async () => null),
+      embedImage: vi.fn(async (): Promise<EmbeddingResult> => ({
+        provider: 'openrouter',
+        model: 'image-embed',
+        dimensions: 3,
+        vector: [0, 1, 0],
+      })),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier, embedder);
+
+    await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({
+        attachments: [
+          storedAttachment({ id: 'image-1', contentType: 'image/png' }),
+          storedAttachment({ id: 'image-2', contentType: 'image/jpeg' }),
+          storedAttachment({ id: 'image-3', contentType: 'image/webp' }),
+          storedAttachment({ id: 'image-4', contentType: 'image/gif' }),
+          storedAttachment({ id: 'image-5', contentType: 'image/heic' }),
+        ],
+      }),
+      defaultGuildConfig(),
+    );
+
+    expect(embedder.embedImage).toHaveBeenCalledTimes(5);
+    expect(embedder.embedImage).toHaveBeenCalledWith(
+      'guild',
+      expect.objectContaining({ id: 'image-5' }),
+    );
+
+    database.sqlite.close();
+  });
+
+  it('converts classifier confidence into scam likelihood score and caches repeats', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'crosschannel',
+      reason: 'triggered',
+    });
+    const cached = cachedMessage({ content: 'hello', textHash: 'hash2' });
+    const classifier = {
+      classify: vi.fn(async () => ({
+        verdict: 'not_scam' as const,
+        confidence: 0.99,
+        rationale: 'benign',
+        labels: [],
+      })),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier);
+
+    const first = await analyzer.analyze(
+      caseRow.id,
+      cached,
+      defaultGuildConfig({ evidenceConfidenceThreshold: 0.9 }),
+    );
+    const second = await analyzer.analyze(
+      caseRow.id,
+      cached,
+      defaultGuildConfig({ evidenceConfidenceThreshold: 0.9 }),
+    );
+
+    expect(first).toBe(second);
+    expect(first).toMatchObject({ confidence: 0, shouldPunish: false });
+    expect(first.reason).toContain('0% benign');
+    expect(classifier.classify).toHaveBeenCalledTimes(1);
+
+    database.sqlite.close();
+  });
+
+  it('passes proximal known scams and reference images into classifier context', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'crosschannel',
+      reason: 'triggered',
+    });
+    const now = new Date().toISOString();
+    await database.db.insert(knownTexts).values({
+      id: 'known-text',
+      normalizedText: 'free nitro giveaway claim yours now',
+      textHash: 'known-hash',
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([1, 0, 0]),
+      description: 'Fake Nitro template',
+      scamReason: 'phishing lure',
+      sourceCaseId: 'source-case',
+      sourceDiscordMessageId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await database.db.insert(knownImages).values({
+      id: 'known-image',
+      sha256: 'known-sha',
+      perceptualHash: null,
+      storageKey: 'guild/source/image.png',
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([0, 1, 0]),
+      description: 'Fake Nitro image',
+      scamReason: 'phishing image',
+      sourceCaseId: 'source-case',
+      sourceDiscordAttachmentId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const classifier = {
+      classify: vi.fn(
+        async (...args: unknown[]): Promise<ClassificationResult> => {
+          void args;
+          return {
+            verdict: 'needs_review',
+            confidence: 0,
+            rationale: 'compare only',
+            labels: [],
+          };
+        },
+      ),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier);
+
+    await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({
+        normalizedContent: 'free nitro giveaway claim yours today',
+        textHash: 'new-hash',
+      }),
+      defaultGuildConfig(),
+    );
+
+    expect(classifier.classify.mock.calls[0]?.[1]).toMatchObject({
+      proximalKnownScams: [
+        expect.objectContaining({
+          id: 'known-text',
+          scamReason: 'phishing lure',
+          images: [
+            expect.objectContaining({
+              dataUrl: 'data:image/png;base64,aW1hZ2U=',
+            }),
+          ],
+        }),
+      ],
+    });
+    database.sqlite.close();
+  });
+
+  it('uses stored embeddings to retrieve proximal known scams and record evidence', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'crosschannel',
+      reason: 'triggered',
+    });
+    const now = new Date().toISOString();
+    await database.db.insert(knownTexts).values({
+      id: 'known-embedding',
+      normalizedText: 'different words entirely',
+      textHash: 'known-hash',
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([1, 0, 0]),
+      description: 'Semantic match',
+      scamReason: 'same scam semantics',
+      sourceCaseId: null,
+      sourceDiscordMessageId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: now,
+      updatedAt: now,
+    });
+    const classifier = {
+      classify: vi.fn(async (): Promise<ClassificationResult> => ({
+        verdict: 'not_scam',
+        confidence: 0.1,
+        rationale: 'primary benign',
+        labels: [],
+      })),
+    };
+    const embedder = {
+      embedText: vi.fn(async (): Promise<EmbeddingResult> => ({
+        provider: 'openrouter',
+        model: 'embed-model',
+        dimensions: 3,
+        vector: [1, 0, 0],
+      })),
+      embedImage: vi.fn(),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier, embedder);
+
+    const result = await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({
+        content: 'unrelated surface text',
+        normalizedContent: 'unrelated surface text',
+      }),
+      defaultGuildConfig({ knownTextSimilarityThreshold: 0.8 }),
+    );
+
+    expect(result.confidence).toBe(1);
+    expect(result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'embedding_retrieval',
+          matched: true,
+          score: 1,
+          metadata: expect.objectContaining({ source: 'text_embedding' }),
+        }),
+      ]),
+    );
+    expect(classifier.classify).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        proximalKnownScams: [
+          expect.objectContaining({
+            id: 'known-embedding',
+            source: 'text_embedding',
+          }),
+        ],
+      }),
+    );
+
+    database.sqlite.close();
+  });
+
+  it('records additional model signals as advisory evidence without driving confidence', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const classifier = {
+      classify: vi.fn(async (): Promise<ClassificationResult> => ({
+        verdict: 'not_scam',
+        confidence: 0.95,
+        rationale: 'primary benign',
+        labels: [],
+      })),
+      additionalSignals: vi.fn(async () => [
+        {
+          verdict: 'scam' as const,
+          confidence: 0.99,
+          rationale: 'secondary suspicious',
+          labels: [],
+          modelId: 'extra-model',
+        },
+      ]),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier);
+
+    const result = await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({ content: 'free nitro maybe joke' }),
+      defaultGuildConfig(),
+    );
+
+    expect(result.confidence).toBe(0);
+    expect(result.shouldPunish).toBe(false);
+    expect(result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          summary: 'secondary suspicious',
+          metadata: expect.objectContaining({
+            source: 'additional_signal',
+            modelId: 'extra-model',
+            advisoryOnly: true,
+          }),
+        }),
+      ]),
+    );
+    database.sqlite.close();
+  });
+
+  it('records classifier failures as needs-review evidence', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const classifier = {
+      classify: vi.fn(async () => Promise.reject(new Error('offline'))),
+    };
+    const analyzer = new EvidenceAnalyzer(store, classifier);
+
+    const result = await analyzer.analyze(
+      caseRow.id,
+      cachedMessage({ content: 'x' }),
+      defaultGuildConfig(),
+    );
+
+    expect(result.reason).toContain('Classifier unavailable: offline');
+    expect(result.confidence).toBe(0);
+
+    database.sqlite.close();
+  });
+});
+
+describe('CaseStore', () => {
+  it('creates cases once, persists messages, resolves, and finds by message ids', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+
+    const first = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'first',
+    });
+    const second = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'second',
+    });
+    expect(second.id).toBe(first.id);
+
+    await store.attachMessage(
+      first.id,
+      fakeMessage({
+        id: 'source',
+        content: 'Free Nitro',
+        attachments: [attachment({ id: 'a1', name: 'proof.png' })],
+      }),
+    );
+    await store.setReviewMessage(first.id, 'review-channel', 'review-message');
+    await store.markMessageDeleted('source');
+    await store.resolve(first.id, 'dismissed', null, 'actor', 'not scam');
+
+    expect(await store.getCaseBySourceMessage('source')).toMatchObject({
+      id: first.id,
+    });
+    expect(
+      await store.getCaseByReviewMessage('guild', 'review-message'),
+    ).toMatchObject({ id: first.id });
+    expect(
+      await database.db
+        .select()
+        .from(caseMessages)
+        .where(eq(caseMessages.messageId, 'source'))
+        .get(),
+    ).toMatchObject({ deleted: 1 });
+    expect(
+      await database.db
+        .select()
+        .from(cases)
+        .where(eq(cases.id, first.id))
+        .get(),
+    ).toMatchObject({ status: 'dismissed', reason: 'not scam' });
+
+    database.sqlite.close();
+  });
+
+  it('promotes retained case evidence to global known scams with embeddings and skips duplicates', async () => {
+    const database = testDatabase();
+    const embedder = {
+      embedText: vi.fn(async (): Promise<EmbeddingResult> => ({
+        provider: 'openrouter',
+        model: 'embed-model',
+        dimensions: 3,
+        vector: [1, 0, 0],
+      })),
+      embedImage: vi.fn(async (): Promise<EmbeddingResult> => ({
+        provider: 'openrouter',
+        model: 'embed-model',
+        dimensions: 3,
+        vector: [0, 1, 0],
+      })),
+    };
+    const store = new CaseStore(database.db, fakeStorage(), embedder);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'scam reason',
+    });
+    await store.attachMessage(
+      caseRow.id,
+      fakeMessage({
+        id: 'msg',
+        content: 'Free Nitro',
+        attachments: [attachment({ id: 'img', name: 'scam.png' })],
+      }),
+    );
+
+    const first = await store.promoteCaseToGlobalKnownScams(
+      caseRow.id,
+      'admin',
+    );
+    const second = await store.promoteCaseToGlobalKnownScams(
+      caseRow.id,
+      'admin',
+    );
+
+    expect(first).toEqual({
+      textAdded: 1,
+      textSkipped: 0,
+      imageAdded: 1,
+      imageSkipped: 0,
+    });
+    expect(second).toEqual({
+      textAdded: 0,
+      textSkipped: 1,
+      imageAdded: 0,
+      imageSkipped: 1,
+    });
+    const [knownText] = await database.db.select().from(knownTexts);
+    const [knownImage] = await database.db.select().from(knownImages);
+    expect(knownText).toMatchObject({
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([1, 0, 0]),
+    });
+    expect(knownImage).toMatchObject({
+      embeddingProvider: 'openrouter',
+      embeddingModel: 'embed-model',
+      embeddingDimensions: 3,
+      embeddingVectorJson: JSON.stringify([0, 1, 0]),
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.caseId, caseRow.id)),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ eventType: 'known_scam_promoted' }),
+      ]),
+    );
+
+    database.sqlite.close();
+  });
+
+  it('does not promote corpus rows when embeddings are unavailable', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage(), {
+      embedText: vi.fn(async () => null),
+      embedImage: vi.fn(async () => null),
+    });
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'scam reason',
+    });
+    await store.attachMessage(
+      caseRow.id,
+      fakeMessage({
+        id: 'msg-no-embeddings',
+        content: 'Free Nitro',
+        attachments: [attachment({ id: 'img-no-embeddings' })],
+      }),
+    );
+
+    await expect(
+      store.promoteCaseToGlobalKnownScams(caseRow.id, 'admin'),
+    ).resolves.toEqual({
+      textAdded: 0,
+      textSkipped: 1,
+      imageAdded: 0,
+      imageSkipped: 1,
+    });
+    expect(await database.db.select().from(knownTexts)).toHaveLength(0);
+    expect(await database.db.select().from(knownImages)).toHaveLength(0);
+
+    database.sqlite.close();
+  });
+
+  it('ignores approved corpus rows that are missing embeddings', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const now = new Date().toISOString();
+    await database.db.insert(knownTexts).values({
+      id: 'invalid-known-text',
+      normalizedText: 'free nitro',
+      textHash: 'invalid-hash',
+      embeddingProvider: null,
+      embeddingModel: null,
+      embeddingDimensions: null,
+      embeddingVectorJson: null,
+      description: 'invalid',
+      scamReason: 'missing embedding',
+      sourceCaseId: null,
+      sourceDiscordMessageId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: now,
+      updatedAt: now,
+    });
+    await database.db.insert(knownImages).values({
+      id: 'invalid-known-image',
+      sha256: 'invalid-sha',
+      perceptualHash: null,
+      storageKey: 'guild/case/file.png',
+      embeddingProvider: null,
+      embeddingModel: null,
+      embeddingDimensions: null,
+      embeddingVectorJson: null,
+      description: 'invalid',
+      scamReason: 'missing embedding',
+      sourceCaseId: null,
+      sourceDiscordAttachmentId: null,
+      approvedBy: 'admin',
+      scope: 'global',
+      guildId: null,
+      status: 'approved',
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    expect(await store.findKnownTextByHash('guild', 'invalid-hash')).toBeNull();
+    expect(await store.findKnownImageBySha('guild', 'invalid-sha')).toBeNull();
+    expect(await store.listKnownCorpus('guild')).toMatchObject({
+      items: [],
+      total: 0,
+    });
+
+    database.sqlite.close();
+  });
+
+  it('dismisses and deletes retained data plus stored files', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'scam',
+    });
+    await store.attachMessage(
+      caseRow.id,
+      fakeMessage({ attachments: [attachment({ id: 'img' })] }),
+    );
+
+    await store.dismissAndDeleteCase(caseRow.id, 'actor', 'dismissed');
+
+    expect(storage.removed).toEqual(['guild/case/file.png']);
+    expect(
+      await database.db.select().from(cases).where(eq(cases.id, caseRow.id)),
+    ).toHaveLength(0);
+
+    database.sqlite.close();
+  });
+});
+
+function fakeMessage(
+  input: Partial<{
+    id: string;
+    guildId: string;
+    channelId: string;
+    authorId: string;
+    content: string;
+    attachments: unknown[];
+  }> = {},
+) {
+  const attachments = input.attachments ?? [];
+  return {
+    id: input.id ?? 'message',
+    guildId: input.guildId ?? 'guild',
+    channelId: input.channelId ?? 'channel',
+    author: { id: input.authorId ?? 'user' },
+    content: input.content ?? 'hello',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    attachments: {
+      map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
+      values: () => attachments[Symbol.iterator](),
+    },
+  } as any;
+}
+
+function attachment(
+  input: Partial<{
+    id: string;
+    name: string;
+    contentType: string;
+    size: number;
+    url: string;
+    proxyURL: string;
+  }> = {},
+) {
+  return {
+    id: input.id ?? 'attachment',
+    name: input.name ?? 'image.png',
+    contentType: input.contentType ?? 'image/png',
+    size: input.size ?? 123,
+    url: input.url ?? 'https://cdn.discordapp.test/image.png',
+    proxyURL: input.proxyURL ?? 'https://proxy.discordapp.test/image.png',
+  };
+}
+
+function storedAttachment(
+  input: Partial<CachedMessage['attachments'][number]> = {},
+): CachedMessage['attachments'][number] {
+  return {
+    id: input.id ?? 'attachment',
+    name: input.name ?? 'image.png',
+    contentType: input.contentType ?? 'image/png',
+    size: input.size ?? 123,
+    url: input.url ?? 'https://cdn.discordapp.test/image.png',
+    proxyUrl: input.proxyUrl ?? 'https://proxy.discordapp.test/image.png',
+    sha256: input.sha256 ?? 'sha',
+    storageKey: input.storageKey ?? 'guild/case/file.png',
+  };
+}
+
+function cachedMessage(input: Partial<CachedMessage> = {}): CachedMessage {
+  return {
+    id: input.id ?? 'message',
+    guildId: input.guildId ?? 'guild',
+    channelId: input.channelId ?? 'channel',
+    authorId: input.authorId ?? 'user',
+    content: input.content ?? 'hello',
+    normalizedContent: input.normalizedContent ?? input.content ?? 'hello',
+    textHash: input.textHash ?? null,
+    attachments: input.attachments ?? [],
+    createdAt: input.createdAt ?? new Date('2026-01-01T00:00:00Z'),
+    reason: input.reason ?? 'honeypot',
+  };
+}
+
+function fakeStorage() {
+  return {
+    removed: [] as Array<string | null>,
+    saveFromUrl: vi.fn(async () => ({
+      storageKey: 'guild/case/file.png',
+      sha256: 'sha256',
+      sizeBytes: 456,
+      path: '/tmp/guild/case/file.png',
+      contentType: 'image/png',
+      fileName: 'file.png',
+      normalized: false,
+    })),
+    read: vi.fn(async () => Buffer.from('image')),
+    pathFor: vi.fn((key: string) => `/tmp/${key}`),
+    remove: vi.fn(async function (
+      this: { removed: Array<string | null> },
+      key: string | null,
+    ) {
+      this.removed.push(key);
+    }),
+  } as any;
+}

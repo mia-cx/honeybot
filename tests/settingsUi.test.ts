@@ -1,12 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
-import { honeypotWarningModal, honeypotWarningPublicMessage, settingsReply } from '../src/interactions/settingsUi.js';
+import {
+  honeypotWarningModal,
+  honeypotWarningPublicMessage,
+  modelApiKeyModal,
+  modelConfigModal,
+  pageForPolicyScope,
+  pageFromValue,
+  parseEditableSettingValue,
+  policyDurationModal,
+  policyScopeFromValue,
+  settingEditModal,
+  settingInputValue,
+  settingsReply,
+} from '../src/interactions/settingsUi.js';
 
-type Raw = { type?: number; custom_id?: string; components?: Raw[]; [key: string]: unknown };
+type Raw = {
+  type?: number;
+  custom_id?: string;
+  components?: Raw[];
+  [key: string]: unknown;
+};
 
 describe('settings UI', () => {
   it('starts with only the top-level category dropdown', () => {
-    const ids = customIds(settingsReply(defaultGuildConfig()).components as Raw[]);
+    const ids = customIds(
+      settingsReply(defaultGuildConfig()).components as Raw[],
+    );
 
     expect(ids).toEqual(['settings:page']);
   });
@@ -14,10 +34,36 @@ describe('settings UI', () => {
   it('shows the current category and subcategory in string selects', () => {
     const config = defaultGuildConfig();
 
-    expect(selectedOptionValues(select(config, 'triggers_honeypots', 'settings:page'))).toEqual(['triggers']);
-    expect(selectedOptionValues(select(config, 'triggers_honeypots', 'settings:subcategory:triggers'))).toEqual(['triggers_honeypots']);
-    expect(selectedOptionValues(select(config, 'policies_punishment', 'settings:page'))).toEqual(['policies']);
-    expect(selectedOptionValues(select(config, 'policies_punishment', 'settings:subcategory:policies'))).toEqual(['policies_punishment']);
+    expect(
+      selectedOptionValues(
+        select(config, 'triggers_honeypots', 'settings:page'),
+      ),
+    ).toEqual(['triggers']);
+    expect(
+      selectedOptionValues(
+        select(config, 'triggers_honeypots', 'settings:subcategory:triggers'),
+      ),
+    ).toEqual(['triggers_honeypots']);
+    expect(
+      selectedOptionValues(
+        select(config, 'policies_punishment', 'settings:page'),
+      ),
+    ).toEqual(['policies']);
+    expect(
+      selectedOptionValues(
+        select(config, 'policies_punishment', 'settings:subcategory:policies'),
+      ),
+    ).toEqual(['policies_punishment']);
+    expect(
+      selectedOptionValues(
+        select(config, 'model_text_classifier', 'settings:page'),
+      ),
+    ).toEqual(['model']);
+    expect(
+      selectedOptionValues(
+        select(config, 'model_text_classifier', 'settings:subcategory:model'),
+      ),
+    ).toEqual(['model_text_classifier']);
   });
 
   it('pre-fills existing entity select values', () => {
@@ -29,38 +75,100 @@ describe('settings UI', () => {
       moderationChannelId: '555',
       policies: {
         ...defaultGuildConfig().policies,
-        punishment: { ...defaultGuildConfig().policies.punishment, actionType: 'role' as const, roleId: '666' },
+        punishment: {
+          ...defaultGuildConfig().policies.punishment,
+          actionType: 'role' as const,
+          roleId: '666',
+        },
       },
     };
 
-    expect(select(config, 'triggers_honeypots', 'settings:channels:honeypots:triggers_honeypots').default_values).toEqual([
+    expect(
+      select(
+        config,
+        'triggers_honeypots',
+        'settings:channels:honeypots:triggers_honeypots',
+      ).default_values,
+    ).toEqual([
       { id: '111', type: 'channel' },
       { id: '222', type: 'channel' },
     ]);
-    expect(select(config, 'permissions', 'settings:mentionables:moderators:permissions').default_values).toEqual([
+    expect(
+      select(
+        config,
+        'permissions',
+        'settings:mentionables:moderators:permissions',
+      ).default_values,
+    ).toEqual([
       { id: '333', type: 'user' },
       { id: '444', type: 'role' },
     ]);
-    expect(select(config, 'config', 'settings:channel:moderationChannelId:config').default_values).toEqual([{ id: '555', type: 'channel' }]);
-    expect(select(config, 'policies_punishment', 'settings:policyRole:punishment').default_values).toEqual([{ id: '666', type: 'role' }]);
+    expect(
+      select(config, 'config', 'settings:channel:moderationChannelId:config')
+        .default_values,
+    ).toEqual([{ id: '555', type: 'channel' }]);
+    expect(
+      select(config, 'policies_punishment', 'settings:policyRole:punishment')
+        .default_values,
+    ).toEqual([{ id: '666', type: 'role' }]);
+  });
+
+  it('does not end any Components V2 container with a separator', () => {
+    const config = defaultGuildConfig();
+    const pages: Parameters<typeof settingsReply>[1][] = [
+      'none',
+      'triggers',
+      'triggers_honeypots',
+      'triggers_crosschannel',
+      'permissions',
+      'config',
+      'policies',
+      'policies_prevention',
+      'policies_punishment',
+      'model',
+      'model_text_classifier',
+      'model_image_classifier',
+      'model_text_embeddings',
+      'model_image_embeddings',
+    ];
+
+    for (const page of pages) {
+      expectTrailingSeparators(settingsReply(config, page).components as Raw[]);
+    }
   });
 
   it('exposes controls for all settings categories', () => {
     const config = defaultGuildConfig();
 
-    const triggerComponents = settingsReply(config, 'triggers').components as Raw[];
-    const triggerHoneypotComponents = settingsReply(config, 'triggers_honeypots').components as Raw[];
+    const triggerComponents = settingsReply(config, 'triggers')
+      .components as Raw[];
+    const triggerHoneypotComponents = settingsReply(
+      config,
+      'triggers_honeypots',
+    ).components as Raw[];
 
     expect(triggerComponents).toHaveLength(2);
     expect(triggerHoneypotComponents).toHaveLength(3);
-    expect(customIds(triggerHoneypotComponents[1]?.components ?? [])).toEqual(['settings:subcategory:triggers']);
-    expect(customIds(triggerHoneypotComponents[2]?.components ?? [])).toEqual(expect.arrayContaining(['settings:channels:honeypots:triggers_honeypots']));
-
-    expect(customIds(triggerHoneypotComponents)).toEqual(
-      expect.arrayContaining(['settings:subcategory:triggers', 'settings:channels:honeypots:triggers_honeypots', 'settings:honeypotWarning:open:triggers_honeypots']),
+    expect(customIds(triggerHoneypotComponents[1]?.components ?? [])).toEqual([
+      'settings:subcategory:triggers',
+    ]);
+    expect(customIds(triggerHoneypotComponents[2]?.components ?? [])).toEqual(
+      expect.arrayContaining([
+        'settings:channels:honeypots:triggers_honeypots',
+      ]),
     );
 
-    const crosschannelIds = customIds(settingsReply(config, 'triggers_crosschannel').components as Raw[]);
+    expect(customIds(triggerHoneypotComponents)).toEqual(
+      expect.arrayContaining([
+        'settings:subcategory:triggers',
+        'settings:channels:honeypots:triggers_honeypots',
+        'settings:honeypotWarning:open:triggers_honeypots',
+      ]),
+    );
+
+    const crosschannelIds = customIds(
+      settingsReply(config, 'triggers_crosschannel').components as Raw[],
+    );
     expect(crosschannelIds).toEqual(
       expect.arrayContaining([
         'settings:subcategory:triggers',
@@ -69,28 +177,115 @@ describe('settings UI', () => {
         'settings:edit:crosschannelChannelThreshold:triggers_crosschannel',
       ]),
     );
-    expect(crosschannelIds).not.toEqual(expect.arrayContaining(['settings:edit:crosschannelMaxEntriesPerGuild:triggers_crosschannel', 'settings:edit:crosschannelMaxEntriesPerUser:triggers_crosschannel']));
-    expect(crosschannelIds.filter((id) => id.startsWith('settings:edit:crosschannel'))).toEqual([
+    expect(crosschannelIds).not.toEqual(
+      expect.arrayContaining([
+        'settings:edit:crosschannelMaxEntriesPerGuild:triggers_crosschannel',
+        'settings:edit:crosschannelMaxEntriesPerUser:triggers_crosschannel',
+      ]),
+    );
+    expect(
+      crosschannelIds.filter((id) =>
+        id.startsWith('settings:edit:crosschannel'),
+      ),
+    ).toEqual([
       'settings:edit:crosschannelChannelThreshold:triggers_crosschannel',
       'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
     ]);
 
-    expect(customIds(settingsReply(config, 'permissions').components as Raw[])).toEqual(expect.arrayContaining(['settings:mentionables:moderators:permissions']));
+    expect(
+      customIds(settingsReply(config, 'permissions').components as Raw[]),
+    ).toEqual(
+      expect.arrayContaining(['settings:mentionables:moderators:permissions']),
+    );
 
-    expect(customIds(settingsReply(config, 'config').components as Raw[])).toEqual(
+    expect(
+      customIds(settingsReply(config, 'config').components as Raw[]),
+    ).toEqual(
       expect.arrayContaining([
         'settings:channel:moderationChannelId:config',
         'settings:toggle:reviewBypassEnabled:config',
         'settings:toggle:punishmentDmNotify:config',
+        'settings:toggle:globalBansEnabled:config',
         'settings:edit:evidenceConfidenceThreshold:config',
       ]),
     );
 
-    expect(customIds(settingsReply(config, 'config').components as Raw[]).filter((id) => id.includes(':clear:'))).toEqual([]);
-    expect(customIds(settingsReply(config, 'triggers_honeypots').components as Raw[]).filter((id) => id.includes(':clear:'))).toEqual([]);
-    expect(customIds(settingsReply(config, 'permissions').components as Raw[]).filter((id) => id.includes(':clear:'))).toEqual([]);
+    const modelCategoryComponents = settingsReply(
+      config,
+      'model',
+      'punishment',
+      [],
+      {
+        text: { provider: 'openrouter', models: ['text-extra'] },
+        image: { provider: 'openrouter', models: ['image-extra'] },
+      },
+    ).components as Raw[];
+    expect(modelCategoryComponents).toHaveLength(2);
+    expect(customIds(modelCategoryComponents[1]?.components ?? [])).toEqual([
+      'settings:subcategory:model',
+    ]);
+    expect(textContent(modelCategoryComponents)).not.toContain(
+      'Additional advisory signal models',
+    );
+    expect(textContent(modelCategoryComponents)).not.toContain(
+      'openrouter/text-extra',
+    );
 
-    const preventionIds = customIds(settingsReply(config, 'policies_prevention').components as Raw[]);
+    const modelComponents = settingsReply(
+      config,
+      'model_text_classifier',
+      'punishment',
+      [],
+      {
+        text: { provider: 'openrouter', models: ['text-extra'] },
+        image: { provider: 'openrouter', models: ['image-extra'] },
+      },
+    ).components as Raw[];
+    expect(modelComponents).toHaveLength(3);
+    expect(customIds(modelComponents)).toEqual(
+      expect.arrayContaining([
+        'settings:subcategory:model',
+        'settings:modelEdit:text_classifier:model_text_classifier',
+        'settings:modelKey:text_classifier:model_text_classifier',
+        'settings:modelClearKey:text_classifier:model_text_classifier',
+      ]),
+    );
+    expect(customIds(modelComponents)).not.toEqual(
+      expect.arrayContaining([
+        'settings:modelEdit:image_classifier:model_image_classifier',
+      ]),
+    );
+    expect(textContent(modelComponents)).toContain(
+      'Guild BYOK key: **not set**',
+    );
+    expect(textContent(modelComponents)).toContain(
+      'Additional advisory signal models',
+    );
+    expect(textContent(modelComponents)).toContain('openrouter/text-extra');
+    expect(textContent(modelComponents)).not.toContain(
+      'openrouter/image-extra',
+    );
+    expect(textContent(modelComponents)).not.toMatch(/env|deployment/i);
+
+    expect(
+      customIds(settingsReply(config, 'config').components as Raw[]).filter(
+        (id) => id.includes(':clear:'),
+      ),
+    ).toEqual([]);
+    expect(
+      customIds(
+        settingsReply(config, 'triggers_honeypots').components as Raw[],
+      ).filter((id) => id.includes(':clear:')),
+    ).toEqual([]);
+    expect(
+      customIds(
+        settingsReply(config, 'permissions').components as Raw[],
+      ).filter((id) => id.includes(':clear:')),
+    ).toEqual([]);
+
+    const preventionIds = customIds(
+      settingsReply(config, 'policies_prevention').components as Raw[],
+    );
     expect(preventionIds).toEqual(
       expect.arrayContaining([
         'settings:subcategory:policies',
@@ -103,11 +298,23 @@ describe('settings UI', () => {
       ]),
     );
     expect(preventionIds).not.toContain('settings:policyScope');
-    expect(preventionIds).not.toContain('settings:policyRole:honeypot_prevention');
-    expect(preventionIds).not.toContain('settings:policyRole:crosschannel_prevention');
+    expect(preventionIds).not.toContain(
+      'settings:policyRole:honeypot_prevention',
+    );
+    expect(preventionIds).not.toContain(
+      'settings:policyRole:crosschannel_prevention',
+    );
 
-    const punishmentIds = customIds(settingsReply(config, 'policies_punishment').components as Raw[]);
-    expect(punishmentIds).toEqual(expect.arrayContaining(['settings:subcategory:policies', 'settings:policyAction:punishment', 'settings:policyDelete:punishment']));
+    const punishmentIds = customIds(
+      settingsReply(config, 'policies_punishment').components as Raw[],
+    );
+    expect(punishmentIds).toEqual(
+      expect.arrayContaining([
+        'settings:subcategory:policies',
+        'settings:policyAction:punishment',
+        'settings:policyDelete:punishment',
+      ]),
+    );
     expect(punishmentIds).not.toContain('settings:policyRole:punishment');
     expect(punishmentIds).not.toContain('settings:policyDuration:punishment');
   });
@@ -139,7 +346,11 @@ describe('settings UI', () => {
   });
 
   it('renders the public honeypot warning as Components V2 without exposing full policy details', () => {
-    const message = honeypotWarningPublicMessage(defaultGuildConfig()) as { flags?: number; content?: string; components?: Raw[] };
+    const message = honeypotWarningPublicMessage(defaultGuildConfig()) as {
+      flags?: number;
+      content?: string;
+      components?: Raw[];
+    };
     const textContent = flatten(message.components ?? [])
       .map((component) => component.content)
       .filter((content): content is string => typeof content === 'string')
@@ -148,11 +359,100 @@ describe('settings UI', () => {
     expect(message.content).toBeUndefined();
     expect(message.flags).toBe(1 << 15);
     expect(message.components?.[0]?.type).toBe(17);
-    expect(textContent).toContain('This channel is now watched by Honeybot as a honeypot.');
-    expect(textContent).toContain('Normal users who post here will be **timed out** immediately, and may receive further punitive action automatically.');
-    expect(textContent).toContain('Honeybot uses evidence checks and classifiers, but classifiers are not infallible.');
-    expect(textContent).not.toMatch(/unless a moderator|support channel|honeypot prevention policy/i);
+    expect(textContent).toContain(
+      'This channel is now watched by Honeybot as a honeypot.',
+    );
+    expect(textContent).toContain(
+      'Normal users who post here will be **timed out** immediately, and may receive further punitive action automatically.',
+    );
+    expect(textContent).toContain(
+      'Honeybot uses evidence checks and classifiers, but classifiers are not infallible.',
+    );
+    expect(textContent).not.toMatch(
+      /unless a moderator|support channel|honeypot prevention policy/i,
+    );
     expect(textContent).not.toContain('timeout 6h');
+  });
+
+  it('builds setting and model modals plus parsing helpers', () => {
+    const config = defaultGuildConfig({
+      evidenceConfidenceThreshold: 0.9,
+      retentionCaseDays: 180,
+    });
+
+    expect(settingInputValue(config, 'evidenceConfidenceThreshold')).toBe('90');
+    expect(settingInputValue(config, 'retentionCaseDays')).toBe('180');
+    expect(parseEditableSettingValue('evidenceConfidenceThreshold', '95')).toBe(
+      0.95,
+    );
+    expect(
+      parseEditableSettingValue('evidenceConfidenceThreshold', '101'),
+    ).toBeNull();
+    expect(parseEditableSettingValue('retentionCaseDays', '1.5')).toBeNull();
+    expect(parseEditableSettingValue('retentionCaseDays', '-1')).toBeNull();
+    expect(pageFromValue('nope')).toBe('none');
+    expect(pageForPolicyScope('punishment')).toBe('policies_punishment');
+    expect(pageForPolicyScope('honeypot_prevention')).toBe(
+      'policies_prevention',
+    );
+    expect(policyScopeFromValue('wat')).toBe('punishment');
+
+    expect(
+      settingEditModal('retentionCaseDays', '180', 'config').toJSON(),
+    ).toMatchObject({ custom_id: 'settings:modal:retentionCaseDays:config' });
+    expect(policyDurationModal('punishment', null).toJSON()).toMatchObject({
+      custom_id: 'settings:policyModal:duration:punishment',
+    });
+    expect(
+      modelConfigModal('text_classifier', {
+        purpose: 'text_classifier',
+        provider: 'openrouter',
+        modelId: 'model',
+        apiKeyHint: null,
+      }).toJSON(),
+    ).toMatchObject({ custom_id: 'settings:modelModal:text_classifier' });
+    expect(modelApiKeyModal('image_embeddings').toJSON()).toMatchObject({
+      custom_id: 'settings:modelKeyModal:image_embeddings',
+    });
+  });
+
+  it('phrases honeypot warning actions without leaking full policies', () => {
+    const actions = [
+      ['log', 'logged'],
+      ['timeout', 'timed out'],
+      ['role', 'given the configured role'],
+      ['kick', 'kicked'],
+      ['ban', 'banned'],
+    ] as const;
+
+    for (const [actionType, phrase] of actions) {
+      const config = defaultGuildConfig({
+        policies: {
+          ...defaultGuildConfig().policies,
+          honeypot_prevention: {
+            ...defaultGuildConfig().policies.honeypot_prevention,
+            actionType,
+          },
+        },
+      });
+      expect(
+        textContent(honeypotWarningPublicMessage(config).components as Raw[]),
+      ).toContain(`will be **${phrase}** immediately`);
+    }
+
+    const roleConfig = defaultGuildConfig({
+      policies: {
+        ...defaultGuildConfig().policies,
+        honeypot_prevention: {
+          ...defaultGuildConfig().policies.honeypot_prevention,
+          actionType: 'role',
+          roleId: 'role',
+        },
+      },
+    });
+    expect(
+      textContent(honeypotWarningPublicMessage(roleConfig).components as Raw[]),
+    ).toContain('will be **given <@&role>** immediately');
   });
 
   it('only shows policy role and duration controls when the action needs them', () => {
@@ -160,38 +460,84 @@ describe('settings UI', () => {
       ...defaultGuildConfig(),
       policies: {
         ...defaultGuildConfig().policies,
-        honeypot_prevention: { ...defaultGuildConfig().policies.honeypot_prevention, actionType: 'log' as const },
-        crosschannel_prevention: { ...defaultGuildConfig().policies.crosschannel_prevention, actionType: 'role' as const },
-        punishment: { ...defaultGuildConfig().policies.punishment, actionType: 'timeout' as const },
+        honeypot_prevention: {
+          ...defaultGuildConfig().policies.honeypot_prevention,
+          actionType: 'log' as const,
+        },
+        crosschannel_prevention: {
+          ...defaultGuildConfig().policies.crosschannel_prevention,
+          actionType: 'role' as const,
+        },
+        punishment: {
+          ...defaultGuildConfig().policies.punishment,
+          actionType: 'timeout' as const,
+        },
       },
     };
 
-    const preventionIds = customIds(settingsReply(config, 'policies_prevention').components as Raw[]);
-    expect(preventionIds).not.toContain('settings:policyRole:honeypot_prevention');
-    expect(preventionIds).not.toContain('settings:policyDuration:honeypot_prevention');
-    expect(preventionIds).toEqual(expect.arrayContaining(['settings:policyRole:crosschannel_prevention', 'settings:policyDuration:crosschannel_prevention']));
+    const preventionIds = customIds(
+      settingsReply(config, 'policies_prevention').components as Raw[],
+    );
+    expect(preventionIds).not.toContain(
+      'settings:policyRole:honeypot_prevention',
+    );
+    expect(preventionIds).not.toContain(
+      'settings:policyDuration:honeypot_prevention',
+    );
+    expect(preventionIds).toEqual(
+      expect.arrayContaining([
+        'settings:policyRole:crosschannel_prevention',
+        'settings:policyDuration:crosschannel_prevention',
+      ]),
+    );
 
-    const punishmentIds = customIds(settingsReply(config, 'policies_punishment').components as Raw[]);
+    const punishmentIds = customIds(
+      settingsReply(config, 'policies_punishment').components as Raw[],
+    );
     expect(punishmentIds).toContain('settings:policyDuration:punishment');
     expect(punishmentIds).not.toContain('settings:policyRole:punishment');
   });
 });
 
-function select(config: ReturnType<typeof defaultGuildConfig>, page: Parameters<typeof settingsReply>[1], customId: string): Raw {
-  const found = flatten(settingsReply(config, page).components as Raw[]).find((component) => component.custom_id === customId);
+function select(
+  config: ReturnType<typeof defaultGuildConfig>,
+  page: Parameters<typeof settingsReply>[1],
+  customId: string,
+): Raw {
+  const found = flatten(settingsReply(config, page).components as Raw[]).find(
+    (component) => component.custom_id === customId,
+  );
   if (!found) throw new Error(`Missing component ${customId}`);
   return found;
 }
 
 function selectedOptionValues(component: Raw): string[] {
-  const options = Array.isArray(component.options) ? (component.options as Raw[]) : [];
-  return options.filter((option) => option.default === true).map((option) => String(option.value));
+  const options = Array.isArray(component.options)
+    ? (component.options as Raw[])
+    : [];
+  return options
+    .filter((option) => option.default === true)
+    .map((option) => String(option.value));
+}
+
+function textContent(components: Raw[]): string {
+  return flatten(components)
+    .map((component) => component.content)
+    .filter((content): content is string => typeof content === 'string')
+    .join('\n');
 }
 
 function customIds(components: Raw[]): string[] {
   return flatten(components)
     .map((component) => component.custom_id)
     .filter((id): id is string => typeof id === 'string');
+}
+
+function expectTrailingSeparators(components: Raw[]) {
+  expect(components.at(-1)?.type).not.toBe(14);
+  for (const component of components) {
+    if (component.components) expectTrailingSeparators(component.components);
+  }
 }
 
 function flatten(components: Raw[]): Raw[] {

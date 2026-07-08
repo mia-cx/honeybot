@@ -1,18 +1,12 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { openDatabase, type DatabaseHandle } from '../src/db/database.js';
+import type { DatabaseHandle } from '../src/db/database.js';
 import { honeypots, models, moderators, policies, settings } from '../src/db/schema.js';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
 import { ConfigStore } from '../src/services/configStore.js';
+import { cleanupTempDirs, testDatabase } from './helpers.js';
 
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+afterEach(cleanupTempDirs);
 
 describe('ConfigStore deployment defaults', () => {
   it('layers in-code defaults, deployment defaults, then per-guild settings', async () => {
@@ -80,8 +74,4 @@ async function expectConfigRows(database: DatabaseHandle, guildId: string, count
   expect(rows.flat()).toHaveLength(count);
 }
 
-function testDatabase(): DatabaseHandle {
-  const dir = mkdtempSync(join(tmpdir(), 'honeybot-config-store-'));
-  tempDirs.push(dir);
-  return openDatabase(`file:${join(dir, 'test.sqlite')}`);
-}
+
