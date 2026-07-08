@@ -1,4 +1,4 @@
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { ActivityType, Client, Events, GatewayIntentBits } from 'discord.js';
 import { registerCommands } from './commands/register.js';
 import { openDatabase } from './db/database.js';
 import { deploymentGuildDefaults, env } from './env.js';
@@ -34,6 +34,11 @@ const client = new Client({
 });
 
 client.once(Events.ClientReady, (readyClient) => {
+  readyClient.user.setPresence({
+    status: 'idle',
+    activities: [{ name: 'catching scammers', type: ActivityType.Custom, state: 'catching scammers' }],
+  });
+
   void Promise.all([...readyClient.guilds.cache.keys()].map((guildId) => configStore.initializeGuildDefaults(guildId)))
     .then(() => configStore.purgeExpiredRemovedGuildSettings())
     .then((purgedGuildCount) => {
