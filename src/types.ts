@@ -1,47 +1,3 @@
-export type ScamAction =
-  | {
-      type: 'ban';
-      deleteMessageSeconds?: number | undefined;
-      reason: string;
-    }
-  | {
-      type: 'timeout';
-      durationSeconds: number;
-      reason: string;
-    }
-  | {
-      type: 'role';
-      roleId: string;
-      reason: string;
-    }
-  | {
-      type: 'deleteOnly';
-      reason: string;
-    }
-  | {
-      type: 'logOnly';
-      reason: string;
-    };
-
-export type GuildModerationConfig = {
-  honeypotChannelIds: string[];
-  bypassRoleIds: string[];
-  bypassUserIds: string[];
-  honeypotTimeoutSeconds: number;
-  duplicateWindowSeconds: number;
-  duplicateChannelThreshold: number;
-  scamAction: ScamAction;
-  moderationLogChannelId?: string | undefined;
-};
-
-export type BotConfig = {
-  guilds: Record<string, GuildModerationConfig>;
-  globalBanList: {
-    enabled: boolean;
-    endpoint: string | null;
-  };
-};
-
 export type CachedAttachment = {
   id: string;
   name: string | null;
@@ -49,6 +5,8 @@ export type CachedAttachment = {
   size: number;
   url: string;
   proxyUrl: string;
+  sha256: string | null;
+  storageKey: string | null;
 };
 
 export type CachedMessage = {
@@ -57,9 +15,11 @@ export type CachedMessage = {
   channelId: string;
   authorId: string;
   content: string;
+  normalizedContent: string;
+  textHash: string | null;
   attachments: CachedAttachment[];
   createdAt: Date;
-  reason: 'honeypot' | 'duplicate';
+  reason: 'honeypot' | 'crosschannel';
 };
 
 export type ClassificationResult = {

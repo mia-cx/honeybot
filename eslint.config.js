@@ -8,7 +8,7 @@ export default tseslint.config(
     ignores: ['dist/**', 'node_modules/**'],
   },
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.ts', 'scripts/**/*.ts', 'tests/**/*.ts'],
     languageOptions: {
       parserOptions: {
         projectService: true,

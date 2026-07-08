@@ -11,22 +11,28 @@
     "build": "tsc --noEmit false",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
+    "test": "vitest run",
+    "eval:fixtures": "tsx scripts/eval-fixtures.ts",
     "format": "prettier --write ."
   },
   "dependencies": {
+    "better-sqlite3": "^12.11.1",
     "discord.js": "^14.26.4",
     "dotenv": "^16.4.5",
+    "drizzle-orm": "^0.45.2",
     "effect": "4.0.0-beta.93",
-    "zod": "^3.23.8"
+    "nanoid": "^5.1.16"
   },
   "devDependencies": {
     "@eslint/js": "^9.8.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.14.15",
     "eslint": "^9.8.0",
     "prettier": "^3.3.3",
     "tsx": "^4.16.2",
     "typescript": "^5.5.4",
-    "typescript-eslint": "^8.0.0"
+    "typescript-eslint": "^8.0.0",
+    "vitest": "^4.1.9"
   },
   "engines": {
     "node": ">=20"
