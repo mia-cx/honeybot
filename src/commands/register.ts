@@ -192,7 +192,8 @@ export async function registerCommands(client: Client<true>) {
   }
 
   const existingGlobalCommands = await client.application.commands.fetch();
-  if (existingGlobalCommands.size > 0) await client.application.commands.set([]);
+  const desiredGlobalCommandKeys = new Set(honeybotCommands.map(commandKey));
+  const staleGlobalCommandCount = existingGlobalCommands.filter((command) => !desiredGlobalCommandKeys.has(commandKey(command))).size;
 
   const globalCommands = await client.application.commands.set(honeybotCommands);
 
@@ -200,8 +201,12 @@ export async function registerCommands(client: Client<true>) {
     globalCommandCount: globalCommands.size,
     chatInputCommandCount: globalCommands.filter((command) => command.type === ApplicationCommandType.ChatInput).size,
     messageContextCommandCount: globalCommands.filter((command) => command.type === ApplicationCommandType.Message).size,
-    clearedGlobalCommandCount: existingGlobalCommands.size,
+    staleGlobalCommandCount,
     clearedGuildCommandSets,
     clearedGuildCommandCount,
   });
+}
+
+function commandKey(command: { name: string; type?: ApplicationCommandType | null }) {
+  return `${command.type ?? ApplicationCommandType.ChatInput}:${command.name}`;
 }
