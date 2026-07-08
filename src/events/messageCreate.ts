@@ -1,7 +1,10 @@
 import type { Message } from 'discord.js';
 import { logger } from '../logger.js';
 import type { ConfigStore } from '../services/configStore.js';
-import type { DuplicateDetector } from '../services/duplicateDetector.js';
+import type {
+  DuplicateDetector,
+  DuplicateMessageRef,
+} from '../services/duplicateDetector.js';
 import type { MessageCache } from '../services/messageCache.js';
 import {
   deleteMessage,
@@ -67,6 +70,7 @@ export async function handleMessageCreate(
       guildConfig,
       dependencies,
       duplicate.channelIds,
+      duplicate.messages,
     );
   }
 }
@@ -77,6 +81,7 @@ async function handleTriggeredMessage(
   guildConfig: GuildConfig,
   dependencies: MessageCreateDependencies,
   duplicateChannelIds: string[] = [],
+  duplicateMessages: DuplicateMessageRef[] = [],
 ) {
   const policy =
     guildConfig.policies[
@@ -126,15 +131,6 @@ async function handleTriggeredMessage(
   );
   const member = await message.guild.members.fetch(message.author.id);
 
-  let triggerMessageDeleted = false;
-  if (policy.deleteMessages) {
-    await attempt('delete trigger message', async () => {
-      triggerMessageDeleted = await deleteMessage(message);
-      if (triggerMessageDeleted)
-        await dependencies.caseStore.markMessageDeleted(message.id);
-    });
-  }
-
   await dependencies.moderationQueue.enqueue(message.guildId, () =>
     applyPolicy(
       member,
@@ -149,6 +145,26 @@ async function handleTriggeredMessage(
     ),
   );
   const preventionAppliedAtMs = Date.now();
+
+  let triggerMessageDeleted = false;
+  if (policy.deleteMessages) {
+    if (triggerType === 'crosschannel') {
+      const deletedMessageIds = await deleteCrosschannelMessages(
+        message,
+        duplicateMessages,
+      );
+      triggerMessageDeleted = deletedMessageIds.includes(message.id);
+      if (triggerMessageDeleted) {
+        await dependencies.caseStore.markMessageDeleted(message.id);
+      }
+    } else {
+      await attempt('delete trigger message', async () => {
+        triggerMessageDeleted = await deleteMessage(message);
+        if (triggerMessageDeleted)
+          await dependencies.caseStore.markMessageDeleted(message.id);
+      });
+    }
+  }
   await upsertReviewIfConfigured(
     message,
     caseRow.id,
@@ -306,6 +322,45 @@ async function handleTriggeredMessage(
   }
 }
 
+async function deleteCrosschannelMessages(
+  triggerMessage: Message<true>,
+  duplicateMessages: DuplicateMessageRef[],
+) {
+  const deletedMessageIds: string[] = [];
+  const seen = new Set<string>();
+  for (const duplicate of duplicateMessages) {
+    if (seen.has(duplicate.messageId)) continue;
+    seen.add(duplicate.messageId);
+    const deleted = await attempt(
+      'delete duplicate cross-channel message',
+      () => deleteDuplicateMessage(triggerMessage, duplicate),
+    );
+    if (deleted) deletedMessageIds.push(duplicate.messageId);
+  }
+  return deletedMessageIds;
+}
+
+async function deleteDuplicateMessage(
+  triggerMessage: Message<true>,
+  duplicate: DuplicateMessageRef,
+) {
+  if (duplicate.messageId === triggerMessage.id) {
+    return deleteMessage(triggerMessage);
+  }
+
+  const channel = await triggerMessage.guild.channels
+    .fetch(duplicate.channelId)
+    .catch(() => null);
+  if (!channel?.isTextBased()) return false;
+
+  const message = await channel.messages
+    .fetch(duplicate.messageId)
+    .catch(() => null);
+  if (!message?.inGuild()) return false;
+
+  return deleteMessage(message);
+}
+
 async function attachmentDataUrl(
   attachment: {
     contentType: string | null;
@@ -406,12 +461,13 @@ async function upsertReviewIfConfigured(
   );
 }
 
-async function attempt(label: string, operation: () => Promise<void>) {
+async function attempt<T>(label: string, operation: () => Promise<T>) {
   try {
-    await operation();
+    return await operation();
   } catch (error) {
     logger.warn(`Failed to ${label}`, {
       error: error instanceof Error ? error.message : String(error),
     });
+    return null;
   }
 }

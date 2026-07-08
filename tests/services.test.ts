@@ -8,6 +8,7 @@ import {
   knownTexts,
 } from '../src/db/schema.js';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
+import { handleMessageCreate } from '../src/events/messageCreate.js';
 import { FairQueue } from '../src/queues/fairQueue.js';
 import { CaseStore } from '../src/services/caseStore.js';
 import { DuplicateDetector } from '../src/services/duplicateDetector.js';
@@ -19,6 +20,7 @@ import {
 import { MessageCache } from '../src/services/messageCache.js';
 import { ModelStore } from '../src/services/modelStore.js';
 import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
+import type { AnalysisResult } from '../src/domain/types.js';
 import type { CachedMessage, ClassificationResult } from '../src/types.js';
 
 afterEach(() => {
@@ -65,23 +67,34 @@ describe('DuplicateDetector', () => {
 
     expect(
       detector.record(
-        fakeMessage({ channelId: 'c1', content: 'free nitro' }),
+        fakeMessage({ id: 'm1', channelId: 'c1', content: 'free nitro' }),
         config,
       ),
-    ).toEqual({ matched: false, channelIds: ['c1'] });
+    ).toEqual({
+      matched: false,
+      channelIds: ['c1'],
+      messages: [{ channelId: 'c1', messageId: 'm1' }],
+    });
     expect(
       detector.record(
-        fakeMessage({ channelId: 'c2', content: 'FREE   NITRO!!!' }),
+        fakeMessage({ id: 'm2', channelId: 'c2', content: 'FREE   NITRO!!!' }),
         config,
       ),
-    ).toEqual({ matched: true, channelIds: ['c1', 'c2'] });
+    ).toEqual({
+      matched: true,
+      channelIds: ['c1', 'c2'],
+      messages: [
+        { channelId: 'c1', messageId: 'm1' },
+        { channelId: 'c2', messageId: 'm2' },
+      ],
+    });
   });
 
   it('ignores disabled or empty cross-channel signals and sweeps expired entries', () => {
     const detector = new DuplicateDetector();
     const disabled = defaultGuildConfig({ crosschannelEnabled: false });
     expect(detector.record(fakeMessage({ content: 'same' }), disabled)).toEqual(
-      { matched: false, channelIds: [] },
+      { matched: false, channelIds: [], messages: [] },
     );
 
     const now = vi.spyOn(Date, 'now');
@@ -98,7 +111,63 @@ describe('DuplicateDetector', () => {
         fakeMessage({ channelId: 'c2', content: 'same' }),
         config,
       ),
-    ).toEqual({ matched: false, channelIds: ['c2'] });
+    ).toEqual({
+      matched: false,
+      channelIds: ['c2'],
+      messages: [{ channelId: 'c2', messageId: 'message' }],
+    });
+  });
+});
+
+describe('handleMessageCreate', () => {
+  it('deletes every duplicate message during cross-channel prevention', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({ moderationChannelId: null });
+    config.policies.crosschannel_prevention.actionType = 'timeout';
+    config.policies.crosschannel_prevention.deleteMessages = true;
+
+    const deleted: string[] = [];
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild(deleted, actions);
+    const first = fakeDiscordMessage({
+      id: 'm1',
+      channelId: 'c1',
+      content: 'free nitro',
+      guild,
+    });
+    const second = fakeDiscordMessage({
+      id: 'm2',
+      channelId: 'c2',
+      content: 'FREE   NITRO!!!',
+      guild,
+    });
+    guild.register(first);
+    guild.register(second);
+
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 0,
+          shouldPunish: false,
+          reason: 'done',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(first, dependencies);
+    await handleMessageCreate(second, dependencies);
+
+    expect(deleted).toEqual(['m1', 'm2']);
+    expect(actions).toEqual(['timeout', 'delete:m1', 'delete:m2']);
+    expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
+    database.sqlite.close();
   });
 });
 
@@ -604,6 +673,8 @@ describe('EvidenceAnalyzer', () => {
           type: 'embedding_retrieval',
           matched: true,
           score: 1,
+          summary:
+            '100% likelihood of a scam. The message is within 100% proximity to at least 1 embedding in the corpus.',
           metadata: expect.objectContaining({ source: 'text_embedding' }),
         }),
       ]),
@@ -952,6 +1023,92 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 });
+
+function fakeDiscordGuild(deleted: string[], actions: string[] = []) {
+  const channels = new Map<
+    string,
+    {
+      messages: { fetch: (id: string) => Promise<any> };
+      isTextBased: () => boolean;
+    }
+  >();
+  const guild = {
+    id: 'guild',
+    ownerId: 'owner',
+    members: {
+      fetch: vi.fn(async () => ({
+        id: 'user',
+        guild,
+        permissions: { has: () => false },
+        roles: { cache: { some: () => false } },
+        timeout: vi.fn(async () => {
+          actions.push('timeout');
+        }),
+      })),
+    },
+    channels: {
+      fetch: vi.fn(
+        async (channelId: string) => channels.get(channelId) ?? null,
+      ),
+    },
+    register(message: any) {
+      const channel = channels.get(message.channelId) ?? {
+        isTextBased: () => true,
+        messages: {
+          fetch: vi.fn(async (messageId: string) =>
+            messageId === message.id ? message : null,
+          ),
+        },
+      };
+      channel.messages.fetch = vi.fn(async (messageId: string) =>
+        messageId === message.id ? message : null,
+      );
+      channels.set(message.channelId, channel);
+      message.guild = guild;
+      message.member = {
+        id: 'user',
+        guild,
+        permissions: { has: () => false },
+        roles: { cache: { some: () => false } },
+        timeout: vi.fn(async () => {
+          actions.push('timeout');
+        }),
+      };
+      message.delete = vi.fn(async () => {
+        actions.push(`delete:${message.id}`);
+        deleted.push(message.id);
+      });
+    },
+  };
+  return guild;
+}
+
+function fakeDiscordMessage(
+  input: Partial<{
+    id: string;
+    guild: ReturnType<typeof fakeDiscordGuild>;
+    channelId: string;
+    content: string;
+  }>,
+) {
+  return {
+    id: input.id ?? 'message',
+    guildId: 'guild',
+    channelId: input.channelId ?? 'channel',
+    guild: input.guild,
+    member: null,
+    author: { id: 'user', bot: false },
+    webhookId: null,
+    content: input.content ?? 'hello',
+    createdAt: new Date('2026-01-01T00:00:00Z'),
+    deletable: true,
+    inGuild: () => true,
+    attachments: {
+      map: <T>(fn: (attachment: any) => T) => ([] as any[]).map(fn),
+      values: () => ([] as any[])[Symbol.iterator](),
+    },
+  } as any;
+}
 
 function fakeMessage(
   input: Partial<{
