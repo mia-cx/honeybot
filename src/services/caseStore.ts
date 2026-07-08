@@ -2,21 +2,51 @@ import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../db/database.js';
-import { caseAttachments, caseEvidence, caseEvents, caseMessages, cases, knownImages, knownTexts } from '../db/schema.js';
-import type { AnalysisResult, CaseStatus, EvidenceItem, TriggerType } from '../domain/types.js';
-import { normalizeText, textHash } from '../utils/fingerprints.js';
+import {
+  caseAttachments,
+  caseEvidence,
+  caseEvents,
+  caseMessages,
+  cases,
+  knownImages,
+  knownTexts,
+} from '../db/schema.js';
+import type {
+  AnalysisResult,
+  CaseStatus,
+  EvidenceItem,
+  ProximalKnownScam,
+  ProximalKnownScamImage,
+  TriggerType,
+} from '../domain/types.js';
+import type { EmbeddingResult, ScamEmbedder } from './embeddings.js';
+import {
+  jaccard,
+  normalizeText,
+  shingles,
+  textHash,
+} from '../utils/fingerprints.js';
 import type { FileStorage, StoredFile } from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
 
-const caseId = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-', 16);
+const caseId = customAlphabet(
+  '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-',
+  16,
+);
 
 export class CaseStore {
   constructor(
     private readonly db: Db,
     private readonly storage: FileStorage,
+    private readonly embedder?: ScamEmbedder,
   ) {}
 
-  async getOrCreateCase(input: { guildId: string; userId: string; triggerType: TriggerType; reason: string }) {
+  async getOrCreateCase(input: {
+    guildId: string;
+    userId: string;
+    triggerType: TriggerType;
+    reason: string;
+  }) {
     const existing = await this.db
       .select()
       .from(cases)
@@ -49,7 +79,14 @@ export class CaseStore {
     };
 
     await this.db.insert(cases).values(created);
-    await this.addEvent(created.id, 'triggered', 'bot', null, input.reason, input);
+    await this.addEvent(
+      created.id,
+      'triggered',
+      'bot',
+      null,
+      input.reason,
+      input,
+    );
     return created;
   }
 
@@ -72,14 +109,25 @@ export class CaseStore {
       .onConflictDoNothing()
       .returning();
 
-    const caseMessage = inserted[0] ?? (await this.db.select().from(caseMessages).where(eq(caseMessages.messageId, message.id)).get());
+    const caseMessage =
+      inserted[0] ??
+      (await this.db
+        .select()
+        .from(caseMessages)
+        .where(eq(caseMessages.messageId, message.id))
+        .get());
     if (!caseMessage) throw new Error('Failed to persist case message');
 
     const storedAttachments = [] as Array<typeof caseAttachments.$inferSelect>;
     for (const attachment of message.attachments.values()) {
       let stored: StoredFile | null = null;
       try {
-        stored = await this.storage.saveFromUrl(attachment.url, [message.guildId, caseId], attachment.name ?? `${attachment.id}.bin`);
+        stored = await this.storage.saveFromUrl(
+          attachment.url,
+          [message.guildId, caseId],
+          attachment.name ?? `${attachment.id}.bin`,
+          { contentType: attachment.contentType ?? null },
+        );
       } catch {
         // Keep metadata even if Discord CDN download fails.
       }
@@ -90,10 +138,10 @@ export class CaseStore {
           caseId,
           caseMessageId: caseMessage.id,
           discordAttachmentId: attachment.id,
-          name: attachment.name ?? null,
+          name: stored?.fileName ?? attachment.name ?? null,
           originalUrl: attachment.url,
           reviewAttachmentUrl: null,
-          contentType: attachment.contentType ?? null,
+          contentType: stored?.contentType ?? attachment.contentType ?? null,
           sizeBytes: stored?.sizeBytes ?? attachment.size,
           sha256: stored?.sha256 ?? null,
           perceptualHash: null,
@@ -108,7 +156,10 @@ export class CaseStore {
   }
 
   async markMessageDeleted(messageId: string) {
-    await this.db.update(caseMessages).set({ deleted: 1 }).where(eq(caseMessages.messageId, messageId));
+    await this.db
+      .update(caseMessages)
+      .set({ deleted: 1 })
+      .where(eq(caseMessages.messageId, messageId));
   }
 
   async getCase(caseId: string) {
@@ -116,20 +167,36 @@ export class CaseStore {
   }
 
   async getCaseByReviewMessage(guildId: string, messageId: string) {
-    return this.db.select().from(cases).where(and(eq(cases.guildId, guildId), eq(cases.reviewMessageId, messageId))).get();
+    return this.db
+      .select()
+      .from(cases)
+      .where(
+        and(eq(cases.guildId, guildId), eq(cases.reviewMessageId, messageId)),
+      )
+      .get();
   }
 
   async getCaseBySourceMessage(messageId: string) {
-    const caseMessage = await this.db.select().from(caseMessages).where(eq(caseMessages.messageId, messageId)).get();
+    const caseMessage = await this.db
+      .select()
+      .from(caseMessages)
+      .where(eq(caseMessages.messageId, messageId))
+      .get();
     return caseMessage ? this.getCase(caseMessage.caseId) : undefined;
   }
 
   async listCaseAttachments(caseId: string) {
-    return this.db.select().from(caseAttachments).where(eq(caseAttachments.caseId, caseId));
+    return this.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseId));
   }
 
   async listCaseMessages(caseId: string) {
-    return this.db.select().from(caseMessages).where(eq(caseMessages.caseId, caseId));
+    return this.db
+      .select()
+      .from(caseMessages)
+      .where(eq(caseMessages.caseId, caseId));
   }
 
   async saveAnalysis(caseId: string, analysis: AnalysisResult) {
@@ -139,9 +206,20 @@ export class CaseStore {
     }
     await this.db
       .update(cases)
-      .set({ evidenceSummaryJson: JSON.stringify(analysis), reason: analysis.reason, updatedAt: now })
+      .set({
+        evidenceSummaryJson: JSON.stringify(analysis),
+        reason: analysis.reason,
+        updatedAt: now,
+      })
       .where(eq(cases.id, caseId));
-    await this.addEvent(caseId, 'evidence_recorded', 'bot', null, analysis.reason, { confidence: analysis.confidence });
+    await this.addEvent(
+      caseId,
+      'evidence_recorded',
+      'bot',
+      null,
+      analysis.reason,
+      { confidence: analysis.confidence },
+    );
   }
 
   async addEvidence(caseId: string, item: EvidenceItem) {
@@ -156,26 +234,68 @@ export class CaseStore {
     });
   }
 
-  async resolve(caseId: string, status: CaseStatus, actionTaken: string | null, actorId: string | null, reason: string) {
+  async resolve(
+    caseId: string,
+    status: CaseStatus,
+    actionTaken: string | null,
+    actorId: string | null,
+    reason: string,
+  ) {
     const now = new Date().toISOString();
-    await this.db.update(cases).set({ status, actionTaken, reason, updatedAt: now }).where(eq(cases.id, caseId));
-    await this.addEvent(caseId, status, actorId ? 'user' : 'bot', actorId, reason, { actionTaken });
+    await this.db
+      .update(cases)
+      .set({ status, actionTaken, reason, updatedAt: now })
+      .where(eq(cases.id, caseId));
+    await this.addEvent(
+      caseId,
+      status,
+      actorId ? 'user' : 'bot',
+      actorId,
+      reason,
+      { actionTaken },
+    );
   }
 
   async setReviewMessage(caseId: string, channelId: string, messageId: string) {
-    await this.db.update(cases).set({ reviewChannelId: channelId, reviewMessageId: messageId, updatedAt: new Date().toISOString() }).where(eq(cases.id, caseId));
+    await this.db
+      .update(cases)
+      .set({
+        reviewChannelId: channelId,
+        reviewMessageId: messageId,
+        updatedAt: new Date().toISOString(),
+      })
+      .where(eq(cases.id, caseId));
   }
 
   async dismissAndDeleteCase(caseId: string, actorId: string, reason: string) {
     const attachments = await this.listCaseAttachments(caseId);
-    await this.addEvent(caseId, 'dismissed', 'user', actorId, reason, { deletedCase: true });
-    for (const attachment of attachments) await this.storage.remove(attachment.storageKey);
+    await this.addEvent(caseId, 'dismissed', 'user', actorId, reason, {
+      deletedCase: true,
+    });
+    for (const attachment of attachments)
+      await this.storage.remove(attachment.storageKey);
 
-    await this.db.delete(caseAttachments).where(eq(caseAttachments.caseId, caseId));
+    await this.db
+      .delete(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseId));
     await this.db.delete(caseMessages).where(eq(caseMessages.caseId, caseId));
     await this.db.delete(caseEvidence).where(eq(caseEvidence.caseId, caseId));
-    await this.db.delete(knownTexts).where(and(eq(knownTexts.sourceCaseId, caseId), eq(knownTexts.status, 'pending')));
-    await this.db.delete(knownImages).where(and(eq(knownImages.sourceCaseId, caseId), eq(knownImages.status, 'pending')));
+    await this.db
+      .delete(knownTexts)
+      .where(
+        and(
+          eq(knownTexts.sourceCaseId, caseId),
+          eq(knownTexts.status, 'pending'),
+        ),
+      );
+    await this.db
+      .delete(knownImages)
+      .where(
+        and(
+          eq(knownImages.sourceCaseId, caseId),
+          eq(knownImages.status, 'pending'),
+        ),
+      );
     await this.db.delete(cases).where(eq(cases.id, caseId));
   }
 
@@ -183,9 +303,13 @@ export class CaseStore {
     const caseRow = await this.getCase(caseId);
     if (!caseRow) return null;
 
-    const [messages, attachments] = await Promise.all([this.listCaseMessages(caseId), this.listCaseAttachments(caseId)]);
+    const [messages, attachments] = await Promise.all([
+      this.listCaseMessages(caseId),
+      this.listCaseAttachments(caseId),
+    ]);
     const now = new Date().toISOString();
-    const scamReason = caseRow.reason ?? `Promoted from Honeybot case ${caseId}`;
+    const scamReason =
+      caseRow.reason ?? `Promoted from Honeybot case ${caseId}`;
     const description = `Global known scam from Honeybot case ${caseId}`;
     let textAdded = 0;
     let textSkipped = 0;
@@ -200,9 +324,22 @@ export class CaseStore {
       const existing = await this.db
         .select()
         .from(knownTexts)
-        .where(and(eq(knownTexts.textHash, message.textHash), eq(knownTexts.scope, 'global'), eq(knownTexts.status, 'approved')))
+        .where(
+          and(
+            eq(knownTexts.textHash, message.textHash),
+            eq(knownTexts.scope, 'global'),
+            eq(knownTexts.status, 'approved'),
+          ),
+        )
         .get();
       if (existing) {
+        textSkipped += 1;
+        continue;
+      }
+      const embedding = await this.embedder
+        ?.embedText(caseRow.guildId, message.normalizedContent)
+        .catch(() => null);
+      if (!embedding) {
         textSkipped += 1;
         continue;
       }
@@ -210,10 +347,10 @@ export class CaseStore {
         id: randomUUID(),
         normalizedText: message.normalizedContent,
         textHash: message.textHash,
-        embeddingProvider: null,
-        embeddingModel: null,
-        embeddingDimensions: null,
-        embeddingVectorJson: null,
+        embeddingProvider: embedding.provider,
+        embeddingModel: embedding.model,
+        embeddingDimensions: embedding.dimensions,
+        embeddingVectorJson: JSON.stringify(embedding.vector),
         description,
         scamReason,
         sourceCaseId: caseId,
@@ -236,9 +373,33 @@ export class CaseStore {
       const existing = await this.db
         .select()
         .from(knownImages)
-        .where(and(eq(knownImages.sha256, attachment.sha256), eq(knownImages.scope, 'global'), eq(knownImages.status, 'approved')))
+        .where(
+          and(
+            eq(knownImages.sha256, attachment.sha256),
+            eq(knownImages.scope, 'global'),
+            eq(knownImages.status, 'approved'),
+          ),
+        )
         .get();
       if (existing) {
+        imageSkipped += 1;
+        continue;
+      }
+      const dataUrl = await this.imageDataUrl(attachment.storageKey).catch(
+        () => null,
+      );
+      const embedding = dataUrl
+        ? await this.embedder
+            ?.embedImage(caseRow.guildId, {
+              contentType: attachment.contentType,
+              name: attachment.name,
+              url: attachment.originalUrl,
+              storageKey: attachment.storageKey,
+              dataUrl,
+            })
+            .catch(() => null)
+        : null;
+      if (!embedding) {
         imageSkipped += 1;
         continue;
       }
@@ -247,10 +408,10 @@ export class CaseStore {
         sha256: attachment.sha256,
         perceptualHash: attachment.perceptualHash,
         storageKey: attachment.storageKey,
-        embeddingProvider: null,
-        embeddingModel: null,
-        embeddingDimensions: null,
-        embeddingVectorJson: null,
+        embeddingProvider: embedding.provider,
+        embeddingModel: embedding.model,
+        embeddingDimensions: embedding.dimensions,
+        embeddingVectorJson: JSON.stringify(embedding.vector),
         description,
         scamReason,
         sourceCaseId: caseId,
@@ -266,11 +427,25 @@ export class CaseStore {
     }
 
     const result = { textAdded, textSkipped, imageAdded, imageSkipped };
-    await this.addEvent(caseId, 'known_scam_promoted', 'user', actorId, 'Promoted case evidence to global known scams', result);
+    await this.addEvent(
+      caseId,
+      'known_scam_promoted',
+      'user',
+      actorId,
+      'Promoted case evidence to global known scams',
+      result,
+    );
     return result;
   }
 
-  async addEvent(caseId: string, eventType: string, actorType: 'bot' | 'user', actorId: string | null, reason: string | null, metadata: unknown) {
+  async addEvent(
+    caseId: string,
+    eventType: string,
+    actorType: 'bot' | 'user',
+    actorId: string | null,
+    reason: string | null,
+    metadata: unknown,
+  ) {
     await this.db.insert(caseEvents).values({
       caseId,
       eventType,
@@ -286,15 +461,416 @@ export class CaseStore {
     return this.db
       .select()
       .from(knownTexts)
-      .where(and(eq(knownTexts.textHash, hash), eq(knownTexts.status, 'approved'), inArray(knownTexts.scope, ['global', 'guild'])))
-      .then((rows) => rows.find((row) => row.scope === 'global' || row.guildId === guildId) ?? null);
+      .where(
+        and(
+          eq(knownTexts.textHash, hash),
+          eq(knownTexts.status, 'approved'),
+          inArray(knownTexts.scope, ['global', 'guild']),
+        ),
+      )
+      .then(
+        (rows) =>
+          rows.find(
+            (row) =>
+              hasCorpusEmbedding(row) &&
+              (row.scope === 'global' || row.guildId === guildId),
+          ) ?? null,
+      );
   }
 
   async findKnownImageBySha(guildId: string, sha: string) {
     return this.db
       .select()
       .from(knownImages)
-      .where(and(eq(knownImages.sha256, sha), eq(knownImages.status, 'approved'), inArray(knownImages.scope, ['global', 'guild'])))
-      .then((rows) => rows.find((row) => row.scope === 'global' || row.guildId === guildId) ?? null);
+      .where(
+        and(
+          eq(knownImages.sha256, sha),
+          eq(knownImages.status, 'approved'),
+          inArray(knownImages.scope, ['global', 'guild']),
+        ),
+      )
+      .then(
+        (rows) =>
+          rows.find(
+            (row) =>
+              hasCorpusEmbedding(row) &&
+              (row.scope === 'global' || row.guildId === guildId),
+          ) ?? null,
+      );
   }
+
+  async listKnownCorpus(
+    guildId: string,
+    options: {
+      page?: number;
+      pageSize?: number;
+      type?: 'all' | 'text' | 'image';
+    } = {},
+  ) {
+    const pageSize = options.pageSize ?? 5;
+    const page = Math.max(1, options.page ?? 1);
+    const type = options.type ?? 'all';
+    const items: KnownCorpusItem[] = [];
+
+    if (type === 'all' || type === 'text') {
+      const textRows = await this.db
+        .select()
+        .from(knownTexts)
+        .where(
+          and(
+            eq(knownTexts.status, 'approved'),
+            inArray(knownTexts.scope, ['global', 'guild']),
+          ),
+        )
+        .then((rows) =>
+          rows.filter(
+            (row) =>
+              hasCorpusEmbedding(row) &&
+              (row.scope === 'global' || row.guildId === guildId),
+          ),
+        );
+      items.push(
+        ...textRows.map((row) => ({
+          kind: 'text' as const,
+          id: row.id,
+          scope: row.scope,
+          guildId: row.guildId,
+          description: row.description,
+          scamReason: row.scamReason,
+          sourceCaseId: row.sourceCaseId,
+          embeddingProvider: row.embeddingProvider,
+          embeddingModel: row.embeddingModel,
+          embeddingDimensions: row.embeddingDimensions,
+          preview: row.normalizedText,
+          createdAt: row.createdAt,
+        })),
+      );
+    }
+
+    if (type === 'all' || type === 'image') {
+      const imageRows = await this.db
+        .select()
+        .from(knownImages)
+        .where(
+          and(
+            eq(knownImages.status, 'approved'),
+            inArray(knownImages.scope, ['global', 'guild']),
+          ),
+        )
+        .then((rows) =>
+          rows.filter(
+            (row) =>
+              hasCorpusEmbedding(row) &&
+              (row.scope === 'global' || row.guildId === guildId),
+          ),
+        );
+      items.push(
+        ...imageRows.map((row) => ({
+          kind: 'image' as const,
+          id: row.id,
+          scope: row.scope,
+          guildId: row.guildId,
+          description: row.description,
+          scamReason: row.scamReason,
+          sourceCaseId: row.sourceCaseId,
+          embeddingProvider: row.embeddingProvider,
+          embeddingModel: row.embeddingModel,
+          embeddingDimensions: row.embeddingDimensions,
+          preview: row.storageKey,
+          createdAt: row.createdAt,
+        })),
+      );
+    }
+
+    const sorted = items.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const total = sorted.length;
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    const safePage = Math.min(page, totalPages);
+    return {
+      items: sorted.slice((safePage - 1) * pageSize, safePage * pageSize),
+      page: safePage,
+      pageSize,
+      total,
+      totalPages,
+      type,
+    };
+  }
+
+  async findProximalKnownScams(
+    cached: { guildId: string; normalizedContent: string },
+    options: {
+      maxScams?: number;
+      maxImages?: number;
+      textEmbedding?: EmbeddingResult | null;
+      imageEmbeddings?: EmbeddingResult[];
+    } = {},
+  ): Promise<ProximalKnownScam[]> {
+    const maxScams = options.maxScams ?? 3;
+    const maxImages = options.maxImages ?? 10;
+    const inputShingles = shingles(cached.normalizedContent);
+
+    const textRows = await this.db
+      .select()
+      .from(knownTexts)
+      .where(
+        and(
+          eq(knownTexts.status, 'approved'),
+          inArray(knownTexts.scope, ['global', 'guild']),
+        ),
+      )
+      .then((rows) =>
+        rows.filter(
+          (row) =>
+            hasCorpusEmbedding(row) &&
+            (row.scope === 'global' || row.guildId === cached.guildId),
+        ),
+      );
+
+    const candidates = new Map<string, ProximalCandidate>();
+    for (const row of textRows) {
+      const embeddingScore = cosineForStoredEmbedding(
+        options.textEmbedding,
+        row.embeddingProvider,
+        row.embeddingModel,
+        row.embeddingDimensions,
+        row.embeddingVectorJson,
+      );
+      const fuzzyScore = inputShingles.size
+        ? jaccard(inputShingles, shingles(row.normalizedText))
+        : 0;
+      const score = Math.max(embeddingScore ?? 0, fuzzyScore);
+      if (score <= 0) continue;
+      candidates.set(`text:${row.id}`, {
+        id: row.id,
+        sourceCaseId: row.sourceCaseId,
+        score,
+        source:
+          embeddingScore !== null && embeddingScore >= fuzzyScore
+            ? 'text_embedding'
+            : 'text_fuzzy',
+        description: row.description,
+        scamReason: row.scamReason,
+        normalizedText: row.normalizedText,
+        imageRow: null,
+      });
+    }
+
+    const imageEmbeddings = options.imageEmbeddings ?? [];
+    if (imageEmbeddings.length > 0) {
+      const imageRows = await this.db
+        .select()
+        .from(knownImages)
+        .where(
+          and(
+            eq(knownImages.status, 'approved'),
+            inArray(knownImages.scope, ['global', 'guild']),
+          ),
+        )
+        .then((rows) =>
+          rows.filter(
+            (row) =>
+              hasCorpusEmbedding(row) &&
+              (row.scope === 'global' || row.guildId === cached.guildId),
+          ),
+        );
+      for (const row of imageRows) {
+        const score = Math.max(
+          ...imageEmbeddings.map(
+            (embedding) =>
+              cosineForStoredEmbedding(
+                embedding,
+                row.embeddingProvider,
+                row.embeddingModel,
+                row.embeddingDimensions,
+                row.embeddingVectorJson,
+              ) ?? 0,
+          ),
+        );
+        if (score <= 0) continue;
+        candidates.set(`image:${row.id}`, {
+          id: row.id,
+          sourceCaseId: row.sourceCaseId,
+          score,
+          source: 'image_embedding',
+          description: row.description,
+          scamReason: row.scamReason,
+          normalizedText: null,
+          imageRow: row,
+        });
+      }
+    }
+
+    const ranked = [...candidates.values()]
+      .sort((a, b) => b.score - a.score)
+      .slice(0, maxScams);
+
+    let remainingImages = maxImages;
+    const refs: ProximalKnownScam[] = [];
+    for (const candidate of ranked) {
+      const images = await this.imagesForCandidate(candidate, remainingImages);
+      remainingImages -= images.length;
+      refs.push({
+        id: candidate.id,
+        sourceCaseId: candidate.sourceCaseId,
+        score: candidate.score,
+        source: candidate.source,
+        description: candidate.description,
+        scamReason: candidate.scamReason,
+        normalizedText: candidate.normalizedText,
+        images,
+      });
+    }
+    return refs;
+  }
+
+  private async imagesForCandidate(
+    candidate: ProximalCandidate,
+    limit: number,
+  ): Promise<ProximalKnownScamImage[]> {
+    if (limit <= 0) return [];
+    if (candidate.imageRow) {
+      const image = await this.knownImageToProximal(candidate.imageRow).catch(
+        () => null,
+      );
+      return image ? [image] : [];
+    }
+    return candidate.sourceCaseId
+      ? this.proximalImagesForCase(candidate.sourceCaseId, limit)
+      : [];
+  }
+
+  private async proximalImagesForCase(
+    caseId: string,
+    limit: number,
+  ): Promise<ProximalKnownScamImage[]> {
+    const rows = await this.db
+      .select()
+      .from(knownImages)
+      .where(
+        and(
+          eq(knownImages.sourceCaseId, caseId),
+          eq(knownImages.status, 'approved'),
+        ),
+      )
+      .limit(limit);
+    const images: ProximalKnownScamImage[] = [];
+    for (const row of rows) {
+      if (!hasCorpusEmbedding(row)) continue;
+      const image = await this.knownImageToProximal(row).catch(() => null);
+      if (image) images.push(image);
+    }
+    return images;
+  }
+
+  private async knownImageToProximal(row: typeof knownImages.$inferSelect) {
+    const dataUrl = await this.imageDataUrl(row.storageKey);
+    return {
+      id: row.id,
+      storageKey: row.storageKey,
+      contentType: contentTypeForStorageKey(row.storageKey),
+      sizeBytes: 0,
+      dataUrl,
+    };
+  }
+
+  private async imageDataUrl(storageKey: string) {
+    const contentType = contentTypeForStorageKey(storageKey);
+    const bytes = await this.storage.read(storageKey);
+    return `data:${contentType};base64,${bytes.toString('base64')}`;
+  }
+}
+
+export type KnownCorpusItem = {
+  kind: 'text' | 'image';
+  id: string;
+  scope: string;
+  guildId: string | null;
+  description: string;
+  scamReason: string;
+  sourceCaseId: string | null;
+  embeddingProvider: string | null;
+  embeddingModel: string | null;
+  embeddingDimensions: number | null;
+  preview: string;
+  createdAt: string;
+};
+
+type ProximalCandidate = {
+  id: string;
+  sourceCaseId: string | null;
+  score: number;
+  source: NonNullable<ProximalKnownScam['source']>;
+  description: string;
+  scamReason: string;
+  normalizedText: string | null;
+  imageRow: typeof knownImages.$inferSelect | null;
+};
+
+function hasCorpusEmbedding(row: {
+  embeddingProvider: string | null;
+  embeddingModel: string | null;
+  embeddingDimensions: number | null;
+  embeddingVectorJson: string | null;
+}) {
+  return Boolean(
+    row.embeddingProvider &&
+    row.embeddingModel &&
+    row.embeddingDimensions &&
+    row.embeddingVectorJson,
+  );
+}
+
+function cosineForStoredEmbedding(
+  query: EmbeddingResult | null | undefined,
+  provider: string | null,
+  model: string | null,
+  dimensions: number | null,
+  vectorJson: string | null,
+) {
+  if (!query || !vectorJson) return null;
+  if (
+    provider !== query.provider ||
+    model !== query.model ||
+    dimensions !== query.dimensions
+  )
+    return null;
+  const vector = parseVector(vectorJson);
+  return vector ? cosineSimilarity(query.vector, vector) : null;
+}
+
+function parseVector(json: string) {
+  try {
+    const value = JSON.parse(json) as unknown;
+    return Array.isArray(value) &&
+      value.every((item) => typeof item === 'number' && Number.isFinite(item))
+      ? value
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function cosineSimilarity(a: number[], b: number[]) {
+  if (a.length === 0 || a.length !== b.length) return 0;
+  let dot = 0;
+  let aMagnitude = 0;
+  let bMagnitude = 0;
+  for (let index = 0; index < a.length; index += 1) {
+    const left = a[index] ?? 0;
+    const right = b[index] ?? 0;
+    dot += left * right;
+    aMagnitude += left * left;
+    bMagnitude += right * right;
+  }
+  if (aMagnitude === 0 || bMagnitude === 0) return 0;
+  return dot / (Math.sqrt(aMagnitude) * Math.sqrt(bMagnitude));
+}
+
+function contentTypeForStorageKey(storageKey: string) {
+  const lower = storageKey.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  if (lower.endsWith('.svg')) return 'image/svg+xml';
+  return 'image/png';
 }

@@ -12,7 +12,9 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "eval:fixtures": "tsx scripts/eval-fixtures.ts",
+    "seed:fixtures": "tsx scripts/seed-fixtures.ts",
     "format": "prettier --write ."
   },
   "dependencies": {
@@ -21,12 +23,15 @@
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.45.2",
     "effect": "4.0.0-beta.93",
-    "nanoid": "^5.1.16"
+    "heic-convert": "^2.1.0",
+    "nanoid": "^5.1.16",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.8.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20.14.15",
+    "@vitest/coverage-v8": "^4.1.9",
     "eslint": "^9.8.0",
     "prettier": "^3.3.3",
     "tsx": "^4.16.2",

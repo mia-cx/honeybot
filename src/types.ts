@@ -5,6 +5,7 @@ export type CachedAttachment = {
   size: number;
   url: string;
   proxyUrl: string;
+  dataUrl?: string | undefined;
   sha256: string | null;
   storageKey: string | null;
 };

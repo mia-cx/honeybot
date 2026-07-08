@@ -12,6 +12,7 @@ type FairQueueOptions = {
   globalLimit: number;
   perGuildLimit: number;
   windowMs: number;
+  logFailures?: boolean;
 };
 
 export class FairQueue {
@@ -22,14 +23,23 @@ export class FairQueue {
   private running = false;
 
   constructor(private readonly options: FairQueueOptions) {
-    this.globalLimiter = new RollingLimiter(options.globalLimit, options.windowMs);
+    this.globalLimiter = new RollingLimiter(
+      options.globalLimit,
+      options.windowMs,
+    );
   }
 
   enqueue<T>(guildId: string, run: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const queue = this.guildQueues.get(guildId) ?? [];
-      if (queue.length === 0 && !this.guildQueues.has(guildId)) this.guildOrder.push(guildId);
-      queue.push({ guildId, run, resolve: resolve as (value: unknown) => void, reject });
+      if (queue.length === 0 && !this.guildQueues.has(guildId))
+        this.guildOrder.push(guildId);
+      queue.push({
+        guildId,
+        run,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+      });
       this.guildQueues.set(guildId, queue as Job<unknown>[]);
       void this.drain();
     });
@@ -55,7 +65,10 @@ export class FairQueue {
         else this.guildQueues.delete(guildId);
 
         const guildLimiter = this.limiterForGuild(guildId);
-        const waitMs = Math.max(this.globalLimiter.waitMs(), guildLimiter.waitMs());
+        const waitMs = Math.max(
+          this.globalLimiter.waitMs(),
+          guildLimiter.waitMs(),
+        );
         if (waitMs > 0) await sleep(waitMs);
 
         this.globalLimiter.take();
@@ -64,11 +77,13 @@ export class FairQueue {
         try {
           job.resolve(await job.run());
         } catch (error) {
-          logger.warn('Queued job failed', {
-            queue: this.options.name,
-            guildId,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          if (this.options.logFailures !== false) {
+            logger.warn('Queued job failed', {
+              queue: this.options.name,
+              guildId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
           job.reject(error);
         }
       }
@@ -82,7 +97,10 @@ export class FairQueue {
     const existing = this.guildLimiters.get(guildId);
     if (existing) return existing;
 
-    const limiter = new RollingLimiter(this.options.perGuildLimit, this.options.windowMs);
+    const limiter = new RollingLimiter(
+      this.options.perGuildLimit,
+      this.options.windowMs,
+    );
     this.guildLimiters.set(guildId, limiter);
     return limiter;
   }
