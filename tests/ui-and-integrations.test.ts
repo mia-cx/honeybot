@@ -117,6 +117,32 @@ describe('case review UI', () => {
     ]);
   });
 
+  it('shows waiting copy before classifier evidence arrives', () => {
+    const content = textContent(
+      caseReviewMessage(
+        caseInput({
+          reason: 'No strong evidence found; requires moderator review.',
+          analysis: {
+            confidence: 0,
+            reason: 'No strong evidence found; requires moderator review.',
+            shouldPunish: false,
+            evidence: [
+              {
+                type: 'embedding_retrieval',
+                matched: false,
+                score: 0,
+                summary: 'Embedding retrieval is still warming up.',
+              },
+            ],
+          },
+        }),
+      ).components as Array<any>,
+    );
+
+    expect(content).toContain('_Waiting on classifier responses._');
+    expect(content).not.toContain('No strong evidence found');
+  });
+
   it('renders classifier reasoning as a real blockquote on its own line', () => {
     const content = textContent(
       caseReviewMessage(caseInput()).components as Array<any>,
@@ -128,20 +154,20 @@ describe('case review UI', () => {
     expect(content).not.toContain('88% likelihood of a scam. > fake nitro');
   });
 
-  it('does not double-prefix embedding summaries that already start with a percent', () => {
+  it('renders embedding summaries without generic score prefixes', () => {
     const message = caseReviewMessage(
       caseInput({
         analysis: {
-          confidence: 0.99,
-          reason: 'embedding match',
-          shouldPunish: true,
+          confidence: 0,
+          reason: 'embedding miss',
+          shouldPunish: false,
           evidence: [
             {
               type: 'embedding_retrieval',
-              matched: true,
+              matched: false,
               score: 0.99,
               summary:
-                '99% likelihood of a scam. 4 attachments are within 99% proximity to at least 4 embeddings in the corpus.',
+                'No embedding match. Closest known-scam example was 69% similar; Honeybot requires 82% for this signal.',
             },
           ],
         },
@@ -150,9 +176,10 @@ describe('case review UI', () => {
 
     const content = textContent(message.components as Array<any>);
     expect(content).toContain(
-      '99% likelihood of a scam. 4 attachments are within 99% proximity',
+      'No embedding match. Closest known-scam example was 69% similar; Honeybot requires 82% for this signal.',
     );
-    expect(content).not.toContain('99% 99% likelihood');
+    expect(content).not.toContain('99% No embedding match');
+    expect(content).not.toContain('Embedded The message');
   });
 
   it('renders prevention and resolution variants for every policy type', () => {
@@ -324,7 +351,76 @@ describe('OpenRouterScamClassifier', () => {
       proximalKnownScams: [
         expect.not.objectContaining({ images: expect.anything() }),
       ],
+      classifierTask: expect.stringContaining(
+        'Always include a non-empty reason field',
+      ),
     });
+  });
+
+  it('repairs classifier responses that omit the required reason', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'scam',
+                    scam_likelihood: 0.9,
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'scam',
+                    scam_likelihood: 0.92,
+                    reason:
+                      'Fake Nitro claim with reward bait and a call to claim through a suspicious link.',
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    await expect(
+      classifier.classify(cachedMessage(), classifierContext()),
+    ).resolves.toMatchObject({
+      verdict: 'scam',
+      confidence: 0.92,
+      rationale:
+        'Fake Nitro claim with reward bait and a call to claim through a suspicious link.',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const repairBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(repairBody.messages.at(-1).content).toContain(
+      'previous JSON omitted the required non-empty reason',
+    );
   });
 
   it('parses successful JSON responses and sends image attachments', async () => {
@@ -896,8 +992,14 @@ describe('FileStorage and prompts', () => {
     await expect(loadClassifierPrompt('scam-text')).resolves.toContain(
       'text classifier inside Honeybot',
     );
+    await expect(loadClassifierPrompt('scam-text')).resolves.toContain(
+      'always provide a non-empty `reason`',
+    );
     await expect(loadClassifierPrompt('scam-image')).resolves.toContain(
       'multimodal classifier inside Honeybot',
+    );
+    await expect(loadClassifierPrompt('scam-image')).resolves.toContain(
+      'always provide a non-empty `reason`',
     );
   });
 });

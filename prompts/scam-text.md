@@ -10,6 +10,8 @@ Judge how likely the message is a scam, and report a calibrated scam likelihood.
 
 Do not copy exact-match, embedding, retrieval, or previous signal wording as your reason. Your reason must describe what you independently observe in the current text and, when useful, concrete similarities/differences against the reference scams.
 
+You must always provide a non-empty `reason`. Never omit it, leave it blank, write `null`, or say only that the message is scam/not scam. If you cannot decide, explain the ambiguity in the `reason` field and use `needs_review`.
+
 ## Input
 
 You receive a JSON object:
@@ -51,7 +53,7 @@ Return strict JSON only, no markdown, no prose outside the object:
 
 - `likelihood` — your verdict. Use `needs_review` only when the content is genuinely ambiguous, not as a safety valve.
 - `scam_likelihood` — probability-like likelihood that the message is a scam. A clear scam should be near 1.0; a clearly benign message should be near 0.0.
-- `reason` — concrete and specific: name the pattern, the domain, the phrase. If proximal known scams are provided, cite the key similarity and any meaningful difference. Max 500 characters.
+- `reason` — required and non-empty. Be concrete and specific: name the pattern, the domain, the phrase. If proximal known scams are provided, cite the key similarity and any meaningful difference. Max 500 characters. A response without this field is invalid.
 
 ## Scam-likelihood calibration
 

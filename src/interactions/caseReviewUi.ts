@@ -171,10 +171,7 @@ function signalsContainer(input: SignalInput): RawComponent {
         ),
       ),
       separator(),
-      signalBlock(
-        'Classifier verdict',
-        classifierSummary(input.analysis, input.reason),
-      ),
+      signalBlock('Classifier verdict', classifierSummary(input.analysis)),
     ],
     0xfacc15,
   );
@@ -364,27 +361,22 @@ function signalSummary(
 }
 
 function formatSignalItem(item: AnalysisResult['evidence'][number]) {
-  return startsWithPercent(item.summary)
-    ? item.summary
-    : `${Math.round(item.score * 100)}% ${item.summary}`;
+  if (item.type === 'embedding_retrieval' || startsWithPercent(item.summary)) {
+    return item.summary;
+  }
+  return `${Math.round(item.score * 100)}% ${item.summary}`;
 }
 
 function startsWithPercent(value: string) {
   return /^\d+%(?:\s|$)/.test(value.trim());
 }
 
-function classifierSummary(
-  analysis: AnalysisResult | null,
-  fallbackReason: string,
-) {
+function classifierSummary(analysis: AnalysisResult | null) {
   if (!analysis) return '_Pending classifier response._';
   const classifiers = analysis.evidence.filter(
     (item) => item.type === 'classifier',
   );
-  if (classifiers.length === 0)
-    return fallbackReason
-      ? quote(fallbackReason, 700)
-      : '_Classifier has not run yet._';
+  if (classifiers.length === 0) return '_Waiting on classifier responses._';
   return classifiers.map(classifierSignalSummary).join('\n\n');
 }
 

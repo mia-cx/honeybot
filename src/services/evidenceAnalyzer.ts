@@ -246,7 +246,7 @@ function embeddingEvidenceFrom(
     summary:
       embeddingMatches.length > 0
         ? embeddingMatchSummary(embeddingMatches, diagnostics)
-        : `Embedded ${embeddingSubject(diagnostics).text}. Top corpus vector was ${percent(top.score)}, below the ${percent(threshold)} threshold.`,
+        : embeddingMissSummary(top.score, threshold),
     metadata: {
       knownScamId: top.id,
       source: top.source,
@@ -278,7 +278,11 @@ function embeddingMatchSummary(
 ) {
   const top = matches[0];
   const subject = embeddingSubject(diagnostics);
-  return `${percent(top?.score ?? 0)} likelihood of a scam. ${subject.text} ${subject.plural ? 'are' : 'is'} within ${percent(top?.score ?? 0)} proximity to at least ${matches.length} embedding${matches.length === 1 ? '' : 's'} in the corpus.`;
+  return `${percent(top?.score ?? 0)} embedding match. ${subject.text} ${subject.plural ? 'look' : 'looks'} similar to ${matches.length} known scam example${matches.length === 1 ? '' : 's'} in the corpus.`;
+}
+
+function embeddingMissSummary(score: number, threshold: number) {
+  return `No embedding match. Closest known-scam example was ${percent(score)} similar; Honeybot requires ${percent(threshold)} for this signal.`;
 }
 
 function embeddingSubject(diagnostics: EmbeddingDiagnostics) {

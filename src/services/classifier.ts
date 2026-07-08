@@ -111,7 +111,7 @@ async function openRouterJsonClassification(
     };
   }
 
-  const requestBody = {
+  const requestBody: OpenRouterRequestBody = {
     model: config.modelId,
     messages: [
       { role: 'system', content: systemPrompt },
@@ -120,30 +120,11 @@ async function openRouterJsonClassification(
     response_format: { type: 'json_object' },
     temperature: 0,
   };
-  logVerboseJson('openrouter.classifier.request', requestBody);
-
-  const response = await fetchWithTimeout(
-    'https://openrouter.ai/api/v1/chat/completions',
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://github.com/mia-cx/honeybot',
-        'X-Title': 'Honeybot',
-      },
-      body: JSON.stringify(requestBody),
-    },
-    MODEL_REQUEST_TIMEOUT_MS,
+  const { response, responseText } = await openRouterCompletion(
+    requestBody,
+    config.apiKey,
+    'openrouter.classifier',
   );
-
-  const responseText = await response.text();
-  const responseJson = parseJsonForLogging(responseText);
-  logVerboseJson('openrouter.classifier.response', {
-    status: response.status,
-    ok: response.ok,
-    body: responseJson ?? responseText,
-  });
 
   if (!response.ok) {
     return {
@@ -157,7 +138,81 @@ async function openRouterJsonClassification(
   const raw = json.choices[0]?.message.content;
   if (!raw) throw new Error('OpenRouter classifier returned no content');
 
-  const parsed = parseClassifierResult(raw);
+  const parsed = await repairMissingReason(
+    parseClassifierResult(raw),
+    requestBody,
+    config.apiKey,
+    raw,
+  );
+  return classificationResultFromParsed(parsed);
+}
+
+async function openRouterCompletion(
+  requestBody: unknown,
+  apiKey: string,
+  label: string,
+) {
+  logVerboseJson(`${label}.request`, requestBody);
+  const response = await fetchWithTimeout(
+    'https://openrouter.ai/api/v1/chat/completions',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/mia-cx/honeybot',
+        'X-Title': 'Honeybot',
+      },
+      body: JSON.stringify(requestBody),
+    },
+    MODEL_REQUEST_TIMEOUT_MS,
+  );
+  const responseText = await response.text();
+  logVerboseJson(`${label}.response`, {
+    status: response.status,
+    ok: response.ok,
+    body: parseJsonForLogging(responseText) ?? responseText,
+  });
+  return { response, responseText };
+}
+
+async function repairMissingReason(
+  parsed: ParsedClassifierResult,
+  requestBody: OpenRouterRequestBody,
+  apiKey: string,
+  rawResponse: string,
+) {
+  if (!parsed.reasonMissing) return parsed;
+
+  const repairRequestBody = {
+    ...requestBody,
+    messages: [
+      ...requestBody.messages,
+      { role: 'assistant', content: rawResponse },
+      {
+        role: 'user',
+        content:
+          'Your previous JSON omitted the required non-empty reason. Return strict JSON only with likelihood, scam_likelihood, and reason. The reason must cite concrete observations from the current case and must not restate retrieval, exact-match, or embedding scores.',
+      },
+    ],
+  } satisfies OpenRouterRequestBody;
+
+  const { response, responseText } = await openRouterCompletion(
+    repairRequestBody,
+    apiKey,
+    'openrouter.classifier.reason_repair',
+  );
+  if (!response.ok) return parsed;
+  const json = parseOpenRouterResponse(responseText);
+  const raw = json.choices[0]?.message.content;
+  if (!raw) return parsed;
+  const repaired = parseClassifierResult(raw);
+  return repaired.reasonMissing ? parsed : repaired;
+}
+
+function classificationResultFromParsed(
+  parsed: ParsedClassifierResult,
+): ClassificationResult {
   return {
     verdict:
       parsed.likelihood === 'scam'
@@ -171,13 +226,28 @@ async function openRouterJsonClassification(
   };
 }
 
+type ParsedClassifierResult = ReturnType<typeof parseClassifierResult>;
+type OpenRouterRequestBody = {
+  model: string;
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant';
+    content: string | unknown[];
+  }>;
+  response_format: { type: 'json_object' };
+  temperature: number;
+};
+
 function parseClassifierResult(raw: string) {
   const parsed = parseJsonObject(raw);
   const likelihood = likelihoodFrom(parsed);
+  const reason = reasonField(parsed);
   return {
     likelihood,
     confidence: confidenceFrom(parsed, likelihood),
-    reason: reasonFrom(parsed, likelihood),
+    reason:
+      reason ||
+      'Model omitted its required reason. Treat this classifier signal as incomplete and review manually.',
+    reasonMissing: !reason,
   };
 }
 
@@ -272,13 +342,23 @@ function normalizeScore(value: number) {
   return Math.max(0, Math.min(1, value > 1 ? value / 100 : value));
 }
 
-function reasonFrom(parsed: Record<string, unknown>, likelihood: string) {
+function reasonField(parsed: Record<string, unknown>) {
   const reason =
-    stringField(parsed, ['reason', 'rationale', 'explanation', 'reasoning']) ||
-    firstUsefulString(parsed);
-  return reason
-    ? truncate(reason, 500)
-    : `Classifier returned ${likelihood} but omitted reasoning.`;
+    usefulStringField(parsed, [
+      'reason',
+      'rationale',
+      'explanation',
+      'reasoning',
+    ]) || firstUsefulString(parsed);
+  return reason ? truncate(reason, 500) : '';
+}
+
+function usefulStringField(parsed: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const reason = explicitReasonString(parsed[key]);
+    if (reason) return reason;
+  }
+  return '';
 }
 
 function stringField(parsed: Record<string, unknown>, keys: string[]) {
@@ -304,9 +384,38 @@ function numberField(parsed: Record<string, unknown>, keys: string[]) {
 function firstUsefulString(parsed: Record<string, unknown>) {
   for (const [key, value] of Object.entries(parsed)) {
     if (/^(likelihood|verdict|classification|label)$/i.test(key)) continue;
-    if (typeof value === 'string' && value.trim().length >= 12) {
-      return value.trim();
-    }
+    const reason = usefulString(value);
+    if (reason) return reason;
+  }
+  return '';
+}
+
+function explicitReasonString(value: unknown): string {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    return value.map(explicitReasonString).filter(Boolean).join(' ');
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>)
+      .map(explicitReasonString)
+      .filter(Boolean)
+      .join(' ');
+  }
+  return '';
+}
+
+function usefulString(value: unknown): string {
+  if (typeof value === 'string' && value.trim().length >= 12) {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return value.map(usefulString).filter(Boolean).join(' ');
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value as Record<string, unknown>)
+      .map(usefulString)
+      .filter(Boolean)
+      .join(' ');
   }
   return '';
 }
@@ -447,8 +556,8 @@ function promptFor(
         : {}),
     })),
     classifierTask: includeImages
-      ? 'Make an independent classifier verdict from the current message/images. Proximal known scams are reference examples only: compare concrete visual/text similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.'
-      : 'Make an independent classifier verdict from the current text. Proximal known scams are reference examples only: compare concrete textual similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.',
+      ? 'Make an independent classifier verdict from the current message/images. Always include a non-empty reason field with concrete observations from the current text/images. Proximal known scams are reference examples only: compare concrete visual/text similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.'
+      : 'Make an independent classifier verdict from the current text. Always include a non-empty reason field with concrete observations from the current text. Proximal known scams are reference examples only: compare concrete textual similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.',
   });
 }
 
