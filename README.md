@@ -2,7 +2,7 @@
 
 Honeybot is a Discord moderation bot for catching scam/spam raids with honeypot channels, cross-channel repeat detection, known scam evidence, and configurable per-server punishments.
 
-The current codebase is an early Discord.js scaffold. Key docs:
+The current codebase is a TypeScript Discord.js MVP. Key docs:
 
 - [`docs/SPEC.md`](docs/SPEC.md) — current product and architecture notes
 - [`docs/PLAN.md`](docs/PLAN.md) — implementation plan and schema draft
@@ -33,47 +33,43 @@ After a trigger, the intended pipeline is:
 
 The model does **not** decide moderation actions. It only reports likelihood/confidence/reason. Bot policy decides what to do.
 
-## Current scaffold
+## Current implementation
 
 Implemented now:
 
-- Discord.js v14 TypeScript entrypoint.
-- JSON config scaffold.
-- Honeypot channel detection.
-- Bypass checks for users, roles, and members with `ModerateMembers`.
-- Immediate honeypot timeout/delete pipeline.
-- Duplicate-message threshold detector.
-- Message/attachment metadata cache.
-- Placeholder classifier that always returns `needs_review`.
-- Configurable action types: ban, timeout, role, delete-only, log-only.
-- Prompt files under `prompts/` as placeholders.
+- Discord.js v14 TypeScript bot with slash command registration.
+- Drizzle/SQLite persistence with filesystem evidence storage under `data/images`.
+- Honeypot and cross-channel trigger detection.
+- Moderator/bypass authorization.
+- Prevention and punishment policies.
+- Case/evidence persistence and moderation-channel review buttons.
+- OpenRouter classifier adapter with per-guild BYOK overrides.
+- Guild-fair queues with global and per-guild limiters.
+- Local punishment DMs with stored evidence attachments.
+- Global-ban storage, opt-in, and join-time enforcement.
 
-Not implemented yet:
+Still intentionally shallow/MVP:
 
-- Drizzle/SQLite persistence.
-- Slash command registration/handlers.
-- Known scam text/image corpus.
-- Embeddings and similarity retrieval.
-- Real classifier providers.
-- Moderation-channel case posts with message-component review actions.
-- Global user ban checks.
+- Embeddings and perceptual hashes are schema-ready but not fully implemented.
+- Known corpus exact hash lookup exists; approval UX is minimal.
+- `/settings` is a summary response rather than the final paginated components v2 UI.
 
 ## Setup
 
 ```bash
 pnpm install
 cp .env.example .env
-cp config/guilds.example.json config/guilds.json
 ```
 
 Fill in `.env`:
 
 ```bash
 DISCORD_TOKEN=your-bot-token
-LOG_LEVEL=info
+OPENROUTER_API_KEY=optional-default-key
+API_KEY_ENCRYPTION_KEY=base64-encoded-32-byte-key
 ```
 
-For the current scaffold, edit `config/guilds.json` with real guild, channel, role, and log channel IDs. This JSON config is temporary until the planned SQLite persistence layer lands.
+Configure guilds with slash commands after the bot starts: `/honeypot`, `/moderators`, `/policies`, `/settings`, `/model`, and `/global-bans`.
 
 ## Discord app requirements
 
@@ -99,6 +95,8 @@ pnpm typecheck # type-check only
 pnpm build     # emit dist/
 pnpm start     # run dist/index.js
 pnpm lint      # lint source
+pnpm test      # unit tests
+pnpm eval:fixtures # run prompt evals against text fixtures + local EVAL_CORPUS_DIR/mrscam* images
 ```
 
 ## Hosting notes
