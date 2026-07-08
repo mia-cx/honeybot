@@ -1,0 +1,20 @@
+[
+  {
+    "id": "text-fake-nitro",
+    "prompt": "text",
+    "expected": "scam",
+    "minConfidence": 0.9,
+    "message": "🎉 FREE NITRO GIVEAWAY 🎉 Discord is giving away 3 months of Nitro! Claim yours before it expires: https://discord-nitro.gift/claim @everyone",
+    "attachments": [],
+    "evidenceSummary": "82% Fuzzy match to known scam text: fake Nitro giveaway"
+  },
+  {
+    "id": "text-benign-warning",
+    "prompt": "text",
+    "expected": "not_scam",
+    "minConfidence": 0.75,
+    "message": "Heads up: someone is posting fake Nitro links. Do not click discord-nitro.gift if you see it.",
+    "attachments": [],
+    "evidenceSummary": ""
+  }
+]
