@@ -77,6 +77,11 @@ const honeybotCommands = [
           },
         ],
       },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
+        name: 'verbose',
+        description: 'Toggle full model request/response console logging',
+      },
     ],
   },
   {

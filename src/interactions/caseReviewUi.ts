@@ -359,8 +359,18 @@ function signalSummary(
   if (items.length === 0) return empty;
   return items
     .sort((a, b) => b.score - a.score)
-    .map((item) => `${Math.round(item.score * 100)}% ${item.summary}`)
+    .map(formatSignalItem)
     .join('\n');
+}
+
+function formatSignalItem(item: AnalysisResult['evidence'][number]) {
+  return startsWithPercent(item.summary)
+    ? item.summary
+    : `${Math.round(item.score * 100)}% ${item.summary}`;
+}
+
+function startsWithPercent(value: string) {
+  return /^\d+%(?:\s|$)/.test(value.trim());
 }
 
 function classifierSummary(

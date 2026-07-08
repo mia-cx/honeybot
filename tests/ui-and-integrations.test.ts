@@ -84,7 +84,7 @@ describe('command registration', () => {
       commands
         .find((command) => command.name === 'admin')
         ?.options?.map((option: { name: string }) => option.name),
-    ).toEqual(['add', 'corpus']);
+    ).toEqual(['add', 'corpus', 'verbose']);
     expect(
       commands.find((command) => command.name === 'settings')?.integrationTypes,
     ).toEqual([0]);
@@ -115,6 +115,44 @@ describe('case review UI', () => {
       'case:punish:case1',
       'case:dismiss:case1',
     ]);
+  });
+
+  it('renders classifier reasoning as a real blockquote on its own line', () => {
+    const content = textContent(
+      caseReviewMessage(caseInput()).components as Array<any>,
+    );
+
+    expect(content).toContain(
+      '**Primary model** — likelihood of scam: 88%\n> fake nitro',
+    );
+    expect(content).not.toContain('88% likelihood of a scam. > fake nitro');
+  });
+
+  it('does not double-prefix embedding summaries that already start with a percent', () => {
+    const message = caseReviewMessage(
+      caseInput({
+        analysis: {
+          confidence: 0.99,
+          reason: 'embedding match',
+          shouldPunish: true,
+          evidence: [
+            {
+              type: 'embedding_retrieval',
+              matched: true,
+              score: 0.99,
+              summary:
+                '99% likelihood of a scam. 4 attachments are within 99% proximity to at least 4 embeddings in the corpus.',
+            },
+          ],
+        },
+      }),
+    );
+
+    const content = textContent(message.components as Array<any>);
+    expect(content).toContain(
+      '99% likelihood of a scam. 4 attachments are within 99% proximity',
+    );
+    expect(content).not.toContain('99% 99% likelihood');
   });
 
   it('renders prevention and resolution variants for every policy type', () => {
@@ -405,6 +443,46 @@ describe('OpenRouterScamClassifier', () => {
       reference: 'known_scam_1',
       similarity: 0.82,
       scamReason: 'phishing',
+    });
+  });
+
+  it('uses numeric scam_likelihood when confidence is omitted', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  likelihood: 'scam',
+                  scam_likelihood: 0.99,
+                  reason: 'textbook scam',
+                }),
+              },
+            },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+    );
+
+    await expect(
+      classifier.classify(cachedMessage(), classifierContext()),
+    ).resolves.toMatchObject({
+      verdict: 'scam',
+      confidence: 0.99,
+      rationale: 'textbook scam',
     });
   });
 

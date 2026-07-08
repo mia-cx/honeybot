@@ -2,6 +2,7 @@ import type { ModelPurpose } from '../domain/types.js';
 import type { CachedAttachment } from '../types.js';
 import type { FairQueue } from '../queues/fairQueue.js';
 import type { ModelConfig, ModelStore } from './modelStore.js';
+import { logVerboseJson } from './verbose.js';
 
 const MODEL_REQUEST_TIMEOUT_MS = 30_000;
 export type EmbeddingResult = {
@@ -92,6 +93,16 @@ async function openRouterEmbedding(
     return null;
   }
 
+  const requestBody = {
+    model: config.modelId,
+    input,
+    ...embeddingDimensionOverride(config.modelId, dimensions),
+    ...(options.dataCollection
+      ? { provider: { data_collection: options.dataCollection } }
+      : {}),
+  };
+  logVerboseJson('openrouter.embeddings.request', requestBody);
+
   const response = await fetchWithTimeout(
     'https://openrouter.ai/api/v1/embeddings',
     {
@@ -102,23 +113,24 @@ async function openRouterEmbedding(
         'HTTP-Referer': 'https://github.com/mia-cx/honeybot',
         'X-Title': 'Honeybot',
       },
-      body: JSON.stringify({
-        model: config.modelId,
-        input,
-        ...embeddingDimensionOverride(config.modelId, dimensions),
-        ...(options.dataCollection
-          ? { provider: { data_collection: options.dataCollection } }
-          : {}),
-      }),
+      body: JSON.stringify(requestBody),
     },
     MODEL_REQUEST_TIMEOUT_MS,
   );
 
+  const responseText = await response.text();
+  const responseJson = parseJsonForLogging(responseText);
+  logVerboseJson('openrouter.embeddings.response', {
+    status: response.status,
+    ok: response.ok,
+    body: responseJson ?? responseText,
+  });
+
   if (!response.ok) {
-    throw new Error(await openRouterEmbeddingFailureReason(response));
+    throw new Error(openRouterEmbeddingFailureReason(response, responseText));
   }
 
-  const json = (await response.json()) as OpenRouterEmbeddingResponse;
+  const json = parseOpenRouterEmbeddingResponse(responseText);
   const vector = json.data[0]?.embedding;
   if (
     !Array.isArray(vector) ||
@@ -138,6 +150,16 @@ type OpenRouterEmbeddingResponse = {
   data: Array<{ embedding: number[] }>;
 };
 
+function parseOpenRouterEmbeddingResponse(
+  raw: string,
+): OpenRouterEmbeddingResponse {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('OpenRouter embeddings returned non-object response JSON');
+  }
+  return parsed as OpenRouterEmbeddingResponse;
+}
+
 function embeddingDimensionOverride(modelId: string, dimensions: number) {
   return modelSupportsDimensionOverride(modelId) ? { dimensions } : {};
 }
@@ -148,8 +170,8 @@ function modelSupportsDimensionOverride(modelId: string) {
   return true;
 }
 
-async function openRouterEmbeddingFailureReason(response: Response) {
-  const detail = truncate(await response.text().catch(() => ''), 300);
+function openRouterEmbeddingFailureReason(response: Response, body: string) {
+  const detail = truncate(body, 300);
   const retryAfter = response.headers.get('retry-after');
   const rateLimitHint =
     response.status === 429
@@ -175,6 +197,14 @@ async function fetchWithTimeout(
     throw error;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function parseJsonForLogging(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
   }
 }
 

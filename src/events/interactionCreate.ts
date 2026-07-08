@@ -19,6 +19,8 @@ import { formatPolicy } from '../services/configStore.js';
 import type { ModelStore } from '../services/modelStore.js';
 import type { CaseStore } from '../services/caseStore.js';
 import { canManageHoneybot, hasGlobalAuthority } from '../services/auth.js';
+import { parseDurationSeconds } from '../services/duration.js';
+import { toggleVerboseLogging } from '../services/verbose.js';
 import type {
   GuildConfig,
   Policy,
@@ -479,6 +481,14 @@ async function handleCommand(
         await replyWithKnownCorpus(interaction, deps, {
           type: corpusTypeFromValue(interaction.options.getString('type')),
           page: interaction.options.getInteger('page') ?? 1,
+        });
+        return;
+      }
+      if (sub === 'verbose') {
+        const enabled = toggleVerboseLogging();
+        await interaction.reply({
+          content: `Honeybot verbose model logging is now ${enabled ? 'enabled' : 'disabled'}.`,
+          ephemeral: true,
         });
         return;
       }
@@ -1238,14 +1248,11 @@ async function handleSettingsModal(
       return;
     }
     const raw = interaction.fields.getTextInputValue('value').trim();
-    const durationSeconds = raw === '' ? null : Number(raw);
-    if (
-      durationSeconds !== null &&
-      (!Number.isInteger(durationSeconds) || durationSeconds < 0)
-    ) {
+    const durationSeconds = parseDurationSeconds(raw);
+    if (raw !== '' && durationSeconds === null) {
       await interaction.reply({
         content:
-          'Please enter a non-negative whole number of seconds, or leave blank.',
+          'Please enter a duration like `21600`, `6h`, `4d12h`, `90m`, `01:30:00`, or `PT6H`; or leave blank.',
         ephemeral: true,
       });
       return;

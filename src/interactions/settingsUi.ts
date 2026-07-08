@@ -15,6 +15,7 @@ import type {
   PolicyScope,
 } from '../domain/types.js';
 import { formatPolicy } from '../services/configStore.js';
+import { formatDurationSeconds } from '../services/duration.js';
 
 const COMPONENTS_V2 = 1 << 15;
 const EPHEMERAL = 1 << 6;
@@ -402,9 +403,9 @@ export function policyDurationModal(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId('value')
-          .setLabel('Duration seconds')
+          .setLabel('Duration: 21600, 6h, 4d12h, PT6H')
           .setStyle(TextInputStyle.Short)
-          .setValue(String(currentValue ?? ''))
+          .setValue(formatDurationSeconds(currentValue))
           .setRequired(false),
       ),
     );

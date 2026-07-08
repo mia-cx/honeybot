@@ -6,6 +6,7 @@ import type {
 } from '../domain/types.js';
 import type { ModelStore } from './modelStore.js';
 import type { FairQueue } from '../queues/fairQueue.js';
+import { logVerboseJson } from './verbose.js';
 
 export type AdditionalSignalResult = ClassificationResult & { modelId: string };
 
@@ -110,6 +111,17 @@ async function openRouterJsonClassification(
     };
   }
 
+  const requestBody = {
+    model: config.modelId,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0,
+  };
+  logVerboseJson('openrouter.classifier.request', requestBody);
+
   const response = await fetchWithTimeout(
     'https://openrouter.ai/api/v1/chat/completions',
     {
@@ -120,28 +132,28 @@ async function openRouterJsonClassification(
         'HTTP-Referer': 'https://github.com/mia-cx/honeybot',
         'X-Title': 'Honeybot',
       },
-      body: JSON.stringify({
-        model: config.modelId,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0,
-      }),
+      body: JSON.stringify(requestBody),
     },
     MODEL_REQUEST_TIMEOUT_MS,
   );
+
+  const responseText = await response.text();
+  const responseJson = parseJsonForLogging(responseText);
+  logVerboseJson('openrouter.classifier.response', {
+    status: response.status,
+    ok: response.ok,
+    body: responseJson ?? responseText,
+  });
 
   if (!response.ok) {
     return {
       verdict: 'needs_review',
       confidence: 0,
-      rationale: await openRouterFailureReason(response),
+      rationale: openRouterFailureReason(response, responseText),
       labels: [],
     };
   }
-  const json = (await response.json()) as OpenRouterResponse;
+  const json = parseOpenRouterResponse(responseText);
   const raw = json.choices[0]?.message.content;
   if (!raw) throw new Error('OpenRouter classifier returned no content');
 
@@ -164,9 +176,17 @@ function parseClassifierResult(raw: string) {
   const likelihood = likelihoodFrom(parsed);
   return {
     likelihood,
-    confidence: confidenceFrom(parsed),
+    confidence: confidenceFrom(parsed, likelihood),
     reason: reasonFrom(parsed, likelihood),
   };
+}
+
+function parseOpenRouterResponse(raw: string): OpenRouterResponse {
+  const parsed = JSON.parse(raw) as unknown;
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('OpenRouter classifier returned non-object response JSON');
+  }
+  return parsed as OpenRouterResponse;
 }
 
 function parseJsonObject(raw: string): Record<string, unknown> {
@@ -178,6 +198,21 @@ function parseJsonObject(raw: string): Record<string, unknown> {
 }
 
 function likelihoodFrom(parsed: Record<string, unknown>) {
+  const numericLikelihood = numberField(parsed, [
+    'scam_likelihood',
+    'scamLikelihood',
+    'likelihood_of_scam',
+    'likelihoodOfScam',
+    'probability_of_scam',
+    'probabilityOfScam',
+  ]);
+  if (numericLikelihood !== null) {
+    const normalized = normalizeScore(numericLikelihood);
+    if (normalized >= 0.7) return 'scam';
+    if (normalized <= 0.3) return 'not_scam';
+    return 'needs_review';
+  }
+
   const value = stringField(parsed, [
     'likelihood',
     'verdict',
@@ -190,12 +225,50 @@ function likelihoodFrom(parsed: Record<string, unknown>) {
   if (value.includes('needs_review') || value.includes('review'))
     return 'needs_review';
   if (value.includes('scam') || value.includes('phishing')) return 'scam';
+
+  const numericVerdict = numberField(parsed, ['likelihood']);
+  if (numericVerdict !== null) {
+    const normalized = normalizeScore(numericVerdict);
+    if (normalized >= 0.7) return 'scam';
+    if (normalized <= 0.3) return 'not_scam';
+  }
   return 'needs_review';
 }
 
-function confidenceFrom(parsed: Record<string, unknown>) {
-  const value = numberField(parsed, ['confidence', 'score', 'certainty']);
-  if (value === null) return 0;
+function confidenceFrom(parsed: Record<string, unknown>, likelihood: string) {
+  const scamLikelihood = numberField(parsed, [
+    'scam_likelihood',
+    'scamLikelihood',
+    'likelihood_of_scam',
+    'likelihoodOfScam',
+    'probability_of_scam',
+    'probabilityOfScam',
+  ]);
+  if (scamLikelihood !== null) return normalizeScore(scamLikelihood);
+
+  const numericLikelihood = numberField(parsed, ['likelihood']);
+  if (numericLikelihood !== null) return normalizeScore(numericLikelihood);
+
+  const verdictConfidence = numberField(parsed, [
+    'confidence',
+    'score',
+    'certainty',
+  ]);
+  if (verdictConfidence === null) return categoricalScamLikelihood(likelihood);
+
+  const normalized = normalizeScore(verdictConfidence);
+  if (likelihood === 'scam') return normalized;
+  if (likelihood === 'not_scam') return 1 - normalized;
+  return 0;
+}
+
+function categoricalScamLikelihood(likelihood: string) {
+  if (likelihood === 'scam') return 1;
+  if (likelihood === 'not_scam') return 0;
+  return 0.5;
+}
+
+function normalizeScore(value: number) {
   return Math.max(0, Math.min(1, value > 1 ? value / 100 : value));
 }
 
@@ -220,6 +293,10 @@ function numberField(parsed: Record<string, unknown>, keys: string[]) {
   for (const key of keys) {
     const value = parsed[key];
     if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const parsedValue = Number(value.trim().replace(/%$/, ''));
+      if (Number.isFinite(parsedValue)) return parsedValue;
+    }
   }
   return null;
 }
@@ -234,8 +311,7 @@ function firstUsefulString(parsed: Record<string, unknown>) {
   return '';
 }
 
-async function openRouterFailureReason(response: Response) {
-  const body = await response.text().catch(() => '');
+function openRouterFailureReason(response: Response, body: string) {
   const detail = openRouterErrorDetail(body);
   const retryAfter = response.headers.get('retry-after');
   const rateLimitHint =
@@ -264,6 +340,14 @@ function openRouterErrorDetail(body: string) {
       .join(' — '),
     300,
   );
+}
+
+function parseJsonForLogging(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 function parseErrorJson(value: string) {

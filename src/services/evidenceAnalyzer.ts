@@ -81,7 +81,11 @@ export class EvidenceAnalyzer {
       await embeddingsPromise;
     const proximalKnownScams = await this.caseStore.findProximalKnownScams(
       cached,
-      { textEmbedding, imageEmbeddings },
+      {
+        textEmbedding,
+        imageEmbeddings,
+        maxScams: Math.max(3, imageEmbeddings.length + (textEmbedding ? 1 : 0)),
+      },
     );
     evidence.push(
       embeddingEvidenceFrom(proximalKnownScams, diagnostics, config),
@@ -226,25 +230,79 @@ function embeddingEvidenceFrom(
   diagnostics: EmbeddingDiagnostics,
   config: GuildConfig,
 ): EvidenceItem {
-  const top = proximalKnownScams.find((scam) =>
+  const embeddingCandidates = proximalKnownScams.filter((scam) =>
     scam.source?.endsWith('_embedding'),
   );
+  const embeddingMatches = embeddingCandidates.filter(
+    (scam) => scam.score >= embeddingThreshold(scam.source, config),
+  );
+  const top = embeddingCandidates[0];
   if (!top) return emptyEmbeddingEvidence(diagnostics);
-  const threshold =
-    top.source === 'image_embedding'
-      ? config.knownImageSimilarityThreshold
-      : config.knownTextSimilarityThreshold;
+  const threshold = embeddingThreshold(top.source, config);
   return {
     type: 'embedding_retrieval',
     matched: top.score >= threshold,
     score: top.score,
-    summary: `Embedding match to known scam: ${top.scamReason}`,
+    summary:
+      embeddingMatches.length > 0
+        ? embeddingMatchSummary(embeddingMatches, diagnostics)
+        : `Embedded ${embeddingSubject(diagnostics).text}. Top corpus vector was ${percent(top.score)}, below the ${percent(threshold)} threshold.`,
     metadata: {
       knownScamId: top.id,
       source: top.source,
       threshold,
+      matchCount: embeddingMatches.length,
+      diagnostics,
+      matches: embeddingMatches.slice(0, 5).map((match) => ({
+        id: match.id,
+        source: match.source,
+        score: match.score,
+        scamReason: match.scamReason,
+      })),
     },
   };
+}
+
+function embeddingThreshold(
+  source: ClassifierEvidenceContext['proximalKnownScams'][number]['source'],
+  config: GuildConfig,
+) {
+  return source === 'image_embedding'
+    ? config.knownImageSimilarityThreshold
+    : config.knownTextSimilarityThreshold;
+}
+
+function embeddingMatchSummary(
+  matches: ClassifierEvidenceContext['proximalKnownScams'],
+  diagnostics: EmbeddingDiagnostics,
+) {
+  const top = matches[0];
+  const subject = embeddingSubject(diagnostics);
+  return `${percent(top?.score ?? 0)} likelihood of a scam. ${subject.text} ${subject.plural ? 'are' : 'is'} within ${percent(top?.score ?? 0)} proximity to at least ${matches.length} embedding${matches.length === 1 ? '' : 's'} in the corpus.`;
+}
+
+function embeddingSubject(diagnostics: EmbeddingDiagnostics) {
+  const parts = [
+    diagnostics.textSucceeded ? 'The message' : null,
+    diagnostics.imageSucceeded > 0
+      ? `${diagnostics.imageSucceeded} attachment${diagnostics.imageSucceeded === 1 ? '' : 's'}`
+      : null,
+  ].filter(Boolean);
+  if (parts.length === 0) return { text: 'The message', plural: false };
+  if (parts.length === 1) {
+    return {
+      text: parts[0] ?? 'The message',
+      plural: !diagnostics.textSucceeded || diagnostics.imageSucceeded > 1,
+    };
+  }
+  return {
+    text: `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`,
+    plural: true,
+  };
+}
+
+function percent(score: number) {
+  return `${Math.round(score * 100)}%`;
 }
 
 function emptyEmbeddingEvidence(

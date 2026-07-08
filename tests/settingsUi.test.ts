@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
+import { formatPolicy } from '../src/services/configStore.js';
+import {
+  formatDurationSeconds,
+  parseDurationSeconds,
+} from '../src/services/duration.js';
 import {
   honeypotWarningModal,
   honeypotWarningPublicMessage,
@@ -403,6 +408,13 @@ describe('settings UI', () => {
     expect(policyDurationModal('punishment', null).toJSON()).toMatchObject({
       custom_id: 'settings:policyModal:duration:punishment',
     });
+    expect(policyDurationModal('punishment', 388_800).toJSON()).toMatchObject({
+      components: [
+        {
+          components: [expect.objectContaining({ value: '4d12h' })],
+        },
+      ],
+    });
     expect(
       modelConfigModal('text_classifier', {
         purpose: 'text_classifier',
@@ -414,6 +426,27 @@ describe('settings UI', () => {
     expect(modelApiKeyModal('image_embeddings').toJSON()).toMatchObject({
       custom_id: 'settings:modelKeyModal:image_embeddings',
     });
+  });
+
+  it('formats and parses human duration inputs', () => {
+    expect(formatDurationSeconds(21_600)).toBe('6h');
+    expect(formatDurationSeconds(388_800)).toBe('4d12h');
+    expect(formatDurationSeconds(90)).toBe('1m30s');
+    expect(parseDurationSeconds('21600')).toBe(21_600);
+    expect(parseDurationSeconds('4d12h')).toBe(388_800);
+    expect(parseDurationSeconds('4 days 12 hours')).toBe(388_800);
+    expect(parseDurationSeconds('PT4DT12H')).toBe(388_800);
+    expect(parseDurationSeconds('01:30:00')).toBe(5_400);
+    expect(parseDurationSeconds('nope')).toBeNull();
+    expect(
+      formatPolicy({
+        scope: 'honeypot_prevention',
+        actionType: 'timeout',
+        durationSeconds: 21_600,
+        roleId: null,
+        deleteMessages: true,
+      }),
+    ).toBe('timeout 6h + delete');
   });
 
   it('phrases honeypot warning actions without leaking full policies', () => {
