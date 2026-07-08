@@ -1,14 +1,29 @@
-export const policyScopes = ['honeypot_prevention', 'crosschannel_prevention', 'punishment'] as const;
+export const policyScopes = [
+  'honeypot_prevention',
+  'crosschannel_prevention',
+  'punishment',
+] as const;
 export type PolicyScope = (typeof policyScopes)[number];
 
-export const preventionActions = ['log', 'timeout', 'role', 'kick', 'ban'] as const;
+export const preventionActions = [
+  'log',
+  'timeout',
+  'role',
+  'kick',
+  'ban',
+] as const;
 export type PreventionAction = (typeof preventionActions)[number];
 
 export const punishmentActions = ['timeout', 'role', 'kick', 'ban'] as const;
 export type PunishmentAction = (typeof punishmentActions)[number];
 export type PolicyAction = PreventionAction | PunishmentAction;
 
-export const caseStatuses = ['pending_review', 'punished', 'dismissed', 'reverted'] as const;
+export const caseStatuses = [
+  'pending_review',
+  'punished',
+  'dismissed',
+  'reverted',
+] as const;
 export type CaseStatus = (typeof caseStatuses)[number];
 
 export type TriggerType = 'honeypot' | 'crosschannel';
@@ -56,7 +71,12 @@ export type StoredAttachment = {
 };
 
 export type EvidenceItem = {
-  type: 'exact_match' | 'fuzzy_match' | 'embedding_retrieval' | 'classifier' | 'manual_review';
+  type:
+    | 'exact_match'
+    | 'fuzzy_match'
+    | 'embedding_retrieval'
+    | 'classifier'
+    | 'manual_review';
   matched: boolean;
   score: number;
   summary: string;
@@ -70,4 +90,32 @@ export type AnalysisResult = {
   shouldPunish: boolean;
 };
 
-export type ModelPurpose = 'text_classifier' | 'image_classifier' | 'text_embeddings' | 'image_embeddings';
+export type ProximalKnownScamImage = {
+  id: string;
+  storageKey: string;
+  contentType: string;
+  sizeBytes: number;
+  dataUrl: string;
+};
+
+export type ProximalKnownScam = {
+  id: string;
+  sourceCaseId: string | null;
+  score: number;
+  source?: 'text_embedding' | 'image_embedding' | 'text_fuzzy';
+  description: string;
+  scamReason: string;
+  normalizedText: string | null;
+  images: ProximalKnownScamImage[];
+};
+
+export type ClassifierEvidenceContext = {
+  evidenceSummary: string;
+  proximalKnownScams: ProximalKnownScam[];
+};
+
+export type ModelPurpose =
+  | 'text_classifier'
+  | 'image_classifier'
+  | 'text_embeddings'
+  | 'image_embeddings';
