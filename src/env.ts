@@ -33,6 +33,24 @@ const OptionalPunishmentAction = Schema.optionalKey(
   Schema.Literals(punishmentActions),
 );
 
+const defaultTextAdditionalSignalModels = [
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3.5-content-safety:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  'poolside/laguna-m.1:free',
+  'tencent/hy3:free',
+  'poolside/laguna-xs-2.1:free',
+];
+
+const defaultImageAdditionalSignalModels = [
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3.5-content-safety:free',
+  'nvidia/nemotron-3-ultra-550b-a55b:free',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  'poolside/laguna-m.1:free',
+];
+
 const EnvSchema = Schema.Struct({
   DISCORD_TOKEN: Schema.String,
   LOG_LEVEL: LogLevel,
@@ -226,7 +244,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     DEFAULT_TEXT_PRIMARY_MODEL: stringDefault(
       raw.DEFAULT_TEXT_PRIMARY_MODEL,
-      'google/gemma-4-26b-a4b-it:free',
+      'google/gemma-4-31b-it',
     ),
     DEFAULT_IMAGE_PRIMARY_PROVIDER: stringDefault(
       raw.DEFAULT_IMAGE_PRIMARY_PROVIDER,
@@ -234,7 +252,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     DEFAULT_IMAGE_PRIMARY_MODEL: stringDefault(
       raw.DEFAULT_IMAGE_PRIMARY_MODEL,
-      'google/gemma-4-26b-a4b-it:free',
+      'google/gemma-4-31b-it',
     ),
     ADDITIONAL_TEXT_SIGNAL_PROVIDER: stringDefault(
       raw.ADDITIONAL_TEXT_SIGNAL_PROVIDER,
@@ -242,7 +260,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     ADDITIONAL_TEXT_SIGNAL_MODELS: csvDefault(
       raw.ADDITIONAL_TEXT_SIGNAL_MODELS,
-      ['nvidia/nemotron-3.5-content-safety:free'],
+      defaultTextAdditionalSignalModels,
     ),
     ADDITIONAL_IMAGE_SIGNAL_PROVIDER: stringDefault(
       raw.ADDITIONAL_IMAGE_SIGNAL_PROVIDER,
@@ -250,7 +268,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     ADDITIONAL_IMAGE_SIGNAL_MODELS: csvDefault(
       raw.ADDITIONAL_IMAGE_SIGNAL_MODELS,
-      ['nvidia/nemotron-3.5-content-safety:free'],
+      defaultImageAdditionalSignalModels,
     ),
     DEFAULT_TEXT_EMBEDDINGS_PROVIDER: stringDefault(
       raw.DEFAULT_TEXT_EMBEDDINGS_PROVIDER,
@@ -258,7 +276,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     DEFAULT_TEXT_EMBEDDINGS_MODEL: stringDefault(
       raw.DEFAULT_TEXT_EMBEDDINGS_MODEL,
-      'google/gemini-embedding-2',
+      'nvidia/llama-nemotron-embed-vl-1b-v2:free',
     ),
     DEFAULT_IMAGE_EMBEDDINGS_PROVIDER: stringDefault(
       raw.DEFAULT_IMAGE_EMBEDDINGS_PROVIDER,
@@ -266,13 +284,13 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     ),
     DEFAULT_IMAGE_EMBEDDINGS_MODEL: stringDefault(
       raw.DEFAULT_IMAGE_EMBEDDINGS_MODEL,
-      'google/gemini-embedding-2',
+      'nvidia/llama-nemotron-embed-vl-1b-v2:free',
     ),
     DEFAULT_EMBEDDINGS_DIMENSIONS: positiveInteger(
       raw.DEFAULT_EMBEDDINGS_DIMENSIONS,
-      1536,
+      2048,
     ),
-    MODEL_CALL_LIMIT: positiveInteger(raw.MODEL_CALL_LIMIT, 60),
+    MODEL_CALL_LIMIT: positiveInteger(raw.MODEL_CALL_LIMIT, 6000),
     MODEL_CALL_LIMIT_PER_GUILD: positiveInteger(
       raw.MODEL_CALL_LIMIT_PER_GUILD,
       20,
@@ -284,11 +302,11 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     MODEL_RETRY_MAX_ATTEMPTS: positiveInteger(raw.MODEL_RETRY_MAX_ATTEMPTS, 3),
     MODEL_RETRY_INITIAL_DELAY_MS: positiveInteger(
       raw.MODEL_RETRY_INITIAL_DELAY_MS,
-      500,
+      300,
     ),
     MODEL_RETRY_MAX_DELAY_MS: positiveInteger(
       raw.MODEL_RETRY_MAX_DELAY_MS,
-      5000,
+      15000,
     ),
     MODERATION_ACTION_LIMIT: positiveInteger(raw.MODERATION_ACTION_LIMIT, 30),
     MODERATION_ACTION_LIMIT_PER_GUILD: positiveInteger(
@@ -300,7 +318,7 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
       60,
     ),
     EVAL_CORPUS_DIR: optionalString(raw.EVAL_CORPUS_DIR),
-    GLOBAL_AUTH_MODE: stringDefault(raw.GLOBAL_AUTH_MODE, 'users'),
+    GLOBAL_AUTH_MODE: stringDefault(raw.GLOBAL_AUTH_MODE, 'team'),
     GLOBAL_AUTH_TEAM_ID: optionalString(raw.GLOBAL_AUTH_TEAM_ID),
     GLOBAL_AUTH_USER_IDS: stringDefault(raw.GLOBAL_AUTH_USER_IDS, ''),
 
