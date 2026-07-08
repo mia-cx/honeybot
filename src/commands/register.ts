@@ -180,6 +180,7 @@ const honeybotCommands = [
 
 export async function registerCommands(client: Client<true>) {
   let clearedGuildCommandSets = 0;
+  let clearedGuildCommandCount = 0;
 
   for (const guild of client.guilds.cache.values()) {
     const existingGuildCommands = await guild.commands.fetch();
@@ -187,7 +188,11 @@ export async function registerCommands(client: Client<true>) {
 
     await guild.commands.set([]);
     clearedGuildCommandSets += 1;
+    clearedGuildCommandCount += existingGuildCommands.size;
   }
+
+  const existingGlobalCommands = await client.application.commands.fetch();
+  if (existingGlobalCommands.size > 0) await client.application.commands.set([]);
 
   const globalCommands = await client.application.commands.set(honeybotCommands);
 
@@ -195,6 +200,8 @@ export async function registerCommands(client: Client<true>) {
     globalCommandCount: globalCommands.size,
     chatInputCommandCount: globalCommands.filter((command) => command.type === ApplicationCommandType.ChatInput).size,
     messageContextCommandCount: globalCommands.filter((command) => command.type === ApplicationCommandType.Message).size,
+    clearedGlobalCommandCount: existingGlobalCommands.size,
     clearedGuildCommandSets,
+    clearedGuildCommandCount,
   });
 }
