@@ -90,12 +90,15 @@ async function handleTriggeredMessage(
         : 'crosschannel_prevention'
     ];
   const moderationReason = `Honeybot ${triggerType} prevention`;
-  const caseRow = await dependencies.caseStore.getOrCreateCase({
-    guildId: message.guildId,
-    userId: message.author.id,
-    triggerType,
-    reason: moderationReason,
-  });
+  const caseRow = await dependencies.caseStore.getOrCreateCase(
+    {
+      guildId: message.guildId,
+      userId: message.author.id,
+      triggerType,
+      reason: moderationReason,
+    },
+    { reusePending: policy.actionType === 'log' },
+  );
   const persisted = await dependencies.caseStore.attachMessage(
     caseRow.id,
     message,

@@ -120,6 +120,58 @@ describe('DuplicateDetector', () => {
 });
 
 describe('handleMessageCreate', () => {
+  it('reuses pending cases only when prevention is log-only', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+    });
+    config.policies.honeypot_prevention.actionType = 'log';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    const deleted: string[] = [];
+    const guild = fakeDiscordGuild(deleted);
+    const first = fakeDiscordMessage({ id: 'm1', channelId: 'honey', guild });
+    const second = fakeDiscordMessage({ id: 'm2', channelId: 'honey', guild });
+    guild.register(first);
+    guild.register(second);
+
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 0,
+          shouldPunish: false,
+          reason: 'done',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(first, dependencies);
+    await handleMessageCreate(second, dependencies);
+
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    expect(await database.db.select().from(caseMessages)).toHaveLength(2);
+    expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(2);
+
+    config.policies.honeypot_prevention.actionType = 'timeout';
+    const third = fakeDiscordMessage({ id: 'm3', channelId: 'honey', guild });
+    guild.register(third);
+
+    await handleMessageCreate(third, dependencies);
+
+    expect(await database.db.select().from(cases)).toHaveLength(2);
+    expect(await database.db.select().from(caseMessages)).toHaveLength(3);
+
+    database.sqlite.close();
+  });
+
   it('deletes every duplicate message during cross-channel prevention', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({ moderationChannelId: null });
@@ -480,7 +532,7 @@ describe('EvidenceAnalyzer', () => {
     database.sqlite.close();
   });
 
-  it('converts classifier confidence into scam likelihood score and caches repeats', async () => {
+  it('converts classifier confidence into scam likelihood score without caching repeats', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
     const caseRow = await store.getOrCreateCase({
@@ -511,10 +563,11 @@ describe('EvidenceAnalyzer', () => {
       defaultGuildConfig({ evidenceConfidenceThreshold: 0.9 }),
     );
 
-    expect(first).toBe(second);
+    expect(first).not.toBe(second);
     expect(first).toMatchObject({ confidence: 0, shouldPunish: false });
     expect(first.reason).toContain('0% benign');
-    expect(classifier.classify).toHaveBeenCalledTimes(1);
+    expect(second.reason).toContain('0% benign');
+    expect(classifier.classify).toHaveBeenCalledTimes(2);
 
     database.sqlite.close();
   });
@@ -674,7 +727,7 @@ describe('EvidenceAnalyzer', () => {
           matched: true,
           score: 1,
           summary:
-            '100% likelihood of a scam. The message is within 100% proximity to at least 1 embedding in the corpus.',
+            '100% embedding match. The message looks similar to 1 known scam example in the corpus.',
           metadata: expect.objectContaining({ source: 'text_embedding' }),
         }),
       ]),

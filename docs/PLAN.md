@@ -152,20 +152,20 @@ policies
 
 Fresh guild defaults:
 
-| Scope/key | Default |
-| --- | --- |
-| `honeypot_prevention.action_type` | `timeout` |
-| `honeypot_prevention.duration_seconds` | `21600` (6 hours) |
-| `honeypot_prevention.delete_messages` | `true` |
-| `crosschannel_prevention.action_type` | `timeout` |
+| Scope/key                                  | Default             |
+| ------------------------------------------ | ------------------- |
+| `honeypot_prevention.action_type`          | `timeout`           |
+| `honeypot_prevention.duration_seconds`     | `21600` (6 hours)   |
+| `honeypot_prevention.delete_messages`      | `true`              |
+| `crosschannel_prevention.action_type`      | `timeout`           |
 | `crosschannel_prevention.duration_seconds` | `1800` (30 minutes) |
-| `crosschannel_prevention.delete_messages` | `true` |
-| `punishment.action_type` | `ban` |
-| `punishment.delete_messages` | `true` |
-| `punishment:dm_notify` | `true` |
-| `review:bypass_enabled` | `false` |
-| `evidence:confidence_threshold` | `0.90` |
-| `retention:case_days` | `180` |
+| `crosschannel_prevention.delete_messages`  | `true`              |
+| `punishment.action_type`                   | `ban`               |
+| `punishment.delete_messages`               | `true`              |
+| `punishment:dm_notify`                     | `true`              |
+| `review:bypass_enabled`                    | `false`             |
+| `evidence:confidence_threshold`            | `0.90`              |
+| `retention:case_days`                      | `180`               |
 
 ```txt
 moderators
@@ -203,7 +203,7 @@ models
 
 Each guild can route classifier purposes to a different provider/model/key. Per-guild BYOK is supported in MVP as an override. Missing `models` rows fall back to deployment env defaults, e.g. `DEFAULT_TEXT_CLASSIFIER_PROVIDER`, `DEFAULT_TEXT_CLASSIFIER_MODEL`, `DEFAULT_IMAGE_CLASSIFIER_PROVIDER`, `DEFAULT_IMAGE_CLASSIFIER_MODEL`, `DEFAULT_TEXT_EMBEDDINGS_PROVIDER`, `DEFAULT_TEXT_EMBEDDINGS_MODEL`, `DEFAULT_IMAGE_EMBEDDINGS_PROVIDER`, `DEFAULT_IMAGE_EMBEDDINGS_MODEL`.
 
-Embedding model IDs are deployment-controlled, not per-guild, because model choice defines vector dimensions and changing it requires re-embedding the corpus. Self-hosters can choose a different deployment-wide embedding model before building their corpus, but Honeybot does not support different embedding models per guild. Guilds can bring their own embedding API key only for the deployment-selected embedding provider/model; arbitrary embedding model IDs are only allowed for deployment-level `custom`/self-hosted configuration. Default hosted embedding target: OpenRouter `google/gemini-embedding-2`, pending corpus/cost trials. OpenRouter documents it as mapping text and images into a unified vector space for cross-modal retrieval.
+Embedding model IDs are deployment-controlled, not per-guild, because model choice defines vector dimensions and changing it requires re-embedding the corpus. Self-hosters can choose a different deployment-wide embedding model before building their corpus, but Honeybot does not support different embedding models per guild. Guilds can bring their own embedding API key only for the deployment-selected embedding provider/model; arbitrary embedding model IDs are only allowed for deployment-level `custom`/self-hosted configuration. Default hosted embedding target: OpenRouter `nvidia/llama-nemotron-embed-vl-1b-v2:free`, using its fixed `2048`-dimension vectors for both text and images. If OpenRouter privacy/routing blocks it, pick a production-allowed deployment-wide embedding model before seeding or rebuilding the corpus.
 
 BYOK values in `models.encrypted_api_key` are encrypted at rest with `API_KEY_ENCRYPTION_KEY`, never logged, and only decrypted at the provider boundary. Deployment-level API keys may be supplied by env vars as fallback defaults. If both per-guild BYOK and env fallback keys are missing, model calls fail to moderator review. Use AES-256-GCM with a random nonce per stored key; no salt/pepper scheme. The encryption key lives outside the DB in environment/config, so losing it makes stored BYOK keys unrecoverable.
 
@@ -388,16 +388,16 @@ Case confidence is the highest normalized confidence among evidence items, not a
 
 Evidence confidence normalization:
 
-| Evidence type | Score |
-| --- | --- |
-| Manual moderator scam decision | `1.00` |
-| Exact approved text hash match | `1.00` |
-| Exact approved image `sha256` match | `1.00` |
-| Text MinHash/Jaccard fuzzy match | Jaccard overlap, only counted above `known_text:similarity_threshold` |
-| Image perceptual hash match | Normalize from Hamming distance: `1 - (distance / hash_bits)`, only counted above `known_image:similarity_threshold` |
-| Embedding retrieval/rerank | Normalized cosine similarity from reranked nearest approved corpus entry |
-| Classifier | Provider result mapped to `confidence * scam_likelihood` when both are present, otherwise the single returned confidence |
-| Weak/no retrieval | No score boost; not exonerating |
+| Evidence type                       | Score                                                                                                                    |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Manual moderator scam decision      | `1.00`                                                                                                                   |
+| Exact approved text hash match      | `1.00`                                                                                                                   |
+| Exact approved image `sha256` match | `1.00`                                                                                                                   |
+| Text MinHash/Jaccard fuzzy match    | Jaccard overlap, only counted above `known_text:similarity_threshold`                                                    |
+| Image perceptual hash match         | Normalize from Hamming distance: `1 - (distance / hash_bits)`, only counted above `known_image:similarity_threshold`     |
+| Embedding retrieval/rerank          | Normalized cosine similarity from reranked nearest approved corpus entry                                                 |
+| Classifier                          | Provider result mapped to `confidence * scam_likelihood` when both are present, otherwise the single returned confidence |
+| Weak/no retrieval                   | No score boost; not exonerating                                                                                          |
 
 `evidence:confidence_threshold` compares against the final case confidence.
 
@@ -489,7 +489,7 @@ Raid economics are handled without a raid/group table in MVP:
 - Discord moderation actions also go through an Effect-managed queue/outbox with deployment-global and per-guild rolling-window limits so punishment bursts do not fight API limits.
 - Queues are guild-fair: jobs are partitioned by `guild_id` and scheduled round-robin across non-empty guild queues before checking per-guild and global limiters. One raided guild should not monopolize model or moderation action capacity while other guilds have pending work.
 - If a per-guild limiter is exhausted, that guild's jobs wait for the next window or fail that guild's cases to moderator review after the configured retry/deadline policy. If the deployment-global limiter is exhausted, all affected jobs wait or fail to review according to the same policy.
-- Evidence-ladder results are cached for the crosschannel window by exact/fuzzy content fingerprints (`text_hash`, image `sha256`, pHash/MinHash signatures). Different senders still get separate cases, but identical raid content can reuse evidence/classifier results instead of paying for N identical model calls.
+- Evidence-ladder results are recomputed for every triggered message, even when exact/fuzzy content fingerprints (`text_hash`, image `sha256`, pHash/MinHash signatures) match earlier messages. Different senders still get separate cases, and repeated content still gets fresh embeddings/classifier responses so evidence reflects current model/corpus state.
 
 Env-level limits:
 
@@ -698,7 +698,7 @@ Initial commands:
 - Reasons should be short and generic, e.g. `resembles known scam raid images`, `image depicts crypto payout`, `message promotes suspicious Discord invite`, `message points users to likely wallet drainer`.
 - Bot code compares confidence against guild settings and resolves the configured policy.
 - Store classifier result in case state + events.
-- Default hosted embeddings target is OpenRouter `google/gemini-embedding-2` for both text and image embeddings, using `1536` dimensions by default for a quality/storage/speed balance. First eval should verify shared text/image embedding space with a few controlled text↔image retrieval tests. If it fails, choose another OpenRouter-hosted multimodal embedding option rather than leaving OpenRouter as the default path.
+- Default hosted embeddings target is OpenRouter `nvidia/llama-nemotron-embed-vl-1b-v2:free` for both text and image embeddings, using its fixed `2048` dimensions. First eval should verify shared text/image embedding space with controlled text↔image retrieval tests. If routing blocks it or quality is poor, choose another deployment-wide multimodal embedding option and rebuild corpus vectors.
 - Classifier eval candidates, in preference order:
   1. OpenRouter free-tier Gemma 4 quant model as the cheap/default baseline; verify the current OpenRouter model slug during implementation.
   2. Paid Gemma tier if the free tier hits rate limits or quality is close but capacity is insufficient.

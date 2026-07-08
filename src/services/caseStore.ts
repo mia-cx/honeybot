@@ -41,26 +41,31 @@ export class CaseStore {
     private readonly embedder?: ScamEmbedder,
   ) {}
 
-  async getOrCreateCase(input: {
-    guildId: string;
-    userId: string;
-    triggerType: TriggerType;
-    reason: string;
-  }) {
-    const existing = await this.db
-      .select()
-      .from(cases)
-      .where(
-        and(
-          eq(cases.guildId, input.guildId),
-          eq(cases.userId, input.userId),
-          eq(cases.triggerType, input.triggerType),
-          eq(cases.status, 'pending_review'),
-        ),
-      )
-      .get();
+  async getOrCreateCase(
+    input: {
+      guildId: string;
+      userId: string;
+      triggerType: TriggerType;
+      reason: string;
+    },
+    options: { reusePending?: boolean } = {},
+  ) {
+    if (options.reusePending ?? true) {
+      const existing = await this.db
+        .select()
+        .from(cases)
+        .where(
+          and(
+            eq(cases.guildId, input.guildId),
+            eq(cases.userId, input.userId),
+            eq(cases.triggerType, input.triggerType),
+            eq(cases.status, 'pending_review'),
+          ),
+        )
+        .get();
 
-    if (existing) return existing;
+      if (existing) return existing;
+    }
 
     const now = new Date().toISOString();
     const created = {

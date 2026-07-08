@@ -15,8 +15,6 @@ export type AnalysisProgress = {
 };
 
 export class EvidenceAnalyzer {
-  private readonly cache = new Map<string, AnalysisResult>();
-
   constructor(
     private readonly caseStore: CaseStore,
     private readonly classifier: ScamClassifier,
@@ -29,10 +27,6 @@ export class EvidenceAnalyzer {
     config: GuildConfig,
     onProgress?: (progress: AnalysisProgress) => Promise<void>,
   ): Promise<AnalysisResult> {
-    const cacheKey = fingerprintKey(cached);
-    const cachedResult = this.cache.get(cacheKey);
-    if (cachedResult) return cachedResult;
-
     const evidence: EvidenceItem[] = [];
     const embeddingsPromise = this.embeddingsFor(cached);
 
@@ -154,7 +148,6 @@ export class EvidenceAnalyzer {
 
     const result = analysisFromEvidence(evidence, config);
     await this.caseStore.saveAnalysis(caseId, result);
-    this.cache.set(cacheKey, result);
     return result;
   }
 
@@ -401,12 +394,4 @@ function summarizeEvidence(items: EvidenceItem[]) {
     .sort((a, b) => b.score - a.score)
     .map((item) => `${Math.round(item.score * 100)}% ${item.summary}`)
     .join('\n');
-}
-
-function fingerprintKey(message: CachedMessage) {
-  const attachmentHashes = message.attachments
-    .map((attachment) => attachment.sha256 ?? attachment.id)
-    .sort()
-    .join(',');
-  return `${message.guildId}:${message.textHash ?? message.content}:${attachmentHashes}`;
 }
