@@ -124,6 +124,19 @@ export function caseReviewRevertUpdate(
   } as InteractionUpdateOptions;
 }
 
+export function caseReviewUncertainUpdate(
+  existingComponents: readonly unknown[],
+  input: { caseId: string },
+): InteractionUpdateOptions {
+  return {
+    components: [
+      ...withoutResolutionOrActions(existingComponents),
+      uncertainOperationContainer(),
+      buttonRow(reconciliationButtons(input.caseId)),
+    ],
+  } as InteractionUpdateOptions;
+}
+
 function caseReviewComponents(
   input: CaseReviewInput,
   attachmentFilenames: string[],
@@ -197,6 +210,9 @@ function caseActionButtons(input: {
   punishment: Policy;
   status?: string;
 }) {
+  if (input.status && isUncertainStatus(input.status))
+    return reconciliationButtons(input.caseId);
+
   if (input.status && isPunishedStatus(input.status))
     return resolvedActionButtons(
       input.caseId,
@@ -212,6 +228,17 @@ function caseActionButtons(input: {
       4,
     ),
     button(`case:dismiss:${input.caseId}`, 'Dismiss case', 2),
+  ];
+}
+
+function reconciliationButtons(caseId: string) {
+  return [
+    button(`case:reconcile-applied:${caseId}`, 'Confirm action applied', 3),
+    button(
+      `case:reconcile-not-applied:${caseId}`,
+      'Confirm action not applied',
+      2,
+    ),
   ];
 }
 
@@ -231,6 +258,21 @@ function resolvedActionButtons(
       !canRevert,
     ),
   ];
+}
+
+function uncertainOperationContainer(): RawComponent {
+  return container([
+    text(
+      [
+        '# ⚠️ Reconciliation required',
+        '-# The previous case action may already have reached Discord.',
+      ].join('\n'),
+    ),
+    separator(),
+    text(
+      'Verify the current Discord user state, then record whether the action was applied.',
+    ),
+  ]);
 }
 
 function resolutionContainer(input: {
@@ -275,7 +317,7 @@ function resolutionTitle(input: {
 function withoutResolutionOrActions(existingComponents: readonly unknown[]) {
   return existingComponents
     .map((component) => cloneComponent(component))
-    .filter((component) => !isResolutionContainer(component))
+    .filter((component) => !isCaseStateContainer(component))
     .filter((component) => component.type !== 1);
 }
 
@@ -284,14 +326,14 @@ function resolutionAndActions(existingComponents: readonly unknown[]) {
     cloneComponent(component),
   );
   const resolutionIndex = cloned.findIndex((component) =>
-    isResolutionContainer(component),
+    isCaseStateContainer(component),
   );
   if (resolutionIndex === -1) return [];
 
   return cloned
     .slice(resolutionIndex)
     .filter(
-      (component) => isResolutionContainer(component) || component.type === 1,
+      (component) => isCaseStateContainer(component) || component.type === 1,
     );
 }
 
@@ -306,13 +348,14 @@ function cloneComponent(component: unknown): RawComponent {
   return component as RawComponent;
 }
 
-function isResolutionContainer(component: RawComponent) {
+function isCaseStateContainer(component: RawComponent) {
   if (component.type !== 17 || !Array.isArray(component.components))
     return false;
   return component.components.some(
     (child) =>
       typeof child?.content === 'string' &&
-      child.content.includes('-# Resolved by <@'),
+      (child.content.includes('-# Resolved by <@') ||
+        child.content.includes('-# The previous case action may already')),
   );
 }
 
@@ -529,6 +572,10 @@ function reversiblePolicy(policy: Policy) {
 
 function isPunishedStatus(status: string) {
   return status.toLowerCase().includes('punished');
+}
+
+function isUncertainStatus(status: string) {
+  return status.endsWith('_uncertain');
 }
 
 function durationLabel(seconds: number) {

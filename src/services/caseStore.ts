@@ -55,26 +55,35 @@ const caseOperationTransitions = {
   punish: {
     from: 'pending_review',
     claimed: 'punishment_pending',
+    uncertain: 'punishment_uncertain',
     to: 'punished',
   },
   dismiss: {
     from: 'pending_review',
     claimed: 'dismissal_pending',
+    uncertain: 'dismissal_uncertain',
     to: 'dismissed',
   },
   revert_punishment: {
     from: 'punished',
     claimed: 'punishment_revert_pending',
+    uncertain: 'punishment_revert_uncertain',
     to: 'pending_review',
   },
   revert_dismissal: {
     from: 'dismissed',
     claimed: 'dismissal_revert_pending',
+    uncertain: 'dismissal_revert_uncertain',
     to: 'pending_review',
   },
 } as const satisfies Record<
   string,
-  { from: CaseStatus; claimed: CaseStatus; to: CaseStatus }
+  {
+    from: CaseStatus;
+    claimed: CaseStatus;
+    uncertain: CaseStatus;
+    to: CaseStatus;
+  }
 >;
 
 export type CaseOperation = keyof typeof caseOperationTransitions;
@@ -85,6 +94,15 @@ function operationTransitions() {
   return Object.entries(caseOperationTransitions) as Array<
     [CaseOperation, CaseOperationTransition]
   >;
+}
+
+function operationTransitionForStatus(
+  status: string,
+  state: 'claimed' | 'uncertain',
+) {
+  return operationTransitions().find(
+    ([, transition]) => transition[state] === status,
+  );
 }
 
 type CaseAttachmentRow = typeof caseAttachments.$inferSelect;
@@ -229,8 +247,7 @@ export class CaseStore {
               perceptualHash: null,
               storageKey: null,
               processingSlot,
-              processingState:
-                processingSlot === null ? null : 'pending',
+              processingState: processingSlot === null ? null : 'pending',
               createdAt: now,
             })
             .returning()
@@ -447,7 +464,13 @@ export class CaseStore {
     const now = new Date().toISOString();
     await this.db
       .update(cases)
-      .set({ status, actionTaken, reason, updatedAt: now })
+      .set({
+        status,
+        actionTaken,
+        operationActionTaken: null,
+        reason,
+        updatedAt: now,
+      })
       .where(eq(cases.id, caseId));
     await this.addEvent(
       caseId,
@@ -476,9 +499,7 @@ export class CaseStore {
         let recovered = 0;
 
         for (const caseRow of interruptedCases) {
-          const entry = transitions.find(
-            ([, transition]) => transition.claimed === caseRow.status,
-          );
+          const entry = operationTransitionForStatus(caseRow.status, 'claimed');
           if (!entry) {
             throw new Error(
               `Missing recovery transition for case status: ${caseRow.status}`,
@@ -488,7 +509,7 @@ export class CaseStore {
           const updated = tx
             .update(cases)
             .set({
-              status: 'operation_uncertain',
+              status: transition.uncertain,
               updatedAt: new Date().toISOString(),
             })
             .where(
@@ -530,6 +551,7 @@ export class CaseStore {
     caseId: string,
     operation: CaseOperation,
     actorId: string | null,
+    operationActionTaken: string | null = null,
   ) {
     const transition = caseOperationTransitions[operation];
     return this.db.transaction(
@@ -538,6 +560,7 @@ export class CaseStore {
           .update(cases)
           .set({
             status: transition.claimed,
+            operationActionTaken,
             updatedAt: new Date().toISOString(),
           })
           .where(and(eq(cases.id, caseId), eq(cases.status, transition.from)))
@@ -552,7 +575,7 @@ export class CaseStore {
               actorId ? 'user' : 'bot',
               actorId,
               `Claimed case operation: ${operation}`,
-              { operation, ...transition },
+              { operation, operationActionTaken, ...transition },
             ),
           )
           .run();
@@ -577,6 +600,7 @@ export class CaseStore {
           .set({
             status: transition.to,
             actionTaken,
+            operationActionTaken: null,
             reason,
             updatedAt: new Date().toISOString(),
           })
@@ -618,6 +642,7 @@ export class CaseStore {
           .update(cases)
           .set({
             status: transition.from,
+            operationActionTaken: null,
             updatedAt: new Date().toISOString(),
           })
           .where(
@@ -635,6 +660,113 @@ export class CaseStore {
               actorId,
               `Case operation failed: ${operation}`,
               { operation, error: message, restoredStatus: transition.from },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async markOperationUncertain(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+    error: unknown,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    const message = error instanceof Error ? error.message : String(error);
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.uncertain,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_outcome_uncertain',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Case operation completed externally but could not be persisted: ${operation}`,
+              {
+                operation,
+                error: message,
+                previousStatus: transition.from,
+                possibleStatus: transition.to,
+              },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async reconcileOperation(
+    caseId: string,
+    sideEffectApplied: boolean,
+    actorId: string,
+  ) {
+    return this.db.transaction(
+      (tx) => {
+        const caseRow = tx
+          .select()
+          .from(cases)
+          .where(eq(cases.id, caseId))
+          .get();
+        if (!caseRow) return null;
+        const entry = operationTransitionForStatus(caseRow.status, 'uncertain');
+        if (!entry) return null;
+
+        const [operation, transition] = entry;
+        const status = sideEffectApplied ? transition.to : transition.from;
+        const actionTaken = sideEffectApplied
+          ? caseRow.operationActionTaken
+          : caseRow.actionTaken;
+        const reason = `Interrupted ${operation} operation manually reconciled as ${sideEffectApplied ? 'applied' : 'not applied'}`;
+        const updated = tx
+          .update(cases)
+          .set({
+            status,
+            actionTaken,
+            operationActionTaken: null,
+            reason,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.uncertain)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_reconciled',
+              'user',
+              actorId,
+              reason,
+              {
+                operation,
+                sideEffectApplied,
+                previousStatus: transition.from,
+                completedStatus: transition.to,
+                reconciledStatus: status,
+              },
             ),
           )
           .run();

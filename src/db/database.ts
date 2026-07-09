@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS cases (
   trigger_type TEXT NOT NULL,
   status TEXT NOT NULL,
   action_taken TEXT,
+  operation_action_taken TEXT,
   reason TEXT,
   evidence_summary_json TEXT NOT NULL,
   review_channel_id TEXT,
@@ -215,6 +216,12 @@ CREATE TABLE IF NOT EXISTS global_bans (
 CREATE INDEX IF NOT EXISTS global_bans_user_idx ON global_bans (user_id, status);
 `);
 
+  const caseColumns = db.pragma('table_info(cases)') as Array<{ name: string }>;
+  if (!caseColumns.some((column) => column.name === 'operation_action_taken')) {
+    db.exec('ALTER TABLE cases ADD COLUMN operation_action_taken TEXT');
+  }
+  migrateLegacyUncertainCases(db);
+
   const attachmentColumns = db.pragma('table_info(case_attachments)') as Array<{
     name: string;
   }>;
@@ -235,4 +242,75 @@ CREATE INDEX IF NOT EXISTS global_bans_user_idx ON global_bans (user_id, status)
   db.exec(
     'CREATE UNIQUE INDEX IF NOT EXISTS case_attachments_processing_slot_idx ON case_attachments (case_id, processing_slot)',
   );
+}
+
+function migrateLegacyUncertainCases(db: Sqlite) {
+  const rows = db
+    .prepare(
+      `
+        SELECT cases.id, case_events.metadata_json AS metadataJson
+        FROM cases
+        JOIN case_events ON case_events.id = (
+          SELECT id
+          FROM case_events
+          WHERE case_id = cases.id
+            AND event_type = 'operation_outcome_uncertain'
+          ORDER BY id DESC
+          LIMIT 1
+        )
+        WHERE cases.status = 'operation_uncertain'
+      `,
+    )
+    .all() as Array<{ id: string; metadataJson: string }>;
+  if (rows.length === 0) return;
+
+  const update = db.prepare(
+    `UPDATE cases
+     SET status = ?
+     WHERE id = ? AND status = 'operation_uncertain'`,
+  );
+  db.transaction((legacyRows: typeof rows) => {
+    for (const row of legacyRows) {
+      update.run(legacyUncertainStatus(row.metadataJson), row.id);
+    }
+  })(rows);
+
+  const remaining = db
+    .prepare(
+      `SELECT COUNT(*) AS count
+       FROM cases
+       WHERE status = 'operation_uncertain'`,
+    )
+    .get() as { count: number };
+  if (remaining.count > 0) {
+    throw new Error(
+      `Cannot migrate ${remaining.count} legacy uncertain case operations`,
+    );
+  }
+}
+
+function legacyUncertainStatus(metadataJson: string) {
+  const metadata = JSON.parse(metadataJson) as unknown;
+  if (
+    !metadata ||
+    typeof metadata !== 'object' ||
+    !('operation' in metadata) ||
+    typeof metadata.operation !== 'string'
+  ) {
+    throw new Error('Legacy uncertain case event has no operation');
+  }
+
+  const statuses: Record<string, string> = {
+    punish: 'punishment_uncertain',
+    dismiss: 'dismissal_uncertain',
+    revert_punishment: 'punishment_revert_uncertain',
+    revert_dismissal: 'dismissal_revert_uncertain',
+  };
+  const status = statuses[metadata.operation];
+  if (!status) {
+    throw new Error(
+      `Legacy uncertain case event has unknown operation: ${metadata.operation}`,
+    );
+  }
+  return status;
 }

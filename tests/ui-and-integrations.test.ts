@@ -10,6 +10,7 @@ import {
   caseReviewMessage,
   caseReviewResolutionUpdate,
   caseReviewRevertUpdate,
+  caseReviewUncertainUpdate,
   type CaseReviewInput,
 } from '../src/interactions/caseReviewUi.js';
 import { OpenRouterScamClassifier } from '../src/services/classifier.js';
@@ -273,6 +274,29 @@ describe('case review UI', () => {
       'case:punish:case1',
       'case:dismiss:case1',
       'case:revert:case1',
+    ]);
+  });
+
+  it('renders uncertain operations with explicit reconciliation actions', () => {
+    const existing = caseReviewMessage(caseInput()).components as Array<any>;
+    const uncertain = caseReviewUncertainUpdate(existing, {
+      caseId: 'case1',
+    }).components as Array<any>;
+
+    expect(textContent(uncertain)).toContain('Reconciliation required');
+    expect(customIds(uncertain)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+
+    const reconciled = caseReviewRevertUpdate(uncertain, {
+      caseId: 'case1',
+      punishment: policy('ban'),
+    }).components as Array<any>;
+    expect(textContent(reconciled)).not.toContain('Reconciliation required');
+    expect(customIds(reconciled)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
     ]);
   });
 

@@ -316,6 +316,7 @@ async function handleTriggeredMessage(
       caseRow.id,
       'punish',
       null,
+      punishment.actionType,
     );
     if (!claimed) return;
     let applyResult;
@@ -365,15 +366,46 @@ async function handleTriggeredMessage(
       );
       return;
     }
-    const completed = await dependencies.caseStore.completeOperation(
-      caseRow.id,
-      'punish',
-      punishment.actionType,
-      null,
-      analysis.reason,
-    );
-    if (!completed)
-      throw new Error('Auto-punishment operation state changed unexpectedly');
+    try {
+      const completed = await dependencies.caseStore.completeOperation(
+        caseRow.id,
+        'punish',
+        punishment.actionType,
+        null,
+        analysis.reason,
+      );
+      if (!completed)
+        throw new Error('Auto-punishment operation state changed unexpectedly');
+    } catch (error) {
+      const uncertain = await dependencies.caseStore.markOperationUncertain(
+        caseRow.id,
+        'punish',
+        null,
+        error,
+      );
+      if (!uncertain) throw error;
+      logger.error('Auto-punishment outcome requires reconciliation', {
+        caseId: caseRow.id,
+        guildId: message.guildId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await upsertReviewIfConfigured(
+        message,
+        caseRow.id,
+        guildConfig,
+        dependencies,
+        {
+          status: 'punishment_uncertain',
+          reason:
+            'Auto-punishment reached Discord but its result could not be persisted. Verify the user state and reconcile the case.',
+          duplicateChannelIds,
+          triggerMessageDeleted,
+          preventionOutcome,
+          analysis,
+        },
+      );
+      return;
+    }
     await dependencies.caseStore.addEvent(
       caseRow.id,
       'punishment_applied',

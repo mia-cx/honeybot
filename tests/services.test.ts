@@ -39,7 +39,12 @@ import {
   MAX_ATTACHMENTS_PER_CASE,
   MAX_ATTACHMENTS_PER_MESSAGE,
 } from '../src/storage/fileStorage.js';
-import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
+import {
+  cleanupTempDirs,
+  testDatabase,
+  testDatabaseWithSetup,
+  testModelDefaults,
+} from './helpers.js';
 import type { AnalysisResult } from '../src/domain/types.js';
 import type { CachedMessage, ClassificationResult } from '../src/types.js';
 
@@ -667,6 +672,81 @@ describe('case review interactions', () => {
       status: 'punished',
     });
     expect(retry.update).toHaveBeenCalledOnce();
+    database.sqlite.close();
+  });
+
+  it('makes post-side-effect persistence failures explicitly reconcilable', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: false,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    vi.spyOn(store, 'completeOperation').mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    const ban = vi.fn(async () => undefined);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => null), ban },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const punish = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(punish as any, deps);
+
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punishment_uncertain',
+      actionTaken: null,
+      operationActionTaken: 'ban',
+    });
+    expect(JSON.stringify(punish.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
+
+    const reconcile = fakeCaseButtonInteraction(
+      guild,
+      `case:reconcile-applied:${caseRow.id}`,
+      'moderator-1',
+    );
+    await handleInteractionCreate(reconcile as any, deps);
+
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+      actionTaken: 'ban',
+      operationActionTaken: null,
+    });
+    expect(reconcile.update).toHaveBeenCalledOnce();
+    await expect(
+      store.reconcileOperation(caseRow.id, true, 'moderator-1'),
+    ).resolves.toBeNull();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_reconciled')),
+    ).toHaveLength(1);
     database.sqlite.close();
   });
 
@@ -1468,6 +1548,72 @@ describe('EvidenceAnalyzer', () => {
 });
 
 describe('CaseStore', () => {
+  it('migrates legacy uncertain operations to reconcilable statuses', () => {
+    const database = testDatabaseWithSetup((sqlite) => {
+      sqlite.exec(`
+        CREATE TABLE cases (
+          id TEXT PRIMARY KEY,
+          guild_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          trigger_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          action_taken TEXT,
+          reason TEXT,
+          evidence_summary_json TEXT NOT NULL,
+          review_channel_id TEXT,
+          review_message_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE case_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          case_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT,
+          reason TEXT,
+          metadata_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO cases VALUES
+          ('punish', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('dismiss', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('revert-punishment', 'guild', 'user', 'honeypot', 'operation_uncertain', 'ban', NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('revert-dismissal', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now');
+        INSERT INTO case_events
+          (case_id, event_type, actor_type, actor_id, reason, metadata_json, created_at)
+        VALUES
+          ('punish', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"punish"}', 'now'),
+          ('dismiss', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"dismiss"}', 'now'),
+          ('revert-punishment', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"revert_punishment"}', 'now'),
+          ('revert-dismissal', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"revert_dismissal"}', 'now');
+      `);
+    });
+
+    expect(
+      database.sqlite.prepare('SELECT id, status FROM cases ORDER BY id').all(),
+    ).toEqual([
+      { id: 'dismiss', status: 'dismissal_uncertain' },
+      { id: 'punish', status: 'punishment_uncertain' },
+      {
+        id: 'revert-dismissal',
+        status: 'dismissal_revert_uncertain',
+      },
+      {
+        id: 'revert-punishment',
+        status: 'punishment_revert_uncertain',
+      },
+    ]);
+    expect(
+      database.sqlite
+        .prepare('PRAGMA table_info(cases)')
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).toContain('operation_action_taken');
+
+    database.sqlite.close();
+  });
+
   it('atomically caps concurrent attachment processing per case', async () => {
     const database = testDatabase();
     let active = 0;
@@ -1810,26 +1956,35 @@ describe('CaseStore', () => {
       'moderator',
       'punished',
     );
-    await store.claimOperation(pendingCase.id, 'punish', 'moderator');
+    await store.claimOperation(pendingCase.id, 'punish', 'moderator', 'ban');
     await store.claimOperation(
       punishedCase.id,
       'revert_punishment',
       'moderator',
+      null,
     );
 
     await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
     await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
     expect(await store.getCase(pendingCase.id)).toMatchObject({
-      status: 'operation_uncertain',
+      status: 'punishment_uncertain',
       actionTaken: null,
+      operationActionTaken: 'ban',
     });
     expect(await store.getCase(punishedCase.id)).toMatchObject({
-      status: 'operation_uncertain',
+      status: 'punishment_revert_uncertain',
       actionTaken: 'ban',
+      operationActionTaken: null,
     });
     await expect(
       store.claimOperation(pendingCase.id, 'punish', 'moderator'),
     ).resolves.toBeNull();
+    await expect(
+      store.reconcileOperation(pendingCase.id, true, 'moderator'),
+    ).resolves.toMatchObject({ status: 'punished', actionTaken: 'ban' });
+    await expect(
+      store.reconcileOperation(punishedCase.id, false, 'moderator'),
+    ).resolves.toMatchObject({ status: 'punished', actionTaken: 'ban' });
     expect(
       await database.db
         .select()
@@ -2224,8 +2379,8 @@ function fakeCaseButtonInteraction(
     },
     client: { application: null },
     message: { components: [] },
-    reply: vi.fn(async () => undefined),
-    update: vi.fn(async () => undefined),
+    reply: vi.fn(async (payload: unknown) => void payload),
+    update: vi.fn(async (payload: unknown) => void payload),
   };
 }
 

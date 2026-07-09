@@ -81,6 +81,7 @@ export const cases = sqliteTable('cases', {
   triggerType: text('trigger_type').notNull(),
   status: text('status').notNull(),
   actionTaken: text('action_taken'),
+  operationActionTaken: text('operation_action_taken'),
   reason: text('reason'),
   evidenceSummaryJson: text('evidence_summary_json').notNull(),
   reviewChannelId: text('review_channel_id'),

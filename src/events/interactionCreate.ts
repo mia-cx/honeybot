@@ -68,6 +68,7 @@ import {
 import {
   caseReviewResolutionUpdate,
   caseReviewRevertUpdate,
+  caseReviewUncertainUpdate,
 } from '../interactions/caseReviewUi.js';
 import type { GuildSettings } from '../domain/types.js';
 
@@ -1475,12 +1476,51 @@ async function handleCaseButton(
     return;
   }
 
-  if (caseRow.status === 'operation_uncertain') {
-    await interaction.reply({
-      content:
-        'A case action was interrupted during restart and may already have reached Discord. Verify the user state manually before taking another action.',
-      ephemeral: true,
-    });
+  if (action === 'reconcile-applied' || action === 'reconcile-not-applied') {
+    const config = await deps.configStore.getGuildConfig(interaction.guildId);
+    const reconciled = await deps.caseStore.reconcileOperation(
+      caseId,
+      action === 'reconcile-applied',
+      interaction.user.id,
+    );
+    if (!reconciled) {
+      await interaction.reply({
+        content: 'Case no longer requires reconciliation.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (reconciled.status === 'pending_review') {
+      await interaction.update(
+        caseReviewRevertUpdate(interaction.message.components, {
+          caseId,
+          punishment: config.policies.punishment,
+        }),
+      );
+      return;
+    }
+    if (reconciled.status === 'dismissed' || reconciled.status === 'punished') {
+      await interaction.update(
+        caseReviewResolutionUpdate(interaction.message.components, {
+          caseId,
+          status: reconciled.status,
+          actorId: interaction.user.id,
+          userId: reconciled.userId,
+          detail: reconciled.reason ?? 'Interrupted operation reconciled',
+          punishment: config.policies.punishment,
+          canRevert: true,
+        }),
+      );
+      return;
+    }
+    throw new Error(`Unexpected reconciled case status: ${reconciled.status}`);
+  }
+
+  if (caseRow.status.endsWith('_uncertain')) {
+    await interaction.update(
+      caseReviewUncertainUpdate(interaction.message.components, { caseId }),
+    );
     return;
   }
 
@@ -1489,6 +1529,7 @@ async function handleCaseButton(
     const operation = await runCaseOperation(interaction, deps, {
       caseId,
       operation: 'dismiss',
+      actionTakenOnSuccess: null,
       run: () =>
         deps.moderationQueue.enqueue(interaction.guildId, () =>
           revertPrevention(interaction, caseRow, config),
@@ -1546,6 +1587,7 @@ async function handleCaseButton(
     const operation = await runCaseOperation(interaction, deps, {
       caseId,
       operation: 'punish',
+      actionTakenOnSuccess: policy.actionType,
       run: async () => {
         const member = await interaction.guild.members
           .fetch(caseRow.userId)
@@ -1617,6 +1659,7 @@ async function handleCaseButton(
       const operation = await runCaseOperation(interaction, deps, {
         caseId,
         operation: 'revert_punishment',
+        actionTakenOnSuccess: null,
         run: () =>
           deps.moderationQueue.enqueue(interaction.guildId, () =>
             revertPolicyForUser(
@@ -1658,6 +1701,7 @@ async function handleCaseButton(
       const operation = await runCaseOperation(interaction, deps, {
         caseId,
         operation: 'revert_dismissal',
+        actionTakenOnSuccess: prevention.actionType,
         run: async () =>
           requireAppliedPolicy(
             await deps.moderationQueue.enqueue(interaction.guildId, () =>
@@ -1715,6 +1759,7 @@ async function runCaseOperation<T>(
   input: {
     caseId: string;
     operation: CaseOperation;
+    actionTakenOnSuccess: string | null;
     run: () => Promise<T>;
     completion: (value: T) => { actionTaken: string | null; reason: string };
   },
@@ -1723,6 +1768,7 @@ async function runCaseOperation<T>(
     input.caseId,
     input.operation,
     interaction.user.id,
+    input.actionTakenOnSuccess,
   );
   if (!claimed) {
     await interaction.reply({
@@ -1732,8 +1778,24 @@ async function runCaseOperation<T>(
     return null;
   }
 
+  let value: T;
   try {
-    const value = await input.run();
+    value = await input.run();
+  } catch (error) {
+    await deps.caseStore.failOperation(
+      input.caseId,
+      input.operation,
+      interaction.user.id,
+      error,
+    );
+    await interaction.reply({
+      content: `Case action failed; the case remains retryable. ${error instanceof Error ? error.message : String(error)}`,
+      ephemeral: true,
+    });
+    return null;
+  }
+
+  try {
     const completion = input.completion(value);
     const completed = await deps.caseStore.completeOperation(
       input.caseId,
@@ -1746,16 +1808,18 @@ async function runCaseOperation<T>(
       throw new Error('Case operation state changed unexpectedly');
     return { value };
   } catch (error) {
-    await deps.caseStore.failOperation(
+    const uncertain = await deps.caseStore.markOperationUncertain(
       input.caseId,
       input.operation,
       interaction.user.id,
       error,
     );
-    await interaction.reply({
-      content: `Case action failed; the case remains retryable. ${error instanceof Error ? error.message : String(error)}`,
-      ephemeral: true,
-    });
+    if (!uncertain) throw error;
+    await interaction.update(
+      caseReviewUncertainUpdate(interaction.message.components, {
+        caseId: input.caseId,
+      }),
+    );
     return null;
   }
 }
