@@ -35,7 +35,7 @@ import type {
 import type { Db } from '../db/database.js';
 import {
   applyPolicyForUser,
-  dmPunishedUser,
+  applyPolicyWithBestEffortDm,
   honeybotAuditReason,
   moderationAuditReason,
   revertPolicyForUser,
@@ -1527,57 +1527,24 @@ async function handleCaseButton(
       confidence: caseConfidence(caseRow.evidenceSummaryJson),
       actorId: interaction.user.id,
     });
-    const member = await interaction.guild.members
-      .fetch(caseRow.userId)
-      .catch(() => null);
-    if (config.punishmentDmNotify) {
-      if (!member) {
-        await deps.caseStore.addEvent(
-          caseId,
-          'failed',
-          'bot',
-          null,
-          'Punishment DM failed',
-          {
-            error: 'Cannot DM user because they are no longer in the guild',
-            omitted: [],
-          },
-        );
-        await interaction.reply({
-          content:
-            'Punishment not applied: Honeybot could not DM the user because they are no longer in the guild.',
-          ephemeral: true,
-        });
-        return;
-      }
-
-      const dmSent = await dmPunishedUser({
-        member,
-        caseId,
-        action: policy.actionType,
-        reason,
-        auditReason,
-        caseStore: deps.caseStore,
-        storage: deps.storage,
-      });
-      if (!dmSent) {
-        await interaction.reply({
-          content:
-            'Punishment not applied: Discord did not confirm the DM notification was sent.',
-          ephemeral: true,
-        });
-        return;
-      }
-    }
     const applyResult = await deps.moderationQueue.enqueue(
       interaction.guildId,
       () =>
-        applyPolicyForUser(
-          interaction.guild,
-          caseRow.userId,
+        applyPolicyWithBestEffortDm({
+          guild: interaction.guild,
+          userId: caseRow.userId,
           policy,
-          auditReason,
-        ),
+          reason: auditReason,
+          dm: config.punishmentDmNotify
+            ? {
+                caseId,
+                reason,
+                auditReason,
+                caseStore: deps.caseStore,
+                storage: deps.storage,
+              }
+            : null,
+        }),
     );
     await deps.caseStore.addEvent(
       caseId,

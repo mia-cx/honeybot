@@ -866,7 +866,7 @@ function configControls(context: SettingsRenderContext): RawComponent[] {
     settingsSection(
       'DM notifications',
       ({ config }) =>
-        `Status: **${onOff(config.punishmentDmNotify)}**\nWhen enabled, Honeybot sends the user a case summary before applying the final punishment when Discord allows it.`,
+        `Status: **${onOff(config.punishmentDmNotify)}**\nWhen enabled, Honeybot makes a best-effort attempt to send the user a case summary before the final punishment. Delivery failures never block moderation.`,
       ({ config }) => [
         buttonRow([
           button(

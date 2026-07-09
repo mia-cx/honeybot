@@ -17,6 +17,7 @@ import { OpenRouterEmbeddings } from '../src/services/embeddings.js';
 import { GlobalBanService } from '../src/services/globalBanList.js';
 import {
   applyPolicyForUser,
+  applyPolicyWithBestEffortDm,
   deleteMessage,
   dmPunishedUser,
   revertPolicyForUser,
@@ -923,7 +924,8 @@ describe('moderation actions', () => {
     };
     const member = fakeMember();
     await dmPunishedUser({
-      member,
+      guild: member.guild,
+      userId: member.id,
       caseId: 'case1',
       action: 'ban',
       reason: 'reason',
@@ -947,7 +949,8 @@ describe('moderation actions', () => {
 
     member.send.mockRejectedValueOnce(new Error('closed'));
     await dmPunishedUser({
-      member,
+      guild: member.guild,
+      userId: member.id,
       caseId: 'case1',
       action: 'kick',
       reason: 'reason',
@@ -962,7 +965,101 @@ describe('moderation actions', () => {
       'Punishment DM failed',
       expect.objectContaining({ error: 'closed' }),
     );
+
+    member.guild.members.fetch.mockRejectedValueOnce(
+      new Error('Discord unavailable'),
+    );
+    await expect(
+      dmPunishedUser({
+        guild: member.guild,
+        userId: member.id,
+        caseId: 'case1',
+        action: 'ban',
+        reason: 'reason',
+        caseStore: caseStore as any,
+        storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+      }),
+    ).resolves.toBe(false);
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      expect.objectContaining({
+        error: 'Cannot fetch user for punishment DM: Discord unavailable',
+      }),
+    );
   });
+
+  it('applies punishment after a DM lookup failure', async () => {
+    const member = fakeMember();
+    member.guild.members.fetch.mockRejectedValueOnce(
+      new Error('Discord unavailable'),
+    );
+    const caseStore = {
+      listCaseMessages: vi.fn(async () => []),
+      listCaseAttachments: vi.fn(async () => []),
+      addEvent: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      applyPolicyWithBestEffortDm({
+        guild: member.guild,
+        userId: member.id,
+        policy: policy('ban'),
+        reason: 'audit reason',
+        dm: {
+          caseId: 'case1',
+          reason: 'reason',
+          caseStore: caseStore as any,
+          storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+        },
+      }),
+    ).resolves.toBe('user banned');
+    expect(member.guild.members.ban).toHaveBeenCalledWith(member.id, {
+      reason: 'Banned for likely scam • audit reason',
+      deleteMessageSeconds: 7 * 24 * 60 * 60,
+    });
+  });
+
+  it.each(['case preparation', 'failure recording'] as const)(
+    'applies punishment after DM %s throws',
+    async (failure) => {
+      const member = fakeMember();
+      const caseStore = {
+        listCaseMessages: vi.fn(async () => []),
+        listCaseAttachments: vi.fn(async () => []),
+        addEvent: vi.fn(async () => undefined),
+      };
+      if (failure === 'case preparation') {
+        caseStore.listCaseMessages.mockRejectedValueOnce(
+          new Error('case unavailable'),
+        );
+      } else {
+        member.send.mockRejectedValueOnce(new Error('closed'));
+        caseStore.addEvent.mockRejectedValueOnce(
+          new Error('database unavailable'),
+        );
+      }
+
+      await expect(
+        applyPolicyWithBestEffortDm({
+          guild: member.guild,
+          userId: member.id,
+          policy: policy('ban'),
+          reason: 'audit reason',
+          dm: {
+            caseId: 'case1',
+            reason: 'reason',
+            caseStore: caseStore as any,
+            storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+          },
+        }),
+      ).resolves.toBe('user banned');
+      expect(member.guild.members.ban).toHaveBeenCalledOnce();
+    },
+  );
 });
 
 describe('FileStorage and prompts', () => {

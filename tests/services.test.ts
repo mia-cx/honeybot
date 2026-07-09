@@ -238,63 +238,76 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
-  it('sends DMs before prevention actions that remove the member', async () => {
+  it.each(['timeout', 'kick', 'ban'] as const)(
+    'does not send DMs for %s prevention actions',
+    async (action) => {
+      const database = testDatabase();
+      const config = defaultGuildConfig({
+        honeypotChannelIds: ['honey'],
+        moderationChannelId: null,
+        punishmentDmNotify: true,
+      });
+      config.policies.honeypot_prevention.actionType = action;
+      config.policies.honeypot_prevention.deleteMessages = false;
+
+      const actions: string[] = [];
+      const guild = fakeDiscordGuild([], actions);
+      const message = fakeDiscordMessage({
+        id: 'm1',
+        channelId: 'honey',
+        content: 'free nitro',
+        guild,
+      });
+      guild.register(message);
+
+      const dependencies = {
+        configStore: { getGuildConfig: vi.fn(async () => config) },
+        messageCache: new MessageCache(),
+        duplicateDetector: new DuplicateDetector(),
+        caseStore: new CaseStore(database.db, fakeStorage()),
+        analyzer: {
+          analyze: vi.fn(async () => ({
+            confidence: 0,
+            shouldPunish: false,
+            reason: 'not a scam',
+            evidence: [],
+          })),
+        },
+        moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+        storage: fakeStorage(),
+      } as any;
+
+      await handleMessageCreate(message, dependencies);
+
+      expect(actions).toEqual([action]);
+      expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(
+        action === 'timeout' ? 1 : 0,
+      );
+      expect(
+        await database.db
+          .select()
+          .from(caseEvents)
+          .where(eq(caseEvents.eventType, 'dm_notified')),
+      ).toHaveLength(0);
+      database.sqlite.close();
+    },
+  );
+
+  it('continues auto-punishment when the final DM fails', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
       moderationChannelId: null,
       punishmentDmNotify: true,
+      reviewBypassEnabled: true,
     });
-    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.actionType = 'timeout';
     config.policies.honeypot_prevention.deleteMessages = false;
+    config.policies.punishment.actionType = 'ban';
+    config.policies.punishment.deleteMessages = false;
 
-    const deleted: string[] = [];
     const actions: string[] = [];
-    const guild = fakeDiscordGuild(deleted, actions);
-    const message = fakeDiscordMessage({
-      id: 'm1',
-      channelId: 'honey',
-      content: 'free nitro',
-      guild,
-    });
-    guild.register(message);
-
-    const dependencies = {
-      configStore: { getGuildConfig: vi.fn(async () => config) },
-      messageCache: new MessageCache(),
-      duplicateDetector: new DuplicateDetector(),
-      caseStore: new CaseStore(database.db, fakeStorage()),
-      analyzer: { analyze: vi.fn() },
-      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
-      storage: fakeStorage(),
-    } as any;
-
-    await handleMessageCreate(message, dependencies);
-
-    expect(actions).toEqual(['dm', 'ban']);
-    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
-    expect(
-      await database.db
-        .select()
-        .from(caseEvents)
-        .where(eq(caseEvents.eventType, 'dm_notified')),
-    ).toHaveLength(1);
-    database.sqlite.close();
-  });
-
-  it('blocks prevention when DM notification is required but not delivered', async () => {
-    const database = testDatabase();
-    const config = defaultGuildConfig({
-      honeypotChannelIds: ['honey'],
-      moderationChannelId: null,
-      punishmentDmNotify: true,
-    });
-    config.policies.honeypot_prevention.actionType = 'ban';
-    config.policies.honeypot_prevention.deleteMessages = false;
-
-    const deleted: string[] = [];
-    const actions: string[] = [];
-    const guild = fakeDiscordGuild(deleted, actions, {
+    const guild = fakeDiscordGuild([], actions, {
       dmError: new Error('closed'),
     });
     const message = fakeDiscordMessage({
@@ -310,15 +323,25 @@ describe('handleMessageCreate', () => {
       messageCache: new MessageCache(),
       duplicateDetector: new DuplicateDetector(),
       caseStore: new CaseStore(database.db, fakeStorage()),
-      analyzer: { analyze: vi.fn() },
+      analyzer: {
+        analyze: vi.fn(async () => ({
+          confidence: 1,
+          shouldPunish: true,
+          reason: 'scam confirmed',
+          evidence: [],
+        })),
+      },
       moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
       storage: fakeStorage(),
     } as any;
 
     await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual([]);
-    expect(dependencies.moderationQueue.enqueue).not.toHaveBeenCalled();
+    expect(actions).toEqual(['timeout', 'ban']);
+    expect(dependencies.moderationQueue.enqueue).toHaveBeenCalledTimes(2);
+    expect(await database.db.select().from(cases)).toEqual([
+      expect.objectContaining({ status: 'punished', actionTaken: 'ban' }),
+    ]);
     expect(
       await database.db
         .select()
@@ -373,7 +396,7 @@ describe('handleMessageCreate', () => {
     await handleMessageCreate(second, dependencies);
 
     expect(deleted).toEqual(['m1', 'm2']);
-    expect(actions).toEqual(['dm', 'timeout', 'delete:m1', 'delete:m2']);
+    expect(actions).toEqual(['timeout', 'delete:m1', 'delete:m2']);
     expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
     database.sqlite.close();
   });
