@@ -310,6 +310,68 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
+  it('applies prevention before slow attachment storage completes', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: false,
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    let signalStorageStarted: () => void = () => undefined;
+    const storageStarted = new Promise<void>((resolve) => {
+      signalStorageStarted = resolve;
+    });
+    let releaseStorage: () => void = () => undefined;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      signalStorageStarted();
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions);
+    const message = fakeDiscordMessage({
+      id: 'slow-attachment',
+      channelId: 'honey',
+      guild,
+      attachments: [attachment({ id: 'slow' })],
+    });
+    guild.register(message);
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, storage),
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage,
+    } as any;
+
+    const handling = handleMessageCreate(message, dependencies);
+    await storageStarted;
+    await vi.waitFor(() => expect(actions).toEqual(['ban']));
+    releaseStorage();
+    await handling;
+
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
+    database.sqlite.close();
+  });
+
   it('deletes every duplicate message during cross-channel prevention', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({ moderationChannelId: null });
@@ -1248,7 +1310,8 @@ describe('CaseStore', () => {
 
     await Promise.all(
       Array.from({ length: 8 }, (_, messageIndex) =>
-        store.attachMessage(
+        attachCaseMessage(
+          store,
           caseRow.id,
           fakeMessage({
             id: `concurrent-${messageIndex}`,
@@ -1281,7 +1344,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'triggered',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       perMessageCase.id,
       fakeMessage({
         id: 'per-message',
@@ -1305,7 +1369,8 @@ describe('CaseStore', () => {
     );
 
     for (let messageIndex = 0; messageIndex < 5; messageIndex += 1) {
-      await store.attachMessage(
+      await attachCaseMessage(
+        store,
         perCase.id,
         fakeMessage({
           id: `per-case-message-${messageIndex}`,
@@ -1330,7 +1395,8 @@ describe('CaseStore', () => {
       },
       { reusePending: false },
     );
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       oversizedCase.id,
       fakeMessage({
         id: 'oversized-message',
@@ -1465,7 +1531,8 @@ describe('CaseStore', () => {
     });
     expect(second.id).toBe(first.id);
 
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       first.id,
       fakeMessage({
         id: 'source',
@@ -1524,7 +1591,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam reason',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({
         id: 'msg',
@@ -1594,7 +1662,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam reason',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({
         id: 'msg-no-embeddings',
@@ -1681,7 +1750,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({ attachments: [attachment({ id: 'img' })] }),
     );
@@ -1696,6 +1766,18 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 });
+
+async function attachCaseMessage(
+  store: CaseStore,
+  caseId: string,
+  message: ReturnType<typeof fakeMessage>,
+) {
+  const persisted = await store.attachMessage(caseId, message);
+  return {
+    ...persisted,
+    attachments: await persisted.processedAttachments,
+  };
+}
 
 function fakeDiscordGuild(
   deleted: string[],
@@ -1769,8 +1851,10 @@ function fakeDiscordMessage(
     guild: ReturnType<typeof fakeDiscordGuild>;
     channelId: string;
     content: string;
+    attachments: unknown[];
   }>,
 ) {
+  const attachments = input.attachments ?? [];
   return {
     id: input.id ?? 'message',
     guildId: 'guild',
@@ -1784,8 +1868,8 @@ function fakeDiscordMessage(
     deletable: true,
     inGuild: () => true,
     attachments: {
-      map: <T>(fn: (attachment: any) => T) => ([] as any[]).map(fn),
-      values: () => ([] as any[])[Symbol.iterator](),
+      map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
+      values: () => attachments[Symbol.iterator](),
     },
   } as any;
 }

@@ -34,6 +34,7 @@ import {
 } from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
 import { FairQueue } from '../queues/fairQueue.js';
+import { logger } from '../logger.js';
 
 const caseId = customAlphabet(
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-',
@@ -46,7 +47,7 @@ const attachmentQueueDefaults = {
   perGuildLimit: Number.MAX_SAFE_INTEGER,
   windowMs: 1_000,
   maxPendingGlobal: 64,
-  maxPendingPerGuild: 16,
+  maxPendingPerGuild: MAX_ATTACHMENTS_PER_CASE,
   logFailures: false,
 } as const;
 
@@ -78,8 +79,7 @@ const caseOperationTransitions = {
 
 export type CaseOperation = keyof typeof caseOperationTransitions;
 
-type CaseOperationTransition =
-  (typeof caseOperationTransitions)[CaseOperation];
+type CaseOperationTransition = (typeof caseOperationTransitions)[CaseOperation];
 
 function operationTransitions() {
   return Object.entries(caseOperationTransitions) as Array<
@@ -177,13 +177,16 @@ export class CaseStore {
         .get());
     if (!caseMessage) throw new Error('Failed to persist case message');
 
-    const storedAttachments = [] as Array<typeof caseAttachments.$inferSelect>;
+    const attachmentMetadata = [] as Array<typeof caseAttachments.$inferSelect>;
+    const attachmentStorage = [] as Array<
+      Promise<typeof caseAttachments.$inferSelect>
+    >;
     let attachmentIndex = 0;
     for (const attachment of message.attachments.values()) {
       const eligibleForProcessing =
         attachmentIndex < MAX_ATTACHMENTS_PER_MESSAGE &&
         attachment.size <= MAX_ATTACHMENT_BYTES;
-      let row = this.db.transaction(
+      const row = this.db.transaction(
         (tx) => {
           const occupiedSlots = eligibleForProcessing
             ? tx
@@ -229,52 +232,72 @@ export class CaseStore {
         { behavior: 'immediate' },
       );
 
-      if (row.processingSlot !== null) {
-        try {
-          const stored = await this.attachmentQueue.enqueue(
-            message.guildId,
-            () =>
-              this.storage.saveFromUrl(
-                attachment.url,
-                [message.guildId, caseId],
-                attachment.name ?? `${attachment.id}.bin`,
-                {
-                  contentType: attachment.contentType ?? null,
-                  expectedSizeBytes: attachment.size,
-                },
-              ),
-          );
-          const [updated] = await this.db
-            .update(caseAttachments)
-            .set({
-              name: stored.fileName,
-              contentType: stored.contentType,
-              sizeBytes: stored.sizeBytes,
-              sha256: stored.sha256,
-              storageKey: stored.storageKey,
-            })
-            .where(eq(caseAttachments.id, row.id))
-            .returning();
-          if (updated) row = updated;
-        } catch (error) {
-          await this.addEvent(
-            caseId,
-            'attachment_storage_failed',
-            'bot',
-            null,
-            'Attachment retained as metadata only',
-            {
-              discordAttachmentId: attachment.id,
-              error: error instanceof Error ? error.message : String(error),
-            },
-          );
-        }
-      }
-      storedAttachments.push(row);
+      const storageTask =
+        row.processingSlot === null
+          ? Promise.resolve(row)
+          : this.attachmentQueue
+              .enqueue(message.guildId, () =>
+                this.storage.saveFromUrl(
+                  attachment.url,
+                  [message.guildId, caseId],
+                  attachment.name ?? `${attachment.id}.bin`,
+                  {
+                    contentType: attachment.contentType ?? null,
+                    expectedSizeBytes: attachment.size,
+                  },
+                ),
+              )
+              .then(async (stored) => {
+                const [updated] = await this.db
+                  .update(caseAttachments)
+                  .set({
+                    name: stored.fileName,
+                    contentType: stored.contentType,
+                    sizeBytes: stored.sizeBytes,
+                    sha256: stored.sha256,
+                    storageKey: stored.storageKey,
+                  })
+                  .where(eq(caseAttachments.id, row.id))
+                  .returning();
+                return updated ?? row;
+              })
+              .catch(async (error: unknown) => {
+                try {
+                  await this.addEvent(
+                    caseId,
+                    'attachment_storage_failed',
+                    'bot',
+                    null,
+                    'Attachment retained as metadata only',
+                    {
+                      discordAttachmentId: attachment.id,
+                      error:
+                        error instanceof Error ? error.message : String(error),
+                    },
+                  );
+                } catch (eventError) {
+                  logger.warn('Failed to record attachment storage failure', {
+                    caseId,
+                    discordAttachmentId: attachment.id,
+                    error:
+                      eventError instanceof Error
+                        ? eventError.message
+                        : String(eventError),
+                  });
+                }
+                return row;
+              });
+
+      attachmentMetadata.push(row);
+      attachmentStorage.push(storageTask);
       attachmentIndex += 1;
     }
 
-    return { caseMessage, attachments: storedAttachments };
+    return {
+      caseMessage,
+      attachments: attachmentMetadata,
+      processedAttachments: Promise.all(attachmentStorage),
+    };
   }
 
   async markMessageDeleted(messageId: string) {

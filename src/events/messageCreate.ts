@@ -103,27 +103,6 @@ async function handleTriggeredMessage(
     caseRow.id,
     message,
   );
-  const cachedAttachments = await Promise.all(
-    persisted.attachments.map(
-      async (attachment): Promise<CachedAttachment> => ({
-        id: attachment.discordAttachmentId,
-        name: attachment.name,
-        contentType: attachment.contentType,
-        size: attachment.sizeBytes,
-        url: attachment.originalUrl,
-        proxyUrl: attachment.reviewAttachmentUrl ?? attachment.originalUrl,
-        dataUrl:
-          (await attachmentDataUrl(attachment, dependencies.storage)) ?? null,
-        sha256: attachment.sha256,
-        storageKey: attachment.storageKey,
-      }),
-    ),
-  );
-  const cached = dependencies.messageCache.cache(
-    message,
-    triggerType === 'honeypot' ? 'honeypot' : 'crosschannel',
-    cachedAttachments,
-  );
 
   const member = await message.guild.members.fetch(message.author.id);
   const preventionAuditReason = honeybotAuditReason({
@@ -177,6 +156,28 @@ async function handleTriggeredMessage(
       });
     }
   }
+
+  const processedAttachments = await persisted.processedAttachments;
+  const cachedAttachments = await Promise.all(
+    processedAttachments.map(async (attachment): Promise<CachedAttachment> => ({
+      id: attachment.discordAttachmentId,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.sizeBytes,
+      url: attachment.originalUrl,
+      proxyUrl: attachment.reviewAttachmentUrl ?? attachment.originalUrl,
+      dataUrl:
+        (await attachmentDataUrl(attachment, dependencies.storage)) ?? null,
+      sha256: attachment.sha256,
+      storageKey: attachment.storageKey,
+    })),
+  );
+  const cached = dependencies.messageCache.cache(
+    message,
+    triggerType === 'honeypot' ? 'honeypot' : 'crosschannel',
+    cachedAttachments,
+  );
+
   await upsertReviewIfConfigured(
     message,
     caseRow.id,
