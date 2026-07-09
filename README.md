@@ -115,11 +115,12 @@ Build the Docker image locally:
 docker build -f docker/Dockerfile -t honeybot:local .
 ```
 
-GitHub Actions builds every PR and push to `main`. Pushes to `main` publish multi-arch images to GHCR as `ghcr.io/mia-cx/honeybot:main`, `:latest`, and `:sha-...`. Docker Hub publishing is enabled when these repository settings exist:
+GitHub Actions builds every PR and push to `main`. Pushes to `main` publish multi-arch images to GHCR and Docker Hub using `package.json`'s version:
 
-- Secret `DOCKERHUB_USERNAME`
-- Secret `DOCKERHUB_TOKEN`
-- Optional variable `DOCKERHUB_REPOSITORY` (defaults to `honeybot`)
+- stable `1.2.3` publishes `:v1.2.3`, `:v1.2`, `:v1`, `:latest`, and `:sha-...`
+- beta `1.2.3-beta` publishes `:v1.2.3-beta`, `:v1.2-beta`, `:v1-beta`, `:beta`, and `:sha-...`
+
+Docker Hub publishes to `docker.io/miacx/honeybot` and requires the `DOCKERHUB_TOKEN` repository secret.
 
 Kubernetes/k3s options:
 

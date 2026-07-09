@@ -38,19 +38,57 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Compute image tags
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: |
-            ghcr.io/${{ github.repository }}
-            docker.io/${{ env.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(node -p "require('./package.json').version")
+          if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.+)?$ ]]; then
+            echo "package.json version must be semver, got: $version" >&2
+            exit 1
+          fi
+
+          major="${BASH_REMATCH[1]}"
+          minor="${BASH_REMATCH[2]}"
+          prerelease="${BASH_REMATCH[4]:-}"
+          ghcr="ghcr.io/${{ github.repository }}"
+          dockerhub="docker.io/${{ env.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY }}"
+
+          if [[ "$prerelease" == *beta* ]]; then
+            suffixes=("v${version}" "v${major}.${minor}-beta" "v${major}-beta" "beta" "sha-${GITHUB_SHA::7}")
+          elif [[ -z "$prerelease" ]]; then
+            suffixes=("v${version}" "v${major}.${minor}" "v${major}" "latest" "sha-${GITHUB_SHA::7}")
+          else
+            suffixes=("v${version}" "sha-${GITHUB_SHA::7}")
+          fi
+
+          tags=()
+          for suffix in "${suffixes[@]}"; do
+            tags+=("${ghcr}:${suffix}")
+            tags+=("${dockerhub}:${suffix}")
+          done
+
+          labels=(
+            "org.opencontainers.image.title=honeybot"
+            "org.opencontainers.image.description=Discord moderation bot for honeypot and scam raid detection"
+            "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
+            "org.opencontainers.image.revision=${GITHUB_SHA}"
+            "org.opencontainers.image.version=${version}"
+          )
+
+          {
+            echo "version=${version}"
+            echo 'tags<<EOF'
+            printf '%s\n' "${tags[@]}"
+            echo 'EOF'
+            echo 'labels<<EOF'
+            printf '%s\n' "${labels[@]}"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+          printf 'Publishing package version %s as:\n' "$version"
+          printf '  %s\n' "${tags[@]}"
 
       - name: Login GHCR
         if: github.event_name != 'pull_request'
@@ -74,7 +112,7 @@ jobs:
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.image.outputs.tags }}
+          labels: ${{ steps.image.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
