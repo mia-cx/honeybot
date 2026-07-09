@@ -1,75 +1,34 @@
 # Honeybot
 
-Honeybot is a Discord moderation bot for catching scam/spam raids with honeypot channels, cross-channel repeat detection, known scam evidence, and configurable per-server punishments.
+Honeybot is a Discord.js moderation bot for catching scam and spam raids with honeypot channels, cross-channel repeat detection, known-scam evidence, embeddings, classifiers, and moderator review.
 
-The current codebase is a TypeScript Discord.js MVP. Key docs:
+It is built for self-hosting: SQLite for persistence, filesystem evidence storage, Docker images, and Kubernetes/k3s manifests are all first-class deployment paths.
 
-- [`docs/SPEC.md`](docs/SPEC.md) — current product and architecture notes
-- [`docs/PLAN.md`](docs/PLAN.md) — implementation plan and schema draft
-- [`PRIVACY.md`](PRIVACY.md) — privacy policy
-- [`TERMS.md`](TERMS.md) — terms of service
+## Contents
 
-## How it works
+- [Features](#features)
+- [Discord app requirements](#discord-app-requirements)
+- [Quick start](#quick-start)
+- [Docker usage](#docker-usage)
+- [Docker Compose](#docker-compose)
+- [Kubernetes / Helm](#kubernetes--helm)
+- [Configuration](#configuration)
+- [Image tags](#image-tags)
+- [Development](#development)
+- [Docs](#docs)
 
-Honeybot only reacts after one of two triggers:
+## Features
 
-1. **Honeypot trigger** — a user posts in a configured honeypot channel.
-2. **Cross-channel trigger** — a user posts repeated/similar content across multiple channels within a configured window.
-
-After a trigger, the intended pipeline is:
-
-1. Create a moderation case.
-2. Cache involved messages and attachments, preserving original attachment files for moderation review.
-3. Run cheap evidence checks first:
-   - exact normalized-text hash match
-   - exact image byte hash match
-   - text MinHash/fuzzy match
-   - image perceptual hash match
-4. If no exact/fuzzy match is decisive, embed text/images and retrieve nearby known scam entries.
-5. Rerank retrieved evidence and build a short evidence summary.
-6. Ask the configured text/image classifier for scam likelihood, confidence, and reason if needed.
-7. Either send the case to moderator review or, when review bypass is enabled and confidence crosses threshold, apply the guild's configured punishment: timeout, role, kick, or ban.
-8. If `punishment:dm_notify` is enabled, DM locally punished users with the decision, reason, and evidence attachments as uploaded files.
-
-The model does **not** decide moderation actions. It only reports likelihood/confidence/reason. Bot policy decides what to do.
-
-## Current implementation
-
-Implemented now:
-
-- Discord.js v14 TypeScript bot with slash command registration.
-- Drizzle/SQLite persistence with filesystem evidence storage under `data/images`.
-- Honeypot and cross-channel trigger detection.
-- Moderator/bypass authorization.
-- Prevention and punishment policies.
-- Case/evidence persistence and moderation-channel review buttons.
-- OpenRouter classifier adapter with per-guild BYOK overrides.
-- Guild-fair queues with global and per-guild limiters.
-- Local punishment DMs with stored evidence attachments.
-- Global-ban storage, opt-in, and join-time enforcement.
-
-Still intentionally shallow/MVP:
-
-- Embeddings and perceptual hashes are schema-ready but not fully implemented.
-- Known corpus exact hash lookup exists; approval UX is minimal.
-- `/settings` is a summary response rather than the final paginated components v2 UI.
-
-## Setup
-
-```bash
-pnpm install
-cp .env.example .env
-```
-
-Fill in `.env`:
-
-```bash
-DISCORD_TOKEN=your-bot-token
-OPENROUTER_API_KEY=optional-default-key
-API_KEY_ENCRYPTION_KEY=base64-encoded-32-byte-key
-```
-
-Configure guilds with slash commands after the bot starts: `/honeypot`, `/moderators`, `/policies`, `/settings`, `/model`, and `/global-bans`.
+- Honeypot channel triggers.
+- Cross-channel repeated-content detection with a configurable S-curve time window.
+- Known evidence corpus for exact, fuzzy, and embedding-based scam lookup.
+- Text and multimodal image classifiers through OpenRouter-compatible model config.
+- Per-guild policies for prevention and final punishment.
+- Components V2 `/settings`, case review, corpus listing, and punishment DM UI.
+- Moderator review buttons with separate case-moderator and Honeybot-configuration access.
+- Optional global admin workflows for known scam corpus and global bans.
+- Persistent SQLite state under `/app/data`.
+- Filesystem evidence/image storage under `/app/data/images` by default.
 
 ## Discord app requirements
 
@@ -87,55 +46,216 @@ Invite the bot with permissions for the actions you enable:
 - Ban Members, if using ban punishment
 - Manage Roles, if using role punishment
 
-## Scripts
+## Quick start
 
 ```bash
-pnpm dev       # run with tsx watch
-pnpm typecheck # type-check only
-pnpm build     # emit dist/
-pnpm start     # run dist/index.js
-pnpm lint      # lint source
-pnpm test      # unit tests
-pnpm eval:fixtures # run prompt evals against text fixtures + local EVAL_CORPUS_DIR/mrscam* images
+pnpm install
+cp .env.example .env
 ```
 
-## Hosting notes
+Fill in `.env`:
 
-Default deployment shape:
+```bash
+DISCORD_TOKEN=your-bot-token
+OPENROUTER_API_KEY=optional-default-key
+API_KEY_ENCRYPTION_KEY=base64-encoded-32-byte-key
+```
 
-- SQLite database at `data/honeybot.sqlite`
-- local image/evidence storage under `data/images/`
-- `data/` mounted as a persistent Docker/Railway/Kubernetes volume
+Generate an encryption key with:
 
-Without a persistent volume, redeploys can lose config, cases, and known scam evidence.
+```bash
+openssl rand -base64 32
+```
 
-Build the Docker image locally:
+Run locally:
+
+```bash
+pnpm dev
+```
+
+Configure guilds with `/settings` after the bot starts.
+
+## Docker usage
+
+Published images:
+
+- Docker Hub: `miacx/honeybot`
+- GHCR: `ghcr.io/mia-cx/honeybot`
+
+Run with Docker Hub:
+
+```bash
+docker run -d \
+  --name honeybot \
+  --restart unless-stopped \
+  -e DISCORD_TOKEN='your-bot-token' \
+  -e OPENROUTER_API_KEY='optional-default-key' \
+  -e API_KEY_ENCRYPTION_KEY='base64-encoded-32-byte-key' \
+  -e GLOBAL_AUTH_MODE='team' \
+  -e GLOBAL_AUTH_TEAM_ID='your-discord-app-team-id' \
+  -v honeybot-data:/app/data \
+  miacx/honeybot:latest
+```
+
+Run with GHCR:
+
+```bash
+docker run -d \
+  --name honeybot \
+  --restart unless-stopped \
+  -e DISCORD_TOKEN='your-bot-token' \
+  -e API_KEY_ENCRYPTION_KEY='base64-encoded-32-byte-key' \
+  -v honeybot-data:/app/data \
+  ghcr.io/mia-cx/honeybot:latest
+```
+
+There are no ports to publish. Honeybot only makes outbound connections to Discord and model providers.
+
+### Volumes
+
+| Path | Purpose |
+| --- | --- |
+| `/app/data` | SQLite database, stored evidence images, and runtime state |
+
+Without a persistent volume, redeploys can lose config, cases, verbose-mode state, and known scam evidence.
+
+## Docker Compose
+
+A starter [`compose.yaml`](compose.yaml) is included.
+
+Create a local `.env` for Compose variable substitution:
+
+```bash
+DISCORD_TOKEN=your-bot-token
+OPENROUTER_API_KEY=optional-default-key
+API_KEY_ENCRYPTION_KEY=base64-encoded-32-byte-key
+GLOBAL_AUTH_MODE=team
+GLOBAL_AUTH_TEAM_ID=your-discord-app-team-id
+```
+
+Start the bot:
+
+```bash
+docker compose up -d
+```
+
+View logs:
+
+```bash
+docker compose logs -f honeybot
+```
+
+Update:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+## Kubernetes / Helm
+
+This section is intentionally short enough to work well on Docker Hub too: image users can see the Helm install path without digging through the repo. Full chart docs live in [`charts/honeybot/README.md`](charts/honeybot/README.md).
+
+Install with Helm:
+
+```bash
+helm upgrade --install honeybot ./charts/honeybot \
+  --namespace honeybot --create-namespace \
+  --set image.repository=miacx/honeybot \
+  --set image.tag=latest \
+  --set secrets.discordToken='your-bot-token' \
+  --set secrets.openrouterApiKey='optional-default-key' \
+  --set secrets.apiKeyEncryptionKey='base64-encoded-32-byte-key' \
+  --set env.GLOBAL_AUTH_TEAM_ID='your-discord-app-team-id'
+```
+
+Raw k3s starter manifest:
+
+```bash
+kubectl apply -f k8s/honeybot.yaml
+```
+
+Kubernetes notes:
+
+- Keep `replicaCount: 1`; Honeybot uses SQLite on a single-writer volume.
+- The Helm chart uses `Recreate` rollout strategy to avoid two pods writing SQLite during upgrades.
+- The pod runs as UID/GID `10001` and the chart sets `fsGroup: 10001` for PVC writability.
+
+## Configuration
+
+Honeybot reads ordinary environment variables from `process.env`. Docker, Compose, Kubernetes ConfigMaps, and Kubernetes Secrets all work without any special adapter.
+
+Required:
+
+| Variable | Description |
+| --- | --- |
+| `DISCORD_TOKEN` | Discord bot token |
+
+Recommended:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `OPENROUTER_API_KEY` | unset | Deployment default model key. Guilds can also BYOK in Discord. |
+| `API_KEY_ENCRYPTION_KEY` | unset | Base64 32-byte key for encrypting guild BYOK keys. |
+| `GLOBAL_AUTH_MODE` | `team` | `team` or `users` global-admin mode. |
+| `GLOBAL_AUTH_TEAM_ID` | unset | Discord Developer Team ID when `GLOBAL_AUTH_MODE=team`. |
+| `GLOBAL_AUTH_USER_IDS` | empty | Comma-separated global admin user IDs when `GLOBAL_AUTH_MODE=users`. |
+| `LOG_LEVEL` | `info` | Log verbosity. |
+
+Storage defaults are hardcoded in the app:
+
+| Variable | Default |
+| --- | --- |
+| `DATABASE_URL` | `file:data/honeybot.sqlite` |
+| `IMAGE_STORAGE_DRIVER` | `filesystem` |
+| `IMAGE_STORAGE_DIR` | `data/images` |
+
+See [`.env.example`](.env.example) for every advanced model, queue, trigger, and policy default.
+
+## Image tags
+
+Images are versioned from `package.json`.
+
+Stable version `1.2.3` publishes:
+
+- `v1.2.3`
+- `v1.2`
+- `v1`
+- `latest`
+- `sha-...`
+
+Beta version `1.2.3-beta` publishes:
+
+- `v1.2.3-beta`
+- `v1.2-beta`
+- `v1-beta`
+- `beta`
+- `sha-...`
+
+Build locally:
 
 ```bash
 docker build -f docker/Dockerfile -t honeybot:local .
 ```
 
-GitHub Actions builds every PR and push to `main`. Pushes to `main` publish multi-arch images to GHCR and Docker Hub using `package.json`'s version:
-
-- stable `1.2.3` publishes `:v1.2.3`, `:v1.2`, `:v1`, `:latest`, and `:sha-...`
-- beta `1.2.3-beta` publishes `:v1.2.3-beta`, `:v1.2-beta`, `:v1-beta`, `:beta`, and `:sha-...`
-
-Docker Hub publishes to `docker.io/miacx/honeybot` and requires the `DOCKERHUB_TOKEN` repository secret.
-
-Kubernetes/k3s options:
-
-- Raw starter manifest: [`k8s/honeybot.yaml`](k8s/honeybot.yaml)
-- Helm chart: [`charts/honeybot`](charts/honeybot)
-
-Example Helm install:
+## Development
 
 ```bash
-helm upgrade --install honeybot ./charts/honeybot \
-  --namespace honeybot --create-namespace \
-  --set image.repository=ghcr.io/YOUR_ORG/honeybot \
-  --set image.tag=0.1.0 \
-  --set secrets.discordToken='YOUR_DISCORD_TOKEN' \
-  --set secrets.openrouterApiKey='YOUR_OPENROUTER_KEY' \
-  --set secrets.apiKeyEncryptionKey='BASE64_32_BYTE_KEY' \
-  --set env.GLOBAL_AUTH_TEAM_ID='YOUR_DISCORD_APP_TEAM_ID'
+pnpm dev            # run with tsx watch
+pnpm typecheck      # type-check only
+pnpm build          # emit dist/
+pnpm start          # run dist/src/index.js
+pnpm lint           # lint source
+pnpm test           # unit tests
+pnpm eval:fixtures  # run classifier fixture evals
+pnpm seed:fixtures  # seed fixture evidence corpus
 ```
+
+GitHub Actions runs CI on PRs and pushes to `main`. Container builds publish multi-arch `linux/amd64` and `linux/arm64` images to GHCR and Docker Hub on `main` pushes.
+
+## Docs
+
+- [`docs/SPEC.md`](docs/SPEC.md) — product and architecture notes
+- [`docs/PLAN.md`](docs/PLAN.md) — implementation plan and schema notes
+- [`PRIVACY.md`](PRIVACY.md) — privacy policy
+- [`TERMS.md`](TERMS.md) — terms of service
