@@ -183,9 +183,11 @@ describe('settings UI', () => {
       ]),
     );
 
-    const crosschannelIds = customIds(
-      settingsReply(config, 'triggers_crosschannel').components as Raw[],
-    );
+    const crosschannelComponents = settingsReply(
+      config,
+      'triggers_crosschannel',
+    ).components as Raw[];
+    const crosschannelIds = customIds(crosschannelComponents);
     expect(crosschannelIds).toEqual(
       expect.arrayContaining([
         'settings:subcategory:triggers',
@@ -214,6 +216,12 @@ describe('settings UI', () => {
       'settings:edit:crosschannelWindowMidpointChannels:triggers_crosschannel',
       'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
     ]);
+    expect(textContent(crosschannelComponents)).toContain(
+      'Text-only repeats use a **2s** minimum',
+    );
+    expect(textContent(crosschannelComponents)).toContain(
+      'Repeats with attachments use the configured **5s** minimum',
+    );
 
     const graphReply = settingsReply(
       config,

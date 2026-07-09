@@ -5,6 +5,9 @@ import type {
   PolicyScope,
 } from './types.js';
 
+/** Fixed minimum matching window for duplicate candidates without attachments. */
+export const crosschannelTextOnlyMinimumWindowSeconds = 2;
+
 export const defaultSettings: GuildSettings = {
   moderationChannelId: null,
   crosschannelEnabled: true,

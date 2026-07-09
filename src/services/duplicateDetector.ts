@@ -1,8 +1,7 @@
 import type { Message } from 'discord.js';
+import { crosschannelTextOnlyMinimumWindowSeconds } from '../domain/defaults.js';
 import type { GuildConfig } from '../domain/types.js';
 import { domains, normalizeText } from '../utils/fingerprints.js';
-
-const TEXT_ONLY_MINIMUM_WINDOW_SECONDS = 2;
 
 type DuplicateEntry = {
   userId: string;
@@ -96,7 +95,7 @@ function matchingWindow(
       (entry) => entry.hasAttachments,
     )
       ? config.crosschannelMinimumWindowSeconds
-      : TEXT_ONLY_MINIMUM_WINDOW_SECONDS;
+      : crosschannelTextOnlyMinimumWindowSeconds;
     if (
       elapsedSeconds <=
       crosschannelAllowedWindowSeconds(
