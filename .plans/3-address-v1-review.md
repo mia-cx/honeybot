@@ -8,14 +8,14 @@ fresh review.
 
 ## Acceptance criteria
 
-- [ ] Dismiss, punish, and revert buttons conditionally transition the expected
+- [x] Dismiss, punish, and revert buttons conditionally transition the expected
       case status before Discord side effects.
-- [ ] Stale or concurrent case actions are no-ops with an ephemeral response.
-- [ ] Attachment downloads have byte, time, per-message, and per-case limits.
-- [ ] Oversized, slow, unsupported, and unsafe images remain metadata-only.
-- [ ] Image decoding has explicit pixel and processing-time limits.
-- [ ] DM notification failure is audited but never blocks moderation.
-- [ ] Regression tests cover state races and attachment resource limits.
+- [x] Stale or concurrent case actions are no-ops with an ephemeral response.
+- [x] Attachment downloads have byte, time, per-message, and per-case limits.
+- [x] Oversized, slow, unsupported, and unsafe images remain metadata-only.
+- [x] Image decoding has explicit pixel and processing-time limits.
+- [x] DM notification failure is audited but never blocks moderation.
+- [x] Regression tests cover state races and attachment resource limits.
 
 ## TODOs
 
@@ -27,7 +27,7 @@ fresh review.
       inputs, with regression tests.
 - [x] Make punishment DMs best-effort and non-blocking in prevention,
       auto-punish, and moderator-review paths, with regression tests.
-- [ ] Run the full typecheck, lint, and test suite and document the results.
+- [x] Run the full typecheck, lint, and test suite and document the results.
 
 ## Notes
 
@@ -45,3 +45,5 @@ fresh review.
 - Notification/concurrency validation: typecheck and `tests/services.test.ts`
   (33 tests) passed, including concurrent moderator punishment and failed-DM
   paths.
+- Final validation: TypeScript typecheck passed; ESLint passed; Vitest passed all
+  89 tests across 9 files.
