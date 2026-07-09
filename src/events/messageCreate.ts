@@ -21,6 +21,7 @@ import type { FileStorage } from '../storage/fileStorage.js';
 import type {
   AnalysisResult,
   GuildConfig,
+  PolicyApplicationOutcome,
   TriggerType,
 } from '../domain/types.js';
 import type { CachedAttachment } from '../types.js';
@@ -139,7 +140,9 @@ async function handleTriggeredMessage(
     preventionResult.applied ? moderationReason : preventionResult.detail,
     { policy },
   );
-  const preventionAppliedAtMs = Date.now();
+  const preventionOutcome: PolicyApplicationOutcome = preventionResult.applied
+    ? { ...preventionResult, appliedAtMs: Date.now() }
+    : { ...preventionResult, attemptedAtMs: Date.now() };
 
   let triggerMessageDeleted = false;
   if (policy.deleteMessages) {
@@ -188,16 +191,21 @@ async function handleTriggeredMessage(
     guildConfig,
     dependencies,
     {
-      status: 'Prevention applied; analysis starting.',
+      status: preventionOutcome.applied
+        ? 'Prevention applied; analysis starting.'
+        : 'Prevention was not applied; analysis starting.',
       reason: moderationReason,
       duplicateChannelIds,
       triggerMessageDeleted,
-      preventionAppliedAtMs,
+      preventionOutcome,
       analysis: null,
     },
   );
 
-  if (policy.actionType === 'kick' || policy.actionType === 'ban') {
+  if (
+    preventionOutcome.applied &&
+    (policy.actionType === 'kick' || policy.actionType === 'ban')
+  ) {
     await upsertReviewIfConfigured(
       message,
       caseRow.id,
@@ -209,7 +217,7 @@ async function handleTriggeredMessage(
           'Prevention already kicked/banned the user; expensive analysis skipped.',
         duplicateChannelIds,
         triggerMessageDeleted,
-        preventionAppliedAtMs,
+        preventionOutcome,
         analysis: null,
       },
     );
@@ -233,7 +241,7 @@ async function handleTriggeredMessage(
           reason: result.reason,
           duplicateChannelIds,
           triggerMessageDeleted,
-          preventionAppliedAtMs,
+          preventionOutcome,
           analysis: result,
         },
       ).catch((error: unknown) => {
@@ -287,7 +295,7 @@ async function handleTriggeredMessage(
       reason: analysis.reason,
       duplicateChannelIds,
       triggerMessageDeleted,
-      preventionAppliedAtMs,
+      preventionOutcome,
       analysis,
     },
   );
@@ -351,7 +359,7 @@ async function handleTriggeredMessage(
             error instanceof Error ? error.message : 'Auto-punishment failed',
           duplicateChannelIds,
           triggerMessageDeleted,
-          preventionAppliedAtMs,
+          preventionOutcome,
           analysis,
         },
       );
@@ -384,7 +392,7 @@ async function handleTriggeredMessage(
         reason: analysis.reason,
         duplicateChannelIds,
         triggerMessageDeleted,
-        preventionAppliedAtMs,
+        preventionOutcome,
         analysis,
       },
     );
@@ -469,7 +477,7 @@ async function upsertReviewIfConfigured(
     reason: string;
     duplicateChannelIds: string[];
     triggerMessageDeleted: boolean;
-    preventionAppliedAtMs: number;
+    preventionOutcome: PolicyApplicationOutcome;
     analysis: AnalysisResult | null;
   },
 ) {
@@ -505,8 +513,7 @@ async function upsertReviewIfConfigured(
           : 'crosschannel_prevention'
       ],
     punishment: guildConfig.policies.punishment,
-    preventionApplied: true,
-    preventionAppliedAtMs: state.preventionAppliedAtMs,
+    preventionOutcome: state.preventionOutcome,
     triggerMessageDeleted: state.triggerMessageDeleted,
     analysis: state.analysis,
   };

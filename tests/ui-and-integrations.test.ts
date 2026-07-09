@@ -197,6 +197,21 @@ describe('case review UI', () => {
     expect(textContent(roleCase)).toContain(
       'duplicate messages across <#channel>, <#other>',
     );
+
+    const unappliedCase = caseReviewMessage(
+      caseInput({
+        preventionOutcome: {
+          applied: false,
+          detail:
+            'timeout could not be applied because the member left the guild',
+          attemptedAtMs: 1_700_000_000_000,
+        },
+      }),
+    ).components as Array<any>;
+    expect(textContent(unappliedCase)).toContain(
+      'prevention was not applied: timeout could not be applied because the member left the guild',
+    );
+    expect(textContent(unappliedCase)).not.toContain('<@user> was timed out');
     expect(textContent(roleCase)).toContain(
       'Likelihood of being a scam: pending',
     );
@@ -1221,8 +1236,11 @@ function caseInput(overrides: Partial<CaseReviewInput> = {}): CaseReviewInput {
     storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
     prevention: policy('timeout'),
     punishment: policy('ban'),
-    preventionApplied: true,
-    preventionAppliedAtMs: 1_700_000_000_000,
+    preventionOutcome: {
+      applied: true,
+      detail: 'timeout applied',
+      appliedAtMs: 1_700_000_000_000,
+    },
     triggerMessageDeleted: true,
     analysis: {
       confidence: 0.88,

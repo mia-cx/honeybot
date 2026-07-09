@@ -349,11 +349,11 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
-  it('does not record unapplied prevention as successful', async () => {
+  it('does not record or display unapplied prevention as successful', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
-      moderationChannelId: null,
+      moderationChannelId: 'review',
       punishmentDmNotify: false,
     });
     config.policies.honeypot_prevention.actionType = 'timeout';
@@ -367,6 +367,25 @@ describe('handleMessageCreate', () => {
       guild,
     });
     guild.register(message);
+    type ReviewPayload = { components: unknown[] };
+    const reviewMessage = {
+      id: 'review-message',
+      channelId: 'review',
+      components: [] as unknown[],
+      edit: vi.fn(async (payload: ReviewPayload) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    const reviewChannel = {
+      isTextBased: () => true,
+      messages: { fetch: vi.fn(async () => reviewMessage) },
+      send: vi.fn(async (payload: ReviewPayload) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    guild.channels.fetch.mockResolvedValue(reviewChannel);
     (guild.members.fetch as any)
       .mockResolvedValueOnce(message.member)
       .mockResolvedValueOnce(null);
@@ -392,6 +411,18 @@ describe('handleMessageCreate', () => {
 
     expect(actions).toEqual([]);
     expect(analyzer.analyze).toHaveBeenCalledOnce();
+    const reviewPayloads = [
+      ...reviewChannel.send.mock.calls.map(([payload]) => payload),
+      ...reviewMessage.edit.mock.calls.map(([payload]) => payload),
+    ];
+    expect(reviewPayloads).not.toHaveLength(0);
+    for (const payload of reviewPayloads) {
+      const reviewText = JSON.stringify(payload.components);
+      expect(reviewText).toContain(
+        'prevention was not applied: timeout could not be applied because the member is no longer in the guild',
+      );
+      expect(reviewText).not.toContain('was timed out until');
+    }
     expect(
       await database.db
         .select()
@@ -1687,9 +1718,9 @@ describe('CaseStore', () => {
     const storage = fakeStorage();
     const restartedStore = new CaseStore(database.db, storage);
 
-    await expect(
-      restartedStore.recoverInterruptedAttachments(),
-    ).resolves.toBe(1);
+    await expect(restartedStore.recoverInterruptedAttachments()).resolves.toBe(
+      1,
+    );
     expect(storage.saveFromUrl).toHaveBeenCalledTimes(1);
     expect(storage.saveFromUrl).toHaveBeenCalledWith(
       'https://cdn.test/pending.png',

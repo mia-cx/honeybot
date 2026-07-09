@@ -4,7 +4,11 @@ import {
   type MessageCreateOptions,
   type MessageEditOptions,
 } from 'discord.js';
-import type { AnalysisResult, Policy } from '../domain/types.js';
+import type {
+  AnalysisResult,
+  Policy,
+  PolicyApplicationOutcome,
+} from '../domain/types.js';
 import type { FileStorage } from '../storage/fileStorage.js';
 
 const COMPONENTS_V2 = 1 << 15;
@@ -24,8 +28,7 @@ export type CaseReviewInput = {
   storage: FileStorage;
   prevention: Policy;
   punishment: Policy;
-  preventionApplied: boolean;
-  preventionAppliedAtMs: number;
+  preventionOutcome: PolicyApplicationOutcome;
   triggerMessageDeleted: boolean;
   analysis: AnalysisResult | null;
 };
@@ -321,11 +324,13 @@ function preventionSummary(input: CaseReviewInput) {
   else parts.push('Original message was left in place');
 
   parts.push(
-    policyAppliedSummary(
-      input.prevention,
-      input.userId,
-      input.preventionAppliedAtMs,
-    ),
+    input.preventionOutcome.applied
+      ? policyAppliedSummary(
+          input.prevention,
+          input.userId,
+          input.preventionOutcome.appliedAtMs,
+        )
+      : `prevention was not applied: ${input.preventionOutcome.detail}`,
   );
   return sentence(parts);
 }

@@ -6,7 +6,11 @@ import {
   type Message,
 } from 'discord.js';
 import { logger } from '../logger.js';
-import type { GuildConfig, Policy } from '../domain/types.js';
+import type {
+  GuildConfig,
+  Policy,
+  PolicyApplicationResult,
+} from '../domain/types.js';
 import type { CaseStore } from './caseStore.js';
 import type { FileStorage } from '../storage/fileStorage.js';
 
@@ -15,9 +19,6 @@ const DISCORD_MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60;
 const BAN_DELETE_SECONDS = 7 * 24 * 60 * 60;
 
 type RawComponent = { type: number; [key: string]: unknown };
-
-export type PolicyApplicationResult =
-  { applied: true; detail: string } | { applied: false; detail: string };
 
 export function requireAppliedPolicy(result: PolicyApplicationResult) {
   if (!result.applied) throw new Error(result.detail);

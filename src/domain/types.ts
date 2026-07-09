@@ -41,6 +41,13 @@ export type Policy = {
   deleteMessages: boolean;
 };
 
+export type PolicyApplicationResult =
+  { applied: true; detail: string } | { applied: false; detail: string };
+
+export type PolicyApplicationOutcome =
+  | { applied: true; detail: string; appliedAtMs: number }
+  | { applied: false; detail: string; attemptedAtMs: number };
+
 export type GuildSettings = {
   moderationChannelId: string | null;
   crosschannelEnabled: boolean;
