@@ -17,7 +17,7 @@ import {
 import type { ConfigStore } from '../services/configStore.js';
 import { formatPolicy } from '../services/configStore.js';
 import type { ModelStore } from '../services/modelStore.js';
-import type { CaseStore } from '../services/caseStore.js';
+import type { CaseOperation, CaseStore } from '../services/caseStore.js';
 import {
   canActOnCases,
   canConfigureHoneybot,
@@ -27,7 +27,6 @@ import { renderCrosschannelCurveImage } from '../services/crosschannelGraph.js';
 import { parseDurationSeconds } from '../services/duration.js';
 import { toggleVerboseLogging } from '../services/verbose.js';
 import type {
-  CaseStatus,
   GuildConfig,
   Policy,
   PolicyScope,
@@ -1476,19 +1475,21 @@ async function handleCaseButton(
   }
 
   if (action === 'dismiss') {
-    if (
-      !(await transitionCaseOrReply(interaction, deps, {
-        caseId,
-        expectedStatus: 'pending_review',
-        status: 'dismissed',
-        actionTaken: null,
-        reason: 'Dismissed by moderator',
-      }))
-    ) {
-      return;
-    }
     const config = await deps.configStore.getGuildConfig(interaction.guildId);
-    const revertResult = await revertPrevention(interaction, caseRow, config);
+    const operation = await runCaseOperation(interaction, deps, {
+      caseId,
+      operation: 'dismiss',
+      run: () =>
+        deps.moderationQueue.enqueue(interaction.guildId, () =>
+          revertPrevention(interaction, caseRow, config),
+        ),
+      completion: (revertResult) => ({
+        actionTaken: null,
+        reason: `Dismissed by moderator; prevention revert: ${revertResult}`,
+      }),
+    });
+    if (!operation) return;
+    const revertResult = operation.value;
     await deps.caseStore.addEvent(
       caseId,
       'prevention_reverted',
@@ -1496,12 +1497,6 @@ async function handleCaseButton(
       interaction.user.id,
       'Dismissed by moderator',
       { revertResult },
-    );
-    await deps.caseStore.updateResolutionDetails(
-      caseId,
-      'dismissed',
-      null,
-      `Dismissed by moderator; prevention revert: ${revertResult}`,
     );
     await interaction.update(
       caseReviewResolutionUpdate(interaction.message.components, {
@@ -1538,54 +1533,52 @@ async function handleCaseButton(
       confidence: caseConfidence(caseRow.evidenceSummaryJson),
       actorId: interaction.user.id,
     });
-    if (
-      !(await transitionCaseOrReply(interaction, deps, {
-        caseId,
-        expectedStatus: 'pending_review',
-        status: 'punished',
-        actionTaken: policy.actionType,
-        reason,
-      }))
-    ) {
-      return;
-    }
-    const member = await interaction.guild.members
-      .fetch(caseRow.userId)
-      .catch(() => null);
-    const applyResult = await deps.moderationQueue.enqueue(
-      interaction.guildId,
-      () =>
-        applyPolicyForUser(
-          interaction.guild,
-          caseRow.userId,
-          policy,
-          auditReason,
-        ),
-    );
-    if (config.punishmentDmNotify) {
-      if (member) {
-        await dmPunishedUser({
-          member,
-          caseId,
-          action: policy.actionType,
-          reason,
-          auditReason,
-          caseStore: deps.caseStore,
-          storage: deps.storage,
-        });
-      } else {
-        await deps.caseStore.addEvent(
-          caseId,
-          'failed',
-          'bot',
-          null,
-          'Punishment DM failed',
-          {
-            error: 'Cannot DM user because they are no longer in the guild',
-            omitted: [],
-          },
+    const operation = await runCaseOperation(interaction, deps, {
+      caseId,
+      operation: 'punish',
+      run: async () => {
+        const member = await interaction.guild.members
+          .fetch(caseRow.userId)
+          .catch(() => null);
+        if (config.punishmentDmNotify && member) {
+          await dmPunishedUser({
+            member,
+            caseId,
+            action: policy.actionType,
+            reason,
+            auditReason,
+            caseStore: deps.caseStore,
+            storage: deps.storage,
+          });
+        }
+        const applyResult = await deps.moderationQueue.enqueue(
+          interaction.guildId,
+          () =>
+            applyPolicyForUser(
+              interaction.guild,
+              caseRow.userId,
+              policy,
+              auditReason,
+            ),
         );
-      }
+        return { applyResult, member };
+      },
+      completion: () => ({ actionTaken: policy.actionType, reason }),
+    });
+    if (!operation) return;
+    const { applyResult, member } = operation.value;
+    if (config.punishmentDmNotify && !member) {
+      await deps.caseStore.addEvent(
+        caseId,
+        'failed',
+        'bot',
+        null,
+        'Punishment DM failed',
+        {
+          error: 'Cannot DM user because they are no longer in the guild',
+          omitted: [],
+        },
+      );
     }
     await deps.caseStore.addEvent(
       caseId,
@@ -1611,23 +1604,25 @@ async function handleCaseButton(
 
   if (action === 'revert') {
     if (caseRow.status === 'punished') {
-      if (
-        !(await transitionCaseOrReply(interaction, deps, {
-          caseId,
-          expectedStatus: 'punished',
-          status: 'pending_review',
+      const operation = await runCaseOperation(interaction, deps, {
+        caseId,
+        operation: 'revert_punishment',
+        run: () =>
+          deps.moderationQueue.enqueue(interaction.guildId, () =>
+            revertPolicyForUser(
+              interaction.guild,
+              caseRow.userId,
+              config.policies.punishment,
+              'Reverted Honeybot punishment action',
+            ),
+          ),
+        completion: (revertResult) => ({
           actionTaken: null,
-          reason: 'Reverting punishment by moderator',
-        }))
-      ) {
-        return;
-      }
-      const revertResult = await revertPolicyForUser(
-        interaction.guild,
-        caseRow.userId,
-        config.policies.punishment,
-        'Reverted Honeybot punishment action',
-      );
+          reason: `Reverted punishment by moderator: ${revertResult}`,
+        }),
+      });
+      if (!operation) return;
+      const revertResult = operation.value;
       await deps.caseStore.addEvent(
         caseId,
         'reverted',
@@ -1635,12 +1630,6 @@ async function handleCaseButton(
         interaction.user.id,
         'Reverted punishment by moderator',
         { revertResult },
-      );
-      await deps.caseStore.updateResolutionDetails(
-        caseId,
-        'pending_review',
-        null,
-        `Reverted punishment by moderator: ${revertResult}`,
       );
       await interaction.update(
         caseReviewRevertUpdate(interaction.message.components, {
@@ -1656,33 +1645,31 @@ async function handleCaseButton(
         caseRow.triggerType === 'honeypot'
           ? config.policies.honeypot_prevention
           : config.policies.crosschannel_prevention;
-      if (
-        !(await transitionCaseOrReply(interaction, deps, {
-          caseId,
-          expectedStatus: 'dismissed',
-          status: 'pending_review',
-          actionTaken: prevention.actionType,
-          reason: 'Reverting dismissal by moderator',
-        }))
-      ) {
-        return;
-      }
-      const applyResult = await deps.moderationQueue.enqueue(
-        interaction.guildId,
-        () =>
-          applyPolicyForUser(
-            interaction.guild,
-            caseRow.userId,
-            prevention,
-            honeybotAuditReason({
-              caseId,
-              triggerType: caseRow.triggerType,
-              decisionSource: 'dismissal-reverted',
-              confidence: caseConfidence(caseRow.evidenceSummaryJson),
-              actorId: interaction.user.id,
-            }),
+      const operation = await runCaseOperation(interaction, deps, {
+        caseId,
+        operation: 'revert_dismissal',
+        run: () =>
+          deps.moderationQueue.enqueue(interaction.guildId, () =>
+            applyPolicyForUser(
+              interaction.guild,
+              caseRow.userId,
+              prevention,
+              honeybotAuditReason({
+                caseId,
+                triggerType: caseRow.triggerType,
+                decisionSource: 'dismissal-reverted',
+                confidence: caseConfidence(caseRow.evidenceSummaryJson),
+                actorId: interaction.user.id,
+              }),
+            ),
           ),
-      );
+        completion: (applyResult) => ({
+          actionTaken: prevention.actionType,
+          reason: `Reverted dismissal; prevention reapplied: ${applyResult}`,
+        }),
+      });
+      if (!operation) return;
+      const applyResult = operation.value;
       await deps.caseStore.addEvent(
         caseId,
         'dismissal_reverted',
@@ -1690,12 +1677,6 @@ async function handleCaseButton(
         interaction.user.id,
         'Reverted dismissal and reapplied prevention',
         { applyResult },
-      );
-      await deps.caseStore.updateResolutionDetails(
-        caseId,
-        'pending_review',
-        prevention.actionType,
-        `Reverted dismissal; prevention reapplied: ${applyResult}`,
       );
       await interaction.update(
         caseReviewRevertUpdate(interaction.message.components, {
@@ -1716,32 +1697,55 @@ async function handleCaseButton(
   await interaction.reply({ content: 'Unknown case action.', ephemeral: true });
 }
 
-async function transitionCaseOrReply(
+async function runCaseOperation<T>(
   interaction: ButtonInteraction<'cached'>,
   deps: InteractionDependencies,
   input: {
     caseId: string;
-    expectedStatus: CaseStatus;
-    status: CaseStatus;
-    actionTaken: string | null;
-    reason: string;
+    operation: CaseOperation;
+    run: () => Promise<T>;
+    completion: (value: T) => { actionTaken: string | null; reason: string };
   },
-) {
-  const updated = await deps.caseStore.transition(
+): Promise<{ value: T } | null> {
+  const claimed = await deps.caseStore.claimOperation(
     input.caseId,
-    input.expectedStatus,
-    input.status,
-    input.actionTaken,
+    input.operation,
     interaction.user.id,
-    input.reason,
   );
-  if (updated) return true;
+  if (!claimed) {
+    await interaction.reply({
+      content: 'Case already resolved by another moderator.',
+      ephemeral: true,
+    });
+    return null;
+  }
 
-  await interaction.reply({
-    content: 'Case already resolved by another moderator.',
-    ephemeral: true,
-  });
-  return false;
+  try {
+    const value = await input.run();
+    const completion = input.completion(value);
+    const completed = await deps.caseStore.completeOperation(
+      input.caseId,
+      input.operation,
+      completion.actionTaken,
+      interaction.user.id,
+      completion.reason,
+    );
+    if (!completed)
+      throw new Error('Case operation state changed unexpectedly');
+    return { value };
+  } catch (error) {
+    await deps.caseStore.failOperation(
+      input.caseId,
+      input.operation,
+      interaction.user.id,
+      error,
+    );
+    await interaction.reply({
+      content: `Case action failed; the case remains retryable. ${error instanceof Error ? error.message : String(error)}`,
+      ephemeral: true,
+    });
+    return null;
+  }
 }
 
 async function revertPrevention(

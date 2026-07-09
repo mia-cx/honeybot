@@ -20,6 +20,10 @@ export type PolicyAction = PreventionAction | PunishmentAction;
 
 export const caseStatuses = [
   'pending_review',
+  'punishment_pending',
+  'dismissal_pending',
+  'punishment_revert_pending',
+  'dismissal_revert_pending',
   'punished',
   'dismissed',
   'reverted',

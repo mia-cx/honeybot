@@ -134,17 +134,6 @@ async function handleTriggeredMessage(
     actorId: null,
   });
 
-  await dependencies.caseStore.addEvent(
-    caseRow.id,
-    'prevention_applied',
-    'bot',
-    null,
-    moderationReason,
-    { policy },
-  );
-  await dependencies.moderationQueue.enqueue(message.guildId, () =>
-    applyPolicy(member, policy, preventionAuditReason),
-  );
   if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
     await dmPunishedUser({
       member,
@@ -156,6 +145,17 @@ async function handleTriggeredMessage(
       storage: dependencies.storage,
     });
   }
+  await dependencies.caseStore.addEvent(
+    caseRow.id,
+    'prevention_applied',
+    'bot',
+    null,
+    moderationReason,
+    { policy },
+  );
+  await dependencies.moderationQueue.enqueue(message.guildId, () =>
+    applyPolicy(member, policy, preventionAuditReason),
+  );
   const preventionAppliedAtMs = Date.now();
 
   let triggerMessageDeleted = false;
@@ -299,29 +299,75 @@ async function handleTriggeredMessage(
       confidence: analysis.confidence,
       actorId: null,
     });
-    const claimed = await dependencies.caseStore.transition(
+    const claimed = await dependencies.caseStore.claimOperation(
       caseRow.id,
-      'pending_review',
-      'punished',
+      'punish',
+      null,
+    );
+    if (!claimed) return;
+    let applyResult;
+    try {
+      if (guildConfig.punishmentDmNotify) {
+        await dmPunishedUser({
+          member,
+          caseId: caseRow.id,
+          action: punishment.actionType,
+          reason: analysis.reason,
+          auditReason,
+          caseStore: dependencies.caseStore,
+          storage: dependencies.storage,
+        });
+      }
+      applyResult = await dependencies.moderationQueue.enqueue(
+        message.guildId,
+        () => applyPolicy(member, punishment, auditReason),
+      );
+    } catch (error) {
+      await dependencies.caseStore.failOperation(
+        caseRow.id,
+        'punish',
+        null,
+        error,
+      );
+      logger.warn('Honeybot auto-punishment failed', {
+        caseId: caseRow.id,
+        guildId: message.guildId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await upsertReviewIfConfigured(
+        message,
+        caseRow.id,
+        guildConfig,
+        dependencies,
+        {
+          status: 'Auto-punishment failed; awaiting moderator review.',
+          reason:
+            error instanceof Error ? error.message : 'Auto-punishment failed',
+          duplicateChannelIds,
+          triggerMessageDeleted,
+          preventionAppliedAtMs,
+          analysis,
+        },
+      );
+      return;
+    }
+    const completed = await dependencies.caseStore.completeOperation(
+      caseRow.id,
+      'punish',
       punishment.actionType,
       null,
       analysis.reason,
     );
-    if (!claimed) return;
-    await dependencies.moderationQueue.enqueue(message.guildId, () =>
-      applyPolicy(member, punishment, auditReason),
+    if (!completed)
+      throw new Error('Auto-punishment operation state changed unexpectedly');
+    await dependencies.caseStore.addEvent(
+      caseRow.id,
+      'punishment_applied',
+      'bot',
+      null,
+      analysis.reason,
+      { applyResult },
     );
-    if (guildConfig.punishmentDmNotify) {
-      await dmPunishedUser({
-        member,
-        caseId: caseRow.id,
-        action: punishment.actionType,
-        reason: analysis.reason,
-        auditReason,
-        caseStore: dependencies.caseStore,
-        storage: dependencies.storage,
-      });
-    }
     await upsertReviewIfConfigured(
       message,
       caseRow.id,

@@ -253,7 +253,7 @@ describe('handleMessageCreate', () => {
 
     await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual(['ban', 'dm']);
+    expect(actions).toEqual(['dm', 'ban']);
     expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
     expect(
       await database.db
@@ -355,7 +355,7 @@ describe('handleMessageCreate', () => {
     await handleMessageCreate(second, dependencies);
 
     expect(deleted).toEqual(['m1', 'm2']);
-    expect(actions).toEqual(['timeout', 'dm', 'delete:m1', 'delete:m2']);
+    expect(actions).toEqual(['dm', 'timeout', 'delete:m1', 'delete:m2']);
     expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
     database.sqlite.close();
   });
@@ -413,6 +413,68 @@ describe('handleMessageCreate', () => {
 });
 
 describe('case review interactions', () => {
+  it('restores a failed punishment to a retryable state', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: false,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    const ban = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Missing permissions'))
+      .mockResolvedValueOnce(undefined);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => null), ban },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const first = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+    const retry = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await expect(handleInteractionCreate(first as any, deps)).resolves.toBe(
+      undefined,
+    );
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'pending_review',
+    });
+    expect(first.reply).toHaveBeenCalledWith({
+      content: expect.stringContaining('failed'),
+      ephemeral: true,
+    });
+
+    await handleInteractionCreate(retry as any, deps);
+    expect(ban).toHaveBeenCalledTimes(2);
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+    });
+    expect(retry.update).toHaveBeenCalledOnce();
+    database.sqlite.close();
+  });
+
   it('applies one concurrent punishment and treats the failed DM as best-effort', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
@@ -1294,7 +1356,7 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
-  it('allows only one concurrent transition from the expected case status', async () => {
+  it('allows only one concurrent operation claim from the expected case status', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
     const caseRow = await store.getOrCreateCase({
@@ -1305,34 +1367,13 @@ describe('CaseStore', () => {
     });
 
     const transitions = await Promise.all([
-      store.transition(
-        caseRow.id,
-        'pending_review',
-        'dismissed',
-        null,
-        'moderator-1',
-        'dismissed',
-      ),
-      store.transition(
-        caseRow.id,
-        'pending_review',
-        'punished',
-        'ban',
-        'moderator-2',
-        'punished',
-      ),
+      store.claimOperation(caseRow.id, 'dismiss', 'moderator-1'),
+      store.claimOperation(caseRow.id, 'punish', 'moderator-2'),
     ]);
 
     expect(transitions.filter(Boolean)).toHaveLength(1);
     await expect(
-      store.transition(
-        caseRow.id,
-        'pending_review',
-        'dismissed',
-        null,
-        'moderator-3',
-        'stale dismissal',
-      ),
+      store.claimOperation(caseRow.id, 'dismiss', 'moderator-3'),
     ).resolves.toBeNull();
     expect(
       await database.db
@@ -1342,7 +1383,7 @@ describe('CaseStore', () => {
     ).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          eventType: expect.stringMatching(/^(dismissed|punished)$/),
+          eventType: 'operation_claimed',
         }),
       ]),
     );

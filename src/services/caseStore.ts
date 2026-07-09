@@ -50,6 +50,34 @@ const attachmentQueueDefaults = {
   logFailures: false,
 } as const;
 
+const caseOperationTransitions = {
+  punish: {
+    from: 'pending_review',
+    claimed: 'punishment_pending',
+    to: 'punished',
+  },
+  dismiss: {
+    from: 'pending_review',
+    claimed: 'dismissal_pending',
+    to: 'dismissed',
+  },
+  revert_punishment: {
+    from: 'punished',
+    claimed: 'punishment_revert_pending',
+    to: 'pending_review',
+  },
+  revert_dismissal: {
+    from: 'dismissed',
+    claimed: 'dismissal_revert_pending',
+    to: 'pending_review',
+  },
+} as const satisfies Record<
+  string,
+  { from: CaseStatus; claimed: CaseStatus; to: CaseStatus }
+>;
+
+export type CaseOperation = keyof typeof caseOperationTransitions;
+
 export class CaseStore {
   constructor(
     private readonly db: Db,
@@ -341,43 +369,122 @@ export class CaseStore {
     );
   }
 
-  async transition(
+  async claimOperation(
     caseId: string,
-    expectedStatus: CaseStatus,
-    status: CaseStatus,
+    operation: CaseOperation,
+    actorId: string | null,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.claimed,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(eq(cases.id, caseId), eq(cases.status, transition.from)))
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_claimed',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Claimed case operation: ${operation}`,
+              { operation, ...transition },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async completeOperation(
+    caseId: string,
+    operation: CaseOperation,
     actionTaken: string | null,
     actorId: string | null,
     reason: string,
   ) {
-    const now = new Date().toISOString();
-    const [updated] = await this.db
-      .update(cases)
-      .set({ status, actionTaken, reason, updatedAt: now })
-      .where(and(eq(cases.id, caseId), eq(cases.status, expectedStatus)))
-      .returning();
-    if (!updated) return null;
-
-    await this.addEvent(
-      caseId,
-      status,
-      actorId ? 'user' : 'bot',
-      actorId,
-      reason,
-      { actionTaken, previousStatus: expectedStatus },
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.to,
+            actionTaken,
+            reason,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              transition.to,
+              actorId ? 'user' : 'bot',
+              actorId,
+              reason,
+              { actionTaken, operation, previousStatus: transition.from },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
     );
-    return updated;
   }
 
-  async updateResolutionDetails(
+  async failOperation(
     caseId: string,
-    status: CaseStatus,
-    actionTaken: string | null,
-    reason: string,
+    operation: CaseOperation,
+    actorId: string | null,
+    error: unknown,
   ) {
-    await this.db
-      .update(cases)
-      .set({ actionTaken, reason, updatedAt: new Date().toISOString() })
-      .where(and(eq(cases.id, caseId), eq(cases.status, status)));
+    const transition = caseOperationTransitions[operation];
+    const message = error instanceof Error ? error.message : String(error);
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.from,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_failed',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Case operation failed: ${operation}`,
+              { operation, error: message, restoredStatus: transition.from },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
   }
 
   async setReviewMessage(caseId: string, channelId: string, messageId: string) {
@@ -570,15 +677,18 @@ export class CaseStore {
     reason: string | null,
     metadata: unknown,
   ) {
-    await this.db.insert(caseEvents).values({
-      caseId,
-      eventType,
-      actorType,
-      actorId,
-      reason,
-      metadataJson: JSON.stringify(metadata ?? {}),
-      createdAt: new Date().toISOString(),
-    });
+    await this.db
+      .insert(caseEvents)
+      .values(
+        caseEventValues(
+          caseId,
+          eventType,
+          actorType,
+          actorId,
+          reason,
+          metadata,
+        ),
+      );
   }
 
   async findKnownTextByHash(guildId: string, hash: string) {
@@ -902,6 +1012,25 @@ export class CaseStore {
     const bytes = await this.storage.read(storageKey);
     return `data:${contentType};base64,${bytes.toString('base64')}`;
   }
+}
+
+function caseEventValues(
+  caseId: string,
+  eventType: string,
+  actorType: 'bot' | 'user',
+  actorId: string | null,
+  reason: string | null,
+  metadata: unknown,
+) {
+  return {
+    caseId,
+    eventType,
+    actorType,
+    actorId,
+    reason,
+    metadataJson: JSON.stringify(metadata ?? {}),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export type KnownCorpusItem = {
