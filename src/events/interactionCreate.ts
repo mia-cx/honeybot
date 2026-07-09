@@ -1552,16 +1552,28 @@ async function handleCaseButton(
     const member = await interaction.guild.members
       .fetch(caseRow.userId)
       .catch(() => null);
+    const applyResult = await deps.moderationQueue.enqueue(
+      interaction.guildId,
+      () =>
+        applyPolicyForUser(
+          interaction.guild,
+          caseRow.userId,
+          policy,
+          auditReason,
+        ),
+    );
     if (config.punishmentDmNotify) {
-      if (!member) {
-        await deps.caseStore.transition(
+      if (member) {
+        await dmPunishedUser({
+          member,
           caseId,
-          'punished',
-          'pending_review',
-          null,
-          interaction.user.id,
-          'Punishment cancelled because the user could not be notified',
-        );
+          action: policy.actionType,
+          reason,
+          auditReason,
+          caseStore: deps.caseStore,
+          storage: deps.storage,
+        });
+      } else {
         await deps.caseStore.addEvent(
           caseId,
           'failed',
@@ -1573,50 +1585,8 @@ async function handleCaseButton(
             omitted: [],
           },
         );
-        await interaction.reply({
-          content:
-            'Punishment not applied: Honeybot could not DM the user because they are no longer in the guild.',
-          ephemeral: true,
-        });
-        return;
-      }
-
-      const dmSent = await dmPunishedUser({
-        member,
-        caseId,
-        action: policy.actionType,
-        reason,
-        auditReason,
-        caseStore: deps.caseStore,
-        storage: deps.storage,
-      });
-      if (!dmSent) {
-        await deps.caseStore.transition(
-          caseId,
-          'punished',
-          'pending_review',
-          null,
-          interaction.user.id,
-          'Punishment cancelled because the user could not be notified',
-        );
-        await interaction.reply({
-          content:
-            'Punishment not applied: Discord did not confirm the DM notification was sent.',
-          ephemeral: true,
-        });
-        return;
       }
     }
-    const applyResult = await deps.moderationQueue.enqueue(
-      interaction.guildId,
-      () =>
-        applyPolicyForUser(
-          interaction.guild,
-          caseRow.userId,
-          policy,
-          auditReason,
-        ),
-    );
     await deps.caseStore.addEvent(
       caseId,
       'punishment_applied',

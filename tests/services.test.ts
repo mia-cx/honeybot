@@ -9,6 +9,7 @@ import {
   knownTexts,
 } from '../src/db/schema.js';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
+import { handleInteractionCreate } from '../src/events/interactionCreate.js';
 import { handleMessageCreate } from '../src/events/messageCreate.js';
 import { FairQueue } from '../src/queues/fairQueue.js';
 import { CaseStore } from '../src/services/caseStore.js';
@@ -219,7 +220,7 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
-  it('sends DMs before prevention actions that remove the member', async () => {
+  it('sends DMs after prevention actions that remove the member', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
@@ -252,7 +253,7 @@ describe('handleMessageCreate', () => {
 
     await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual(['dm', 'ban']);
+    expect(actions).toEqual(['ban', 'dm']);
     expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
     expect(
       await database.db
@@ -263,7 +264,7 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
-  it('blocks prevention when DM notification is required but not delivered', async () => {
+  it('continues prevention when DM notification is not delivered', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
@@ -298,8 +299,8 @@ describe('handleMessageCreate', () => {
 
     await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual([]);
-    expect(dependencies.moderationQueue.enqueue).not.toHaveBeenCalled();
+    expect(actions).toEqual(['ban']);
+    expect(dependencies.moderationQueue.enqueue).toHaveBeenCalledOnce();
     expect(
       await database.db
         .select()
@@ -354,8 +355,141 @@ describe('handleMessageCreate', () => {
     await handleMessageCreate(second, dependencies);
 
     expect(deleted).toEqual(['m1', 'm2']);
-    expect(actions).toEqual(['dm', 'timeout', 'delete:m1', 'delete:m2']);
+    expect(actions).toEqual(['timeout', 'dm', 'delete:m1', 'delete:m2']);
     expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
+    database.sqlite.close();
+  });
+
+  it('continues auto-punishment when its DM notification fails', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: true,
+      reviewBypassEnabled: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'log';
+    config.policies.honeypot_prevention.deleteMessages = false;
+    config.policies.punishment.actionType = 'ban';
+
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions, {
+      dmError: new Error('closed'),
+    });
+    const message = fakeDiscordMessage({ channelId: 'honey', guild });
+    guild.register(message);
+    const caseStore = new CaseStore(database.db, fakeStorage());
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore,
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 1,
+          shouldPunish: true,
+          reason: 'known scam',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual(['ban']);
+    expect(await database.db.select().from(cases)).toEqual([
+      expect.objectContaining({ status: 'punished' }),
+    ]);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+});
+
+describe('case review interactions', () => {
+  it('applies one concurrent punishment and treats the failed DM as best-effort', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1', 'moderator-2'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    const actions: string[] = [];
+    const punishedMember = {
+      id: 'user',
+      guild: null as any,
+      send: vi.fn(async () => Promise.reject(new Error('closed'))),
+    };
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: {
+        fetch: vi.fn(async () => punishedMember),
+        ban: vi.fn(async () => actions.push('ban')),
+      },
+    } as any;
+    punishedMember.guild = guild;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const first = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+    const second = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-2',
+    );
+
+    await Promise.all([
+      handleInteractionCreate(first as any, deps),
+      handleInteractionCreate(second as any, deps),
+    ]);
+
+    expect(actions).toEqual(['ban']);
+    expect(
+      first.update.mock.calls.length + second.update.mock.calls.length,
+    ).toBe(1);
+    expect(first.reply.mock.calls.length + second.reply.mock.calls.length).toBe(
+      1,
+    );
+    expect([first, second].flatMap((item) => item.reply.mock.calls)).toEqual([
+      [
+        {
+          content: 'Case already resolved by another moderator.',
+          ephemeral: true,
+        },
+      ],
+    ]);
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toHaveLength(1);
     database.sqlite.close();
   });
 });
@@ -1483,6 +1617,33 @@ function fakeDiscordMessage(
       values: () => ([] as any[])[Symbol.iterator](),
     },
   } as any;
+}
+
+function fakeCaseButtonInteraction(
+  guild: ReturnType<typeof fakeDiscordGuild>,
+  customId: string,
+  userId: string,
+) {
+  return {
+    inCachedGuild: () => true,
+    isChatInputCommand: () => false,
+    isMessageContextMenuCommand: () => false,
+    isButton: () => true,
+    customId,
+    guildId: guild.id,
+    guild,
+    user: { id: userId },
+    member: {
+      id: userId,
+      guild,
+      permissions: { has: () => false },
+      roles: { cache: { some: () => false } },
+    },
+    client: { application: null },
+    message: { components: [] },
+    reply: vi.fn(async () => undefined),
+    update: vi.fn(async () => undefined),
+  };
 }
 
 function fakeMessage(

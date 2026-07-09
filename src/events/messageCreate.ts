@@ -133,36 +133,6 @@ async function handleTriggeredMessage(
     actorId: null,
   });
 
-  if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
-    const dmSent = await dmPunishedUser({
-      member,
-      caseId: caseRow.id,
-      action: policy.actionType,
-      reason: moderationReason,
-      auditReason: preventionAuditReason,
-      caseStore: dependencies.caseStore,
-      storage: dependencies.storage,
-    });
-    if (!dmSent) {
-      await upsertReviewIfConfigured(
-        message,
-        caseRow.id,
-        guildConfig,
-        dependencies,
-        {
-          status: 'Prevention blocked; punishment DM was not delivered.',
-          reason:
-            'Honeybot did not apply the prevention action because Discord did not confirm the DM notification was sent.',
-          duplicateChannelIds,
-          triggerMessageDeleted: false,
-          preventionAppliedAtMs: Date.now(),
-          analysis: null,
-        },
-      );
-      return;
-    }
-  }
-
   await dependencies.caseStore.addEvent(
     caseRow.id,
     'prevention_applied',
@@ -174,6 +144,17 @@ async function handleTriggeredMessage(
   await dependencies.moderationQueue.enqueue(message.guildId, () =>
     applyPolicy(member, policy, preventionAuditReason),
   );
+  if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
+    await dmPunishedUser({
+      member,
+      caseId: caseRow.id,
+      action: policy.actionType,
+      reason: moderationReason,
+      auditReason: preventionAuditReason,
+      caseStore: dependencies.caseStore,
+      storage: dependencies.storage,
+    });
+  }
   const preventionAppliedAtMs = Date.now();
 
   let triggerMessageDeleted = false;
@@ -326,8 +307,11 @@ async function handleTriggeredMessage(
       analysis.reason,
     );
     if (!claimed) return;
+    await dependencies.moderationQueue.enqueue(message.guildId, () =>
+      applyPolicy(member, punishment, auditReason),
+    );
     if (guildConfig.punishmentDmNotify) {
-      const dmSent = await dmPunishedUser({
+      await dmPunishedUser({
         member,
         caseId: caseRow.id,
         action: punishment.actionType,
@@ -336,36 +320,7 @@ async function handleTriggeredMessage(
         caseStore: dependencies.caseStore,
         storage: dependencies.storage,
       });
-      if (!dmSent) {
-        await dependencies.caseStore.transition(
-          caseRow.id,
-          'punished',
-          'pending_review',
-          null,
-          null,
-          'Auto-punishment cancelled because the user could not be notified',
-        );
-        await upsertReviewIfConfigured(
-          message,
-          caseRow.id,
-          guildConfig,
-          dependencies,
-          {
-            status: 'Auto-punish blocked; punishment DM was not delivered.',
-            reason:
-              'Honeybot did not apply the punishment because Discord did not confirm the DM notification was sent.',
-            duplicateChannelIds,
-            triggerMessageDeleted,
-            preventionAppliedAtMs,
-            analysis,
-          },
-        );
-        return;
-      }
     }
-    await dependencies.moderationQueue.enqueue(message.guildId, () =>
-      applyPolicy(member, punishment, auditReason),
-    );
     await upsertReviewIfConfigured(
       message,
       caseRow.id,

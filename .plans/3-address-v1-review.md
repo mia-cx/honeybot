@@ -25,7 +25,7 @@ fresh review.
       retaining metadata for skipped evidence, with regression tests.
 - [x] Harden image normalization against decompression-heavy or unsupported
       inputs, with regression tests.
-- [ ] Make punishment DMs best-effort and non-blocking in prevention,
+- [x] Make punishment DMs best-effort and non-blocking in prevention,
       auto-punish, and moderator-review paths, with regression tests.
 - [ ] Run the full typecheck, lint, and test suite and document the results.
 
@@ -42,3 +42,6 @@ fresh review.
   and `tests/ui-and-integrations.test.ts` (26 tests) passed.
 - Image-normalization validation: typecheck and
   `tests/ui-and-integrations.test.ts` (27 tests) passed.
+- Notification/concurrency validation: typecheck and `tests/services.test.ts`
+  (33 tests) passed, including concurrent moderator punishment and failed-DM
+  paths.
