@@ -131,6 +131,31 @@ describe('DuplicateDetector', () => {
     });
   });
 
+  it('uses a 2-second minimum window for text-only duplicates', () => {
+    const now = vi.spyOn(Date, 'now');
+
+    expect(matchesDuplicateAfter(2_000, now)).toBe(true);
+    expect(matchesDuplicateAfter(2_001, now)).toBe(false);
+  });
+
+  it('retains the configured minimum window for attachment-bearing duplicates', () => {
+    const now = vi.spyOn(Date, 'now');
+    const attachments: [unknown[], unknown[]] = [
+      [attachment()],
+      [attachment()],
+    ];
+
+    expect(matchesDuplicateAfter(5_000, now, attachments)).toBe(true);
+    expect(matchesDuplicateAfter(5_001, now, attachments)).toBe(false);
+  });
+
+  it('uses the attachment window when either duplicate has attachments', () => {
+    const now = vi.spyOn(Date, 'now');
+
+    expect(matchesDuplicateAfter(4_000, now, [[attachment()], []])).toBe(true);
+    expect(matchesDuplicateAfter(4_000, now, [[], [attachment()]])).toBe(true);
+  });
+
   it('ignores disabled or empty cross-channel signals and sweeps expired entries', () => {
     const detector = new DuplicateDetector();
     const disabled = defaultGuildConfig({ crosschannelEnabled: false });
@@ -1338,6 +1363,29 @@ function fakeDiscordMessage(
   } as any;
 }
 
+function matchesDuplicateAfter(
+  delayMs: number,
+  now: ReturnType<typeof vi.spyOn>,
+  attachments: [unknown[], unknown[]] = [[], []],
+) {
+  const detector = new DuplicateDetector();
+  const config = defaultGuildConfig({
+    crosschannelChannelThreshold: 2,
+    crosschannelWindowSeconds: 60,
+  });
+
+  now.mockReturnValue(0);
+  detector.record(
+    fakeMessage({ channelId: 'c1', content: 'same', attachments: attachments[0] }),
+    config,
+  );
+  now.mockReturnValue(delayMs);
+  return detector.record(
+    fakeMessage({ channelId: 'c2', content: 'same', attachments: attachments[1] }),
+    config,
+  ).matched;
+}
+
 function fakeMessage(
   input: Partial<{
     id: string;
@@ -1357,6 +1405,7 @@ function fakeMessage(
     content: input.content ?? 'hello',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     attachments: {
+      size: attachments.length,
       map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
       values: () => attachments[Symbol.iterator](),
     },

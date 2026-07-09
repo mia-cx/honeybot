@@ -2,11 +2,14 @@ import type { Message } from 'discord.js';
 import type { GuildConfig } from '../domain/types.js';
 import { domains, normalizeText } from '../utils/fingerprints.js';
 
+const TEXT_ONLY_MINIMUM_WINDOW_SECONDS = 2;
+
 type DuplicateEntry = {
   userId: string;
   channelId: string;
   messageId: string;
   timestamp: number;
+  hasAttachments: boolean;
 };
 
 export type DuplicateMessageRef = {
@@ -50,6 +53,7 @@ export class DuplicateDetector {
       channelId: message.channelId,
       messageId: message.id,
       timestamp: now,
+      hasAttachments: message.attachments.size > 0,
     });
     this.entries.set(key, fresh.slice(-config.crosschannelMaxEntriesPerUser));
 
@@ -88,8 +92,18 @@ function matchingWindow(
     if (channelCount < config.crosschannelChannelThreshold) continue;
 
     const elapsedSeconds = (latest.timestamp - candidate[0]!.timestamp) / 1000;
+    const minimumWindowSeconds = candidate.some(
+      (entry) => entry.hasAttachments,
+    )
+      ? config.crosschannelMinimumWindowSeconds
+      : TEXT_ONLY_MINIMUM_WINDOW_SECONDS;
     if (
-      elapsedSeconds <= crosschannelAllowedWindowSeconds(channelCount, config)
+      elapsedSeconds <=
+      crosschannelAllowedWindowSeconds(
+        channelCount,
+        config,
+        minimumWindowSeconds,
+      )
     ) {
       return candidate;
     }
@@ -98,6 +112,7 @@ function matchingWindow(
   return null;
 }
 
+/** Returns the allowed duplicate interval for a channel count and curve minimum. */
 export function crosschannelAllowedWindowSeconds(
   channelCount: number,
   config: Pick<
@@ -107,6 +122,7 @@ export function crosschannelAllowedWindowSeconds(
     | 'crosschannelWindowSteepness'
     | 'crosschannelWindowMidpointChannels'
   >,
+  minimumWindowSeconds = config.crosschannelMinimumWindowSeconds,
 ) {
   if (channelCount < 2) return 0;
   const sigmoid = (x: number) =>
@@ -119,14 +135,12 @@ export function crosschannelAllowedWindowSeconds(
   const floor = sigmoid(2);
   const normalized = (sigmoid(channelCount) - floor) / (1 - floor);
   const curvedWindow =
-    config.crosschannelMinimumWindowSeconds +
-    (config.crosschannelWindowSeconds -
-      config.crosschannelMinimumWindowSeconds) *
-      normalized;
+    minimumWindowSeconds +
+    (config.crosschannelWindowSeconds - minimumWindowSeconds) * normalized;
 
   return Math.min(
     config.crosschannelWindowSeconds,
-    Math.max(config.crosschannelMinimumWindowSeconds, curvedWindow),
+    Math.max(minimumWindowSeconds, curvedWindow),
   );
 }
 
