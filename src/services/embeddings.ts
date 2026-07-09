@@ -47,7 +47,7 @@ export class OpenRouterEmbeddings implements ScamEmbedder {
   }
 
   async embedImage(guildId: string, image: ImageEmbeddingInput) {
-    const imageUrl = image.dataUrl ?? image.url;
+    const imageUrl = image.dataUrl;
     if (!imageUrl || !image.contentType?.startsWith('image/')) return null;
     return this.embed(guildId, 'image_embeddings', [
       {

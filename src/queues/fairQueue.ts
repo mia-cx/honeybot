@@ -13,13 +13,19 @@ type FairQueueOptions = {
   perGuildLimit: number;
   windowMs: number;
   logFailures?: boolean;
+  maxPendingGlobal?: number;
+  maxPendingPerGuild?: number;
 };
+
+export class QueueCapacityError extends Error {}
 
 export class FairQueue {
   private readonly guildQueues = new Map<string, Job<unknown>[]>();
   private readonly guildOrder: string[] = [];
   private readonly globalLimiter: RollingLimiter;
   private readonly guildLimiters = new Map<string, RollingLimiter>();
+  private readonly guildOutstanding = new Map<string, number>();
+  private globalOutstanding = 0;
   private running = false;
 
   constructor(private readonly options: FairQueueOptions) {
@@ -30,6 +36,14 @@ export class FairQueue {
   }
 
   enqueue<T>(guildId: string, run: () => Promise<T>): Promise<T> {
+    if (!this.hasCapacity(guildId)) {
+      return Promise.reject(
+        new QueueCapacityError(
+          `${this.options.name} queue capacity exceeded for guild ${guildId}`,
+        ),
+      );
+    }
+    this.reserveCapacity(guildId);
     return new Promise<T>((resolve, reject) => {
       const queue = this.guildQueues.get(guildId) ?? [];
       if (queue.length === 0 && !this.guildQueues.has(guildId))
@@ -85,6 +99,8 @@ export class FairQueue {
             });
           }
           job.reject(error);
+        } finally {
+          this.releaseCapacity(guildId);
         }
       }
     } finally {
@@ -103,6 +119,30 @@ export class FairQueue {
     );
     this.guildLimiters.set(guildId, limiter);
     return limiter;
+  }
+
+  private hasCapacity(guildId: string) {
+    return (
+      this.globalOutstanding <
+        (this.options.maxPendingGlobal ?? Number.POSITIVE_INFINITY) &&
+      (this.guildOutstanding.get(guildId) ?? 0) <
+        (this.options.maxPendingPerGuild ?? Number.POSITIVE_INFINITY)
+    );
+  }
+
+  private reserveCapacity(guildId: string) {
+    this.globalOutstanding += 1;
+    this.guildOutstanding.set(
+      guildId,
+      (this.guildOutstanding.get(guildId) ?? 0) + 1,
+    );
+  }
+
+  private releaseCapacity(guildId: string) {
+    this.globalOutstanding -= 1;
+    const remaining = (this.guildOutstanding.get(guildId) ?? 1) - 1;
+    if (remaining > 0) this.guildOutstanding.set(guildId, remaining);
+    else this.guildOutstanding.delete(guildId);
   }
 }
 

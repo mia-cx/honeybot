@@ -546,10 +546,6 @@ describe('OpenRouterScamClassifier', () => {
       },
       {
         type: 'image_url',
-        image_url: { url: 'https://proxy.test/image-2.jpg' },
-      },
-      {
-        type: 'image_url',
         image_url: { url: 'data:image/png;base64,a25vd24=' },
       },
     ]);
@@ -731,6 +727,7 @@ describe('OpenRouterScamClassifier', () => {
             name: 'current.png',
             contentType: 'image/png',
             url: 'https://cdn.test/image.png',
+            dataUrl: 'data:image/png;base64,Y3VycmVudA==',
           },
         ] as any,
       }),
@@ -811,6 +808,14 @@ describe('OpenRouterEmbeddings', () => {
         contentType: 'image/png',
         name: 'proof.png',
         url: 'https://cdn.test/proof.png',
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      embedder.embedImage('guild', {
+        contentType: 'image/png',
+        name: 'proof.png',
+        url: 'https://cdn.test/proof.png',
+        dataUrl: 'data:image/png;base64,cHJvb2Y=',
       }),
     ).resolves.toMatchObject({ vector: [1, 0, 0] });
 

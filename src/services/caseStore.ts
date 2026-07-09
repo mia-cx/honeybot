@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import type { Db } from '../db/database.js';
 import {
   caseAttachments,
@@ -31,20 +31,31 @@ import {
   MAX_ATTACHMENTS_PER_CASE,
   MAX_ATTACHMENTS_PER_MESSAGE,
   type FileStorage,
-  type StoredFile,
 } from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
+import { FairQueue } from '../queues/fairQueue.js';
 
 const caseId = customAlphabet(
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-',
   16,
 );
 
+const attachmentQueueDefaults = {
+  name: 'attachments',
+  globalLimit: Number.MAX_SAFE_INTEGER,
+  perGuildLimit: Number.MAX_SAFE_INTEGER,
+  windowMs: 1_000,
+  maxPendingGlobal: 64,
+  maxPendingPerGuild: 16,
+  logFailures: false,
+} as const;
+
 export class CaseStore {
   constructor(
     private readonly db: Db,
     private readonly storage: FileStorage,
     private readonly embedder?: ScamEmbedder,
+    private readonly attachmentQueue = new FairQueue(attachmentQueueDefaults),
   ) {}
 
   async getOrCreateCase(
@@ -130,53 +141,99 @@ export class CaseStore {
     if (!caseMessage) throw new Error('Failed to persist case message');
 
     const storedAttachments = [] as Array<typeof caseAttachments.$inferSelect>;
-    const existingAttachmentCount = (
-      await this.db
-        .select({ id: caseAttachments.id })
-        .from(caseAttachments)
-        .where(eq(caseAttachments.caseId, caseId))
-    ).length;
     let attachmentIndex = 0;
     for (const attachment of message.attachments.values()) {
-      let stored: StoredFile | null = null;
-      const shouldProcess =
+      const eligibleForProcessing =
         attachmentIndex < MAX_ATTACHMENTS_PER_MESSAGE &&
-        existingAttachmentCount + attachmentIndex < MAX_ATTACHMENTS_PER_CASE &&
         attachment.size <= MAX_ATTACHMENT_BYTES;
-      if (shouldProcess) {
-        try {
-          stored = await this.storage.saveFromUrl(
-            attachment.url,
-            [message.guildId, caseId],
-            attachment.name ?? `${attachment.id}.bin`,
-            {
+      let row = this.db.transaction(
+        (tx) => {
+          const occupiedSlots = eligibleForProcessing
+            ? tx
+                .select({ processingSlot: caseAttachments.processingSlot })
+                .from(caseAttachments)
+                .where(
+                  and(
+                    eq(caseAttachments.caseId, caseId),
+                    isNotNull(caseAttachments.processingSlot),
+                  ),
+                )
+                .all()
+            : [];
+          const processingSlot =
+            eligibleForProcessing &&
+            occupiedSlots.length < MAX_ATTACHMENTS_PER_CASE
+              ? Math.max(
+                  0,
+                  ...occupiedSlots.map((item) => item.processingSlot ?? 0),
+                ) + 1
+              : null;
+
+          return tx
+            .insert(caseAttachments)
+            .values({
+              caseId,
+              caseMessageId: caseMessage.id,
+              discordAttachmentId: attachment.id,
+              name: attachment.name ?? null,
+              originalUrl: attachment.url,
+              reviewAttachmentUrl: null,
               contentType: attachment.contentType ?? null,
-              expectedSizeBytes: attachment.size,
+              sizeBytes: attachment.size,
+              sha256: null,
+              perceptualHash: null,
+              storageKey: null,
+              processingSlot,
+              createdAt: now,
+            })
+            .returning()
+            .get();
+        },
+        { behavior: 'immediate' },
+      );
+
+      if (row.processingSlot !== null) {
+        try {
+          const stored = await this.attachmentQueue.enqueue(
+            message.guildId,
+            () =>
+              this.storage.saveFromUrl(
+                attachment.url,
+                [message.guildId, caseId],
+                attachment.name ?? `${attachment.id}.bin`,
+                {
+                  contentType: attachment.contentType ?? null,
+                  expectedSizeBytes: attachment.size,
+                },
+              ),
+          );
+          const [updated] = await this.db
+            .update(caseAttachments)
+            .set({
+              name: stored.fileName,
+              contentType: stored.contentType,
+              sizeBytes: stored.sizeBytes,
+              sha256: stored.sha256,
+              storageKey: stored.storageKey,
+            })
+            .where(eq(caseAttachments.id, row.id))
+            .returning();
+          if (updated) row = updated;
+        } catch (error) {
+          await this.addEvent(
+            caseId,
+            'attachment_storage_failed',
+            'bot',
+            null,
+            'Attachment retained as metadata only',
+            {
+              discordAttachmentId: attachment.id,
+              error: error instanceof Error ? error.message : String(error),
             },
           );
-        } catch {
-          // Keep metadata even if the download fails or exceeds resource limits.
         }
       }
-
-      const [row] = await this.db
-        .insert(caseAttachments)
-        .values({
-          caseId,
-          caseMessageId: caseMessage.id,
-          discordAttachmentId: attachment.id,
-          name: stored?.fileName ?? attachment.name ?? null,
-          originalUrl: attachment.url,
-          reviewAttachmentUrl: null,
-          contentType: stored?.contentType ?? attachment.contentType ?? null,
-          sizeBytes: stored?.sizeBytes ?? attachment.size,
-          sha256: stored?.sha256 ?? null,
-          perceptualHash: null,
-          storageKey: stored?.storageKey ?? null,
-          createdAt: now,
-        })
-        .returning();
-      if (row) storedAttachments.push(row);
+      storedAttachments.push(row);
       attachmentIndex += 1;
     }
 

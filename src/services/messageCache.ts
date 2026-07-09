@@ -7,7 +7,11 @@ const MAX_CACHED_MESSAGES = 500;
 export class MessageCache {
   private readonly messages = new Map<string, CachedMessage>();
 
-  cache(message: Message<true>, reason: CachedMessage['reason'], storedAttachments: CachedMessage['attachments'] = []): CachedMessage {
+  cache(
+    message: Message<true>,
+    reason: CachedMessage['reason'],
+    storedAttachments: CachedMessage['attachments'] = [],
+  ): CachedMessage {
     const cached: CachedMessage = {
       id: message.id,
       guildId: message.guildId,
@@ -26,6 +30,7 @@ export class MessageCache {
               size: attachment.size,
               url: attachment.url,
               proxyUrl: attachment.proxyURL,
+              dataUrl: null,
               sha256: null,
               storageKey: null,
             })),

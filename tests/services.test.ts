@@ -510,6 +510,28 @@ describe('FairQueue', () => {
       }),
     ).rejects.toThrow('boom');
   });
+
+  it('rejects work beyond configured queue capacity', async () => {
+    const queue = new FairQueue({
+      name: 'bounded',
+      globalLimit: 10,
+      perGuildLimit: 10,
+      windowMs: 1_000,
+      maxPendingGlobal: 1,
+      maxPendingPerGuild: 1,
+    });
+    let release!: () => void;
+    const blocked = queue.enqueue(
+      'guild',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+
+    await expect(queue.enqueue('guild', async () => undefined)).rejects.toThrow(
+      'capacity',
+    );
+    release();
+    await blocked;
+  });
 });
 
 describe('ModelStore', () => {
@@ -1134,6 +1156,59 @@ describe('EvidenceAnalyzer', () => {
 });
 
 describe('CaseStore', () => {
+  it('atomically caps concurrent attachment processing per case', async () => {
+    const database = testDatabase();
+    let active = 0;
+    let maxActive = 0;
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'concurrent-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    await Promise.all(
+      Array.from({ length: 8 }, (_, messageIndex) =>
+        store.attachMessage(
+          caseRow.id,
+          fakeMessage({
+            id: `concurrent-${messageIndex}`,
+            attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+              attachment({ id: `${messageIndex}-${attachmentIndex}` }),
+            ),
+          }),
+        ),
+      ),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(MAX_ATTACHMENTS_PER_CASE);
+    expect(maxActive).toBe(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.caseId, caseRow.id)),
+    ).toHaveLength(64);
+    database.sqlite.close();
+  });
+
   it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
     const database = testDatabase();
     const storage = fakeStorage();
@@ -1701,6 +1776,7 @@ function storedAttachment(
     size: input.size ?? 123,
     url: input.url ?? 'https://cdn.discordapp.test/image.png',
     proxyUrl: input.proxyUrl ?? 'https://proxy.discordapp.test/image.png',
+    dataUrl: input.dataUrl ?? 'data:image/png;base64,aW1hZ2U=',
     sha256: input.sha256 ?? 'sha',
     storageKey: input.storageKey ?? 'guild/case/file.png',
   };

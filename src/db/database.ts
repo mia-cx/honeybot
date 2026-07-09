@@ -14,7 +14,9 @@ export type DatabaseHandle = {
 };
 
 export function openDatabase(databaseUrl: string): DatabaseHandle {
-  const path = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : databaseUrl;
+  const path = databaseUrl.startsWith('file:')
+    ? databaseUrl.slice('file:'.length)
+    : databaseUrl;
   mkdirSync(dirname(path), { recursive: true });
 
   const sqlite = new Database(path);
@@ -120,9 +122,9 @@ CREATE TABLE IF NOT EXISTS case_attachments (
   sha256 TEXT,
   perceptual_hash TEXT,
   storage_key TEXT,
+  processing_slot INTEGER,
   created_at TEXT NOT NULL
 );
-
 CREATE TABLE IF NOT EXISTS case_evidence (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   case_id TEXT NOT NULL,
@@ -211,4 +213,14 @@ CREATE TABLE IF NOT EXISTS global_bans (
 );
 CREATE INDEX IF NOT EXISTS global_bans_user_idx ON global_bans (user_id, status);
 `);
+
+  const attachmentColumns = db.pragma('table_info(case_attachments)') as Array<{
+    name: string;
+  }>;
+  if (!attachmentColumns.some((column) => column.name === 'processing_slot')) {
+    db.exec('ALTER TABLE case_attachments ADD COLUMN processing_slot INTEGER');
+  }
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS case_attachments_processing_slot_idx ON case_attachments (case_id, processing_slot)',
+  );
 }

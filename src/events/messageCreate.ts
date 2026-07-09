@@ -112,7 +112,8 @@ async function handleTriggeredMessage(
         size: attachment.sizeBytes,
         url: attachment.originalUrl,
         proxyUrl: attachment.reviewAttachmentUrl ?? attachment.originalUrl,
-        dataUrl: await attachmentDataUrl(attachment, dependencies.storage),
+        dataUrl:
+          (await attachmentDataUrl(attachment, dependencies.storage)) ?? null,
         sha256: attachment.sha256,
         storageKey: attachment.storageKey,
       }),
