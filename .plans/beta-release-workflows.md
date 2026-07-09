@@ -98,10 +98,11 @@ Responsibilities:
 1. Validate the channel/version contract.
 2. Check out the exact supplied SHA.
 3. For beta only, update `package.json` transiently to the supplied prerelease version.
-4. Generate channel-specific Docker Hub and GHCR aliases.
+4. Generate two disjoint tag sets for Docker Hub and GHCR: immutable exact/SHA tags and moving channel aliases.
 5. Set OCI version/revision/source labels.
-6. Build the multi-architecture image once and push the same manifest to both registries.
-7. Expose the immutable version and digest in the job summary.
+6. Build the multi-architecture image once, push immutable tags, and expose the resulting digest.
+7. Promote moving aliases from that immutable digest only after the caller completes its channel-specific serialization and freshness checks; never rebuild while promoting aliases.
+8. Expose the immutable version and digest in the job summary.
 
 The calling workflow supplies only the permissions and secrets it needs. Pin third-party actions to immutable commit SHAs.
 
@@ -117,22 +118,27 @@ Responsibilities:
 4. Skip publishing when no Honeybot release is pending. This prevents the Changesets release merge itself from becoming a beta build.
 5. Read the pending `honeybot` `newVersion`; reject missing, duplicate, or unexpected package releases.
 6. Resolve the stable baseline and calculate the first-parent beta ordinal.
-7. Produce `<next-version>-beta.<N>`.
-8. Invoke `publish-container.yml` with the current SHA.
-9. After a successful image publish, create/push immutable Git tag `v<next-version>-beta.<N>` if absent; accept an existing tag only when it points to the same SHA.
+7. Produce `<next-version>-beta.<N>` and its immutable Git tag.
+8. Before any registry write, fetch that tag from the remote: continue if absent, allow an idempotent rerun if it points to the current SHA, and fail closed if it points elsewhere.
+9. Invoke `publish-container.yml` to build and push only immutable exact/SHA tags for the current SHA.
+10. After successful immutable publication, create/push the beta Git tag if it was absent.
+11. Promote `beta`, major-beta, and minor-beta aliases from the published digest only if the current remote `main` tip still equals the run SHA.
 
-Concurrency must prevent two jobs for the same SHA from racing while allowing reruns to reproduce the same version. The deterministic first-parent ordinal, rather than a mutable counter, prevents duplicate beta numbers.
+Serialize the entire beta publication path with a branch-level concurrency group such as `beta-publish-main`, not a same-SHA group. Cancel stale in-progress runs, recheck the remote `main` tip immediately before moving-alias promotion, and keep immutable image/Git tags even when a superseded run skips moving aliases. These guards prevent an older build from rolling moving aliases backward while preserving deterministic reruns.
 
 ### `.github/workflows/release.yml`
 
 Keep the existing Changesets version-PR job and add stable-release orchestration.
 
+Generate a short-lived installation token from a dedicated GitHub App with only repository contents and pull-request write permissions, and pass it to `changesets/action`. Unlike `GITHUB_TOKEN`, the App token allows release-PR `pull_request` events to run required CI without entering `action_required`; pin the token action to an immutable SHA and fail closed when App credentials are unavailable.
+
 On each push to `main`:
 
-1. Continue running `changesets/action` so `changeset-release/main` is created or updated from pending fragments.
-2. Compare `package.json` at `github.event.before` and `github.sha`.
-3. If the stable package version did not change, skip stable tagging/publishing.
-4. If it changed:
+1. Continue running `changesets/action` with the GitHub App token so `changeset-release/main` is created or updated from pending fragments and receives normal CI.
+2. In the stable-orchestration job, check out full history and tags with `fetch-depth: 0`, explicitly fetch `github.event.before` when necessary, and verify both the before and current commits exist locally.
+3. Compare `package.json` at the validated `github.event.before` and `github.sha` commits.
+4. If the stable package version did not change, skip stable tagging/publishing.
+5. If it changed:
    - require a valid stable semantic version;
    - require consumed Changesets/updated changelog as expected;
    - run `pnpm changeset tag` to create `vX.Y.Z` without publishing to npm;
@@ -202,7 +208,8 @@ Files:
 Requirements:
 
 - One multi-architecture build per channel.
-- Both registries receive the same tag set and digest.
+- Both registries receive the same immutable tags and digest.
+- Moving aliases are promoted from the immutable digest in a separate guarded step.
 - Third-party actions use immutable SHAs.
 - Permissions are least-privilege.
 
@@ -211,6 +218,7 @@ Verification:
 - Parse all workflow YAML.
 - Run `actionlint` in a pinned container or CI tool.
 - Exercise metadata generation for representative beta/stable inputs without registry login.
+- Verify immutable publication and moving-alias promotion are separate jobs/steps with no second build.
 
 ### Commit 3: Make `main` publish beta images only
 
@@ -225,12 +233,16 @@ Requirements:
 - No stable aliases from a `main` push.
 - No beta publish when Changesets reports no pending release.
 - Full Git history/tags are available for the ordinal.
-- Beta tag creation occurs only after successful image publishing.
+- Existing beta tags are validated before any registry write.
+- Beta tag creation occurs only after successful immutable image publishing.
+- Publication is serialized for the whole `main` beta channel, and stale runs cannot update moving aliases.
 
 Verification:
 
 - Dry-run metadata for current `main`: pending `1.1.0` from `.changeset/quick-text-repeats.md`.
 - Confirm the current stable package version remains untouched in Git.
+- Confirm a mismatched existing beta tag fails before registry publication.
+- Simulate two successive `main` SHAs and confirm only the current remote tip can promote moving aliases.
 - Confirm `latest` cannot appear in beta outputs.
 
 ### Commit 4: Tag and publish stable releases automatically
@@ -242,6 +254,8 @@ Files:
 
 Requirements:
 
+- A short-lived GitHub App installation token lets Changesets-created/updated release PRs run required CI automatically.
+- Stable-version detection fetches and validates `github.event.before` instead of assuming the shallow checkout contains it.
 - Stable publication occurs only when `package.json` advances to a stable version.
 - `changeset tag` creates `vX.Y.Z` for this single-package private repository.
 - The release workflow directly calls the publisher after tagging.
@@ -250,8 +264,10 @@ Requirements:
 
 Verification:
 
-- Simulate version-change and no-version-change events against local Git refs.
+- Simulate version-change and no-version-change events against local Git refs with an initially shallow checkout.
+- Confirm the workflow explicitly fetches and resolves `github.event.before` before reading its `package.json`.
 - Confirm an existing mismatched tag fails before image publication.
+- Confirm a Changesets release PR created or updated with the App token starts CI without `action_required`.
 - Confirm the stable call builds the version-PR merge SHA, not the workflow branch head.
 
 ### Commit 5: Document channels and rollout
@@ -274,17 +290,19 @@ Document:
 
 1. Keep PR #10 (`changeset-release/main`) open until this workflow change is merged.
 2. Restore the missing release invariant for the current package version by creating `v1.0.1` at merge commit `67813a8`, after verifying that commit contains `package.json` version `1.0.1`. Do not move `v1.0.0`.
-3. Merge the workflow implementation into `main` with its minor Changeset.
-4. Verify that the first beta run:
+3. Create and install a dedicated release-automation GitHub App with only repository contents and pull-request write permissions; configure its App ID and private key as repository Actions secrets before merging workflow code.
+4. Merge the workflow implementation into `main` with its minor Changeset.
+5. Verify that the first beta run:
    - derives the pending next version as `1.1.0`;
+   - preflights the immutable beta Git tag before either registry is modified;
    - publishes beta-only aliases to Docker Hub and GHCR;
    - leaves `latest` unchanged;
    - creates the matching immutable beta Git tag.
-5. Confirm Changesets updates PR #10 to include both release notes while retaining the highest bump, minor `1.1.0`.
-6. Merge PR #10 as the first production exercise of the stable workflow.
-7. Verify that the release run creates `v1.1.0` and publishes the same stable digest to Docker Hub and GHCR under `v1.1.0`, `v1.1`, `v1`, `latest`, and the SHA tag.
-8. Verify that the subsequent no-changeset `main` state does not publish a beta image.
-9. Protect `main`: require pull requests and CI, block force pushes/deletion, and limit direct pushes. This preserves deterministic first-parent beta numbering.
+6. Confirm Changesets updates PR #10 with the GitHub App token, includes both release notes while retaining minor `1.1.0`, and starts required CI without an `action_required` run.
+7. Merge PR #10 as the first production exercise of the stable workflow only after that CI passes.
+8. Verify that the release run creates `v1.1.0` and publishes the same stable digest to Docker Hub and GHCR under `v1.1.0`, `v1.1`, `v1`, `latest`, and the SHA tag.
+9. Verify that the subsequent no-changeset `main` state does not publish a beta image.
+10. Protect `main`: require pull requests and CI, block force pushes/deletion, and limit direct pushes. Enable these requirements only after the App-authored PR #10 update proves the automated release-PR CI path works.
 
 ## Validation checklist
 
@@ -307,7 +325,9 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 - [ ] Each eligible `main` integration publishes a deterministic `<next-version>-beta.<N>` image when Changesets has pending release intent.
 - [ ] Beta versions are transient and are never committed to `main`.
 - [ ] Beta builds publish only beta/exact/SHA aliases and never update `latest` or stable major/minor aliases.
+- [ ] Existing immutable beta tags are validated before registry writes, and stale/concurrent runs cannot roll moving aliases backward.
 - [ ] Changesets aggregates all fragments and uses the largest semantic bump in its release PR.
+- [ ] Changesets-created or updated release PRs run required CI automatically through a least-privilege GitHub App token.
 - [ ] Merging the Changesets release PR automatically creates an immutable matching `vX.Y.Z` Git tag.
 - [ ] The same release run automatically publishes stable images to Docker Hub and GHCR.
 - [ ] Stable builds publish exact/minor/major/`latest`/SHA aliases from the release merge SHA.
@@ -327,6 +347,7 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 
 - The current repository lacks `v1.0.1`; beta numbering should not go live until that baseline is restored or an explicit alternate baseline is chosen.
 - `main` is currently unprotected, so direct/force pushes can undermine deterministic integration numbering.
-- Docker Hub and GHCR publication can partially succeed. Reruns must safely overwrite the same calculated aliases and complete the missing registry.
+- Release automation depends on a dedicated GitHub App; missing, expired, or overprivileged App credentials must fail closed and block release-PR updates rather than falling back to `GITHUB_TOKEN`.
+- Docker Hub and GHCR publication can partially succeed. Reruns must validate immutable tags first, safely complete the missing registry, and promote moving aliases only from the current integration/release digest.
 - Database migrations exercised by beta images may make rollback to stable unsafe; beta deployments require backups.
 - GitHub suppresses tag-triggered workflows when the tag is pushed with `GITHUB_TOKEN`; stable build orchestration must remain in the originating release run.
