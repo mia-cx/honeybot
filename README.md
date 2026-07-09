@@ -15,6 +15,7 @@ It is built for self-hosting: SQLite for persistence, filesystem evidence storag
 - [Configuration](#configuration)
 - [Image tags](#image-tags)
 - [Development](#development)
+- [Releases and changelogs](#releases-and-changelogs)
 - [Docs](#docs)
 
 ## Features
@@ -356,6 +357,18 @@ pnpm seed:fixtures  # seed fixture evidence corpus
 ```
 
 GitHub Actions runs CI on PRs and pushes to `main`. Container builds publish multi-arch `linux/amd64` and `linux/arm64` images to GHCR and Docker Hub on `main` pushes.
+
+## Releases and changelogs
+
+Pull requests with user-visible changes should include a changeset:
+
+```bash
+pnpm changeset
+```
+
+Select `honeybot`, choose a patch, minor, or major bump, and describe the change for users. Commit the generated `.changeset/*.md` file with the pull request.
+
+After the pull request merges, the release workflow creates or updates a version pull request. Merging that pull request bumps `package.json`, updates `CHANGELOG.md`, and triggers container publishing with the new version.
 
 ## Docs
 
