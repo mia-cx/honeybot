@@ -116,6 +116,7 @@ export const caseAttachments = sqliteTable('case_attachments', {
   perceptualHash: text('perceptual_hash'),
   storageKey: text('storage_key'),
   processingSlot: integer('processing_slot'),
+  processingState: text('processing_state'),
   createdAt: text('created_at').notNull(),
 });
 

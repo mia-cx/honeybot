@@ -1491,6 +1491,58 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('counts only admitted downloads toward the per-message limit', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'mixed-size-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const oversized = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE },
+      (_, index) =>
+        attachment({
+          id: `oversized-${index}`,
+          size: MAX_ATTACHMENT_BYTES + 1,
+        }),
+    );
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'mixed-size-message',
+        attachments: [
+          ...oversized,
+          attachment({ id: 'admitted', url: 'https://cdn.test/admitted.png' }),
+        ],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledWith(
+      'https://cdn.test/admitted.png',
+      ['guild', caseRow.id],
+      'image.png',
+      { contentType: 'image/png', expectedSizeBytes: 123 },
+    );
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(rows.filter((row) => row.processingState === 'stored')).toHaveLength(
+      1,
+    );
+    expect(rows.filter((row) => row.processingState === null)).toHaveLength(
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
+
+    database.sqlite.close();
+  });
+
   it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
     const database = testDatabase();
     const storage = fakeStorage();
@@ -1579,6 +1631,94 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('recovers pending attachment downloads without retrying terminal failures', async () => {
+    const database = testDatabase();
+    const seedStore = new CaseStore(database.db, fakeStorage());
+    const caseRow = await seedStore.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'restart-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const [caseMessage] = await database.db
+      .insert(caseMessages)
+      .values({
+        caseId: caseRow.id,
+        messageId: 'restart-message',
+        channelId: 'channel',
+        authorId: 'restart-user',
+        content: '',
+        normalizedContent: '',
+        textHash: null,
+        deleted: 0,
+        createdAt: new Date().toISOString(),
+      })
+      .returning();
+    if (!caseMessage) throw new Error('Failed to seed case message');
+    const attachmentValues = {
+      caseId: caseRow.id,
+      caseMessageId: caseMessage.id,
+      name: 'evidence.png',
+      reviewAttachmentUrl: null,
+      contentType: 'image/png',
+      sizeBytes: 123,
+      sha256: null,
+      perceptualHash: null,
+      storageKey: null,
+      createdAt: new Date().toISOString(),
+    };
+    await database.db.insert(caseAttachments).values([
+      {
+        ...attachmentValues,
+        discordAttachmentId: 'pending',
+        originalUrl: 'https://cdn.test/pending.png',
+        processingSlot: 1,
+        processingState: 'pending',
+      },
+      {
+        ...attachmentValues,
+        discordAttachmentId: 'failed',
+        originalUrl: 'https://cdn.test/failed.png',
+        processingSlot: 2,
+        processingState: 'failed',
+      },
+    ]);
+
+    const storage = fakeStorage();
+    const restartedStore = new CaseStore(database.db, storage);
+
+    await expect(
+      restartedStore.recoverInterruptedAttachments(),
+    ).resolves.toBe(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledWith(
+      'https://cdn.test/pending.png',
+      ['guild', caseRow.id],
+      'evidence.png',
+      { contentType: 'image/png', expectedSizeBytes: 123 },
+    );
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.discordAttachmentId, 'pending'))
+        .get(),
+    ).toMatchObject({
+      processingState: 'stored',
+      storageKey: 'guild/case/file.png',
+      sha256: 'sha256',
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.discordAttachmentId, 'failed'))
+        .get(),
+    ).toMatchObject({ processingState: 'failed', storageKey: null });
+
+    database.sqlite.close();
+  });
+
   it('allows only one concurrent operation claim from the expected case status', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
@@ -1614,7 +1754,7 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
-  it('recovers interrupted operations into their retryable states on startup', async () => {
+  it('marks interrupted operations uncertain instead of retrying side effects', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
     const pendingCase = await store.getOrCreateCase({
@@ -1649,21 +1789,21 @@ describe('CaseStore', () => {
     await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
     await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
     expect(await store.getCase(pendingCase.id)).toMatchObject({
-      status: 'pending_review',
+      status: 'operation_uncertain',
       actionTaken: null,
     });
     expect(await store.getCase(punishedCase.id)).toMatchObject({
-      status: 'punished',
+      status: 'operation_uncertain',
       actionTaken: 'ban',
     });
     await expect(
       store.claimOperation(pendingCase.id, 'punish', 'moderator'),
-    ).resolves.not.toBeNull();
+    ).resolves.toBeNull();
     expect(
       await database.db
         .select()
         .from(caseEvents)
-        .where(eq(caseEvents.eventType, 'operation_recovered')),
+        .where(eq(caseEvents.eventType, 'operation_outcome_uncertain')),
     ).toHaveLength(2);
 
     database.sqlite.close();

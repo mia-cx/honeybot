@@ -87,7 +87,14 @@ function operationTransitions() {
   >;
 }
 
+type CaseAttachmentRow = typeof caseAttachments.$inferSelect;
+
 export class CaseStore {
+  private readonly attachmentJobs = new Map<
+    number,
+    Promise<CaseAttachmentRow>
+  >();
+
   constructor(
     private readonly db: Db,
     private readonly storage: FileStorage,
@@ -177,14 +184,12 @@ export class CaseStore {
         .get());
     if (!caseMessage) throw new Error('Failed to persist case message');
 
-    const attachmentMetadata = [] as Array<typeof caseAttachments.$inferSelect>;
-    const attachmentStorage = [] as Array<
-      Promise<typeof caseAttachments.$inferSelect>
-    >;
-    let attachmentIndex = 0;
+    const attachmentMetadata: CaseAttachmentRow[] = [];
+    const attachmentStorage: Array<Promise<CaseAttachmentRow>> = [];
+    let admittedAttachments = 0;
     for (const attachment of message.attachments.values()) {
       const eligibleForProcessing =
-        attachmentIndex < MAX_ATTACHMENTS_PER_MESSAGE &&
+        admittedAttachments < MAX_ATTACHMENTS_PER_MESSAGE &&
         attachment.size <= MAX_ATTACHMENT_BYTES;
       const row = this.db.transaction(
         (tx) => {
@@ -224,6 +229,8 @@ export class CaseStore {
               perceptualHash: null,
               storageKey: null,
               processingSlot,
+              processingState:
+                processingSlot === null ? null : 'pending',
               createdAt: now,
             })
             .returning()
@@ -235,62 +242,11 @@ export class CaseStore {
       const storageTask =
         row.processingSlot === null
           ? Promise.resolve(row)
-          : this.attachmentQueue
-              .enqueue(message.guildId, () =>
-                this.storage.saveFromUrl(
-                  attachment.url,
-                  [message.guildId, caseId],
-                  attachment.name ?? `${attachment.id}.bin`,
-                  {
-                    contentType: attachment.contentType ?? null,
-                    expectedSizeBytes: attachment.size,
-                  },
-                ),
-              )
-              .then(async (stored) => {
-                const [updated] = await this.db
-                  .update(caseAttachments)
-                  .set({
-                    name: stored.fileName,
-                    contentType: stored.contentType,
-                    sizeBytes: stored.sizeBytes,
-                    sha256: stored.sha256,
-                    storageKey: stored.storageKey,
-                  })
-                  .where(eq(caseAttachments.id, row.id))
-                  .returning();
-                return updated ?? row;
-              })
-              .catch(async (error: unknown) => {
-                try {
-                  await this.addEvent(
-                    caseId,
-                    'attachment_storage_failed',
-                    'bot',
-                    null,
-                    'Attachment retained as metadata only',
-                    {
-                      discordAttachmentId: attachment.id,
-                      error:
-                        error instanceof Error ? error.message : String(error),
-                    },
-                  );
-                } catch (eventError) {
-                  logger.warn('Failed to record attachment storage failure', {
-                    caseId,
-                    discordAttachmentId: attachment.id,
-                    error:
-                      eventError instanceof Error
-                        ? eventError.message
-                        : String(eventError),
-                  });
-                }
-                return row;
-              });
+          : this.queueAttachmentStorage(message.guildId, row);
 
       attachmentMetadata.push(row);
       attachmentStorage.push(storageTask);
-      attachmentIndex += 1;
+      if (row.processingSlot !== null) admittedAttachments += 1;
     }
 
     return {
@@ -298,6 +254,108 @@ export class CaseStore {
       attachments: attachmentMetadata,
       processedAttachments: Promise.all(attachmentStorage),
     };
+  }
+
+  async recoverInterruptedAttachments() {
+    const interrupted = await this.db
+      .select({ attachment: caseAttachments, guildId: cases.guildId })
+      .from(caseAttachments)
+      .innerJoin(cases, eq(caseAttachments.caseId, cases.id))
+      .where(eq(caseAttachments.processingState, 'pending'));
+
+    for (const { attachment, guildId } of interrupted) {
+      await this.queueAttachmentStorage(guildId, attachment);
+    }
+    return interrupted.length;
+  }
+
+  private queueAttachmentStorage(
+    guildId: string,
+    row: CaseAttachmentRow,
+  ): Promise<CaseAttachmentRow> {
+    const existing = this.attachmentJobs.get(row.id);
+    if (existing) return existing;
+
+    const storageTask = this.attachmentQueue
+      .enqueue(guildId, () =>
+        this.storage.saveFromUrl(
+          row.originalUrl,
+          [guildId, row.caseId],
+          row.name ?? `${row.discordAttachmentId}.bin`,
+          {
+            contentType: row.contentType,
+            expectedSizeBytes: row.sizeBytes,
+          },
+        ),
+      )
+      .then(async (stored) => {
+        const [updated] = await this.db
+          .update(caseAttachments)
+          .set({
+            name: stored.fileName,
+            contentType: stored.contentType,
+            sizeBytes: stored.sizeBytes,
+            sha256: stored.sha256,
+            storageKey: stored.storageKey,
+            processingState: 'stored',
+          })
+          .where(eq(caseAttachments.id, row.id))
+          .returning();
+        if (updated) return updated;
+
+        await this.storage.remove(stored.storageKey);
+        return row;
+      })
+      .catch(async (error: unknown) => {
+        let failed = row;
+        try {
+          const [updated] = await this.db
+            .update(caseAttachments)
+            .set({ processingState: 'failed' })
+            .where(eq(caseAttachments.id, row.id))
+            .returning();
+          if (updated) failed = updated;
+        } catch (updateError) {
+          logger.warn('Failed to mark attachment storage failure', {
+            caseId: row.caseId,
+            discordAttachmentId: row.discordAttachmentId,
+            error:
+              updateError instanceof Error
+                ? updateError.message
+                : String(updateError),
+          });
+        }
+
+        try {
+          await this.addEvent(
+            row.caseId,
+            'attachment_storage_failed',
+            'bot',
+            null,
+            'Attachment retained as metadata only',
+            {
+              discordAttachmentId: row.discordAttachmentId,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          );
+        } catch (eventError) {
+          logger.warn('Failed to record attachment storage failure', {
+            caseId: row.caseId,
+            discordAttachmentId: row.discordAttachmentId,
+            error:
+              eventError instanceof Error
+                ? eventError.message
+                : String(eventError),
+          });
+        }
+        return failed;
+      })
+      .finally(() => {
+        this.attachmentJobs.delete(row.id);
+      });
+
+    this.attachmentJobs.set(row.id, storageTask);
+    return storageTask;
   }
 
   async markMessageDeleted(messageId: string) {
@@ -430,7 +488,7 @@ export class CaseStore {
           const updated = tx
             .update(cases)
             .set({
-              status: transition.from,
+              status: 'operation_uncertain',
               updatedAt: new Date().toISOString(),
             })
             .where(
@@ -447,11 +505,15 @@ export class CaseStore {
             .values(
               caseEventValues(
                 caseRow.id,
-                'operation_recovered',
+                'operation_outcome_uncertain',
                 'bot',
                 null,
-                `Recovered interrupted case operation: ${operation}`,
-                { operation, restoredStatus: transition.from },
+                `Interrupted case operation requires manual review: ${operation}`,
+                {
+                  operation,
+                  previousStatus: transition.from,
+                  possibleStatus: transition.to,
+                },
               ),
             )
             .run();

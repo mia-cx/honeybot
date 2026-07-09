@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS case_attachments (
   perceptual_hash TEXT,
   storage_key TEXT,
   processing_slot INTEGER,
+  processing_state TEXT,
   created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS case_evidence (
@@ -219,6 +220,17 @@ CREATE INDEX IF NOT EXISTS global_bans_user_idx ON global_bans (user_id, status)
   }>;
   if (!attachmentColumns.some((column) => column.name === 'processing_slot')) {
     db.exec('ALTER TABLE case_attachments ADD COLUMN processing_slot INTEGER');
+  }
+  if (!attachmentColumns.some((column) => column.name === 'processing_state')) {
+    db.exec(`
+      ALTER TABLE case_attachments ADD COLUMN processing_state TEXT;
+      UPDATE case_attachments
+      SET processing_state = CASE
+        WHEN processing_slot IS NULL THEN NULL
+        WHEN storage_key IS NOT NULL THEN 'stored'
+        ELSE 'pending'
+      END;
+    `);
   }
   db.exec(
     'CREATE UNIQUE INDEX IF NOT EXISTS case_attachments_processing_slot_idx ON case_attachments (case_id, processing_slot)',

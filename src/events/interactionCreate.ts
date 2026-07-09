@@ -1475,6 +1475,15 @@ async function handleCaseButton(
     return;
   }
 
+  if (caseRow.status === 'operation_uncertain') {
+    await interaction.reply({
+      content:
+        'A case action was interrupted during restart and may already have reached Discord. Verify the user state manually before taking another action.',
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (action === 'dismiss') {
     const config = await deps.configStore.getGuildConfig(interaction.guildId);
     const operation = await runCaseOperation(interaction, deps, {

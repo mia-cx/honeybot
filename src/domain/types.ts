@@ -24,6 +24,7 @@ export const caseStatuses = [
   'dismissal_pending',
   'punishment_revert_pending',
   'dismissal_revert_pending',
+  'operation_uncertain',
   'punished',
   'dismissed',
   'reverted',

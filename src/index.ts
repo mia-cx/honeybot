@@ -64,10 +64,24 @@ const embedder = new OpenRouterEmbeddings(
   env.DEFAULT_EMBEDDINGS_DIMENSIONS,
 );
 const caseStore = new CaseStore(database.db, storage, embedder);
-const recoveredCaseOperations = await caseStore.recoverInterruptedOperations();
-if (recoveredCaseOperations > 0) {
-  logger.warn('Recovered interrupted case operations', {
-    recoveredCaseOperations,
+void caseStore
+  .recoverInterruptedAttachments()
+  .then((recoveredAttachments) => {
+    if (recoveredAttachments > 0) {
+      logger.warn('Recovered interrupted attachment downloads', {
+        recoveredAttachments,
+      });
+    }
+  })
+  .catch((error: unknown) => {
+    logger.error('Failed to recover interrupted attachment downloads', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+const uncertainCaseOperations = await caseStore.recoverInterruptedOperations();
+if (uncertainCaseOperations > 0) {
+  logger.warn('Flagged interrupted case operations for manual review', {
+    uncertainCaseOperations,
   });
 }
 const classifier = new OpenRouterScamClassifier(modelStore, modelQueue, {
