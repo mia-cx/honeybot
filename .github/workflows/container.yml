@@ -19,9 +19,9 @@ permissions:
   packages: write
 
 env:
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_USERNAME: miacx
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-  DOCKERHUB_REPOSITORY: ${{ vars.DOCKERHUB_REPOSITORY || github.event.repository.name }}
+  DOCKERHUB_REPOSITORY: honeybot
 
 jobs:
   build:
