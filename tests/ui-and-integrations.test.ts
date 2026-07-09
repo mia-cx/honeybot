@@ -6,6 +6,7 @@ import { Collection } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerCommands } from '../src/commands/register.js';
 import {
+  caseReviewEdit,
   caseReviewMessage,
   caseReviewResolutionUpdate,
   caseReviewRevertUpdate,
@@ -103,7 +104,7 @@ describe('case review UI', () => {
 
     expect(message.flags).toBe(1 << 15);
     expect(message.allowedMentions).toEqual({
-      users: ['user', 'mod-user'],
+      users: ['mod-user'],
       roles: ['mod-role'],
     });
     expect(components).toHaveLength(4);
@@ -229,6 +230,35 @@ describe('case review UI', () => {
       ).components as Array<any>;
       expect(textContent(resolved)).toContain('Resolved by <@actor>');
     }
+  });
+
+  it('preserves resolved state when later analysis edits the case message', () => {
+    const existing = caseReviewResolutionUpdate(
+      caseReviewMessage(caseInput({ analysis: null })).components as Array<any>,
+      {
+        caseId: 'case1',
+        status: 'punished',
+        actorId: 'actor',
+        userId: 'user',
+        detail: 'done',
+        punishment: policy('ban'),
+        canRevert: true,
+      },
+    ).components as Array<any>;
+
+    const edited = caseReviewEdit(caseInput(), existing)
+      .components as Array<any>;
+
+    expect(textContent(edited)).toContain('# 🔨 <@user> banned');
+    expect(textContent(edited)).toContain('Resolved by <@actor>');
+    expect(textContent(edited)).toContain(
+      '**Primary model** — likelihood of scam: 88%',
+    );
+    expect(customIds(edited)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
+      'case:revert:case1',
+    ]);
   });
 
   it('adds and removes resolution containers without mutating case and signal containers', () => {

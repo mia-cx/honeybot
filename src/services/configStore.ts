@@ -24,7 +24,10 @@ import { formatDurationSeconds } from './duration.js';
 const settingKeys = {
   moderationChannelId: 'moderation:channel_id',
   crosschannelEnabled: 'crosschannel:enabled',
+  crosschannelMinimumWindowSeconds: 'crosschannel:minimum_window_seconds',
   crosschannelWindowSeconds: 'crosschannel:window_seconds',
+  crosschannelWindowSteepness: 'crosschannel:window_steepness',
+  crosschannelWindowMidpointChannels: 'crosschannel:window_midpoint_channels',
   crosschannelChannelThreshold: 'crosschannel:channel_threshold',
   knownImageSimilarityThreshold: 'known_image:similarity_threshold',
   knownTextSimilarityThreshold: 'known_text:similarity_threshold',
@@ -36,6 +39,10 @@ const settingKeys = {
   crosschannelMaxEntriesPerUser: 'crosschannel:max_entries_per_user',
   globalBansEnabled: 'global_bans:enabled',
 } satisfies Record<keyof GuildSettings, string>;
+
+type ModeratorType = 'user' | 'role';
+type ConfigManagerType = 'config_user' | 'config_role';
+type AccessListType = ModeratorType | ConfigManagerType;
 
 const reverseSettingKeys = new Map(
   Object.entries(settingKeys).map(([key, value]) => [
@@ -94,7 +101,18 @@ export class ConfigStore {
     const storedModeratorRoles = moderatorRows
       .filter((row) => row.type === 'role')
       .map((row) => row.id);
-    const hasStoredModerators = moderatorRows.length > 0;
+    const storedConfigUsers = moderatorRows
+      .filter((row) => row.type === 'config_user')
+      .map((row) => row.id);
+    const storedConfigRoles = moderatorRows
+      .filter((row) => row.type === 'config_role')
+      .map((row) => row.id);
+    const hasStoredModerators = moderatorRows.some(
+      (row) => row.type === 'user' || row.type === 'role',
+    );
+    const hasStoredConfigManagers = moderatorRows.some(
+      (row) => row.type === 'config_user' || row.type === 'config_role',
+    );
 
     return defaultGuildConfig({
       ...parsedSettings,
@@ -111,6 +129,14 @@ export class ConfigStore {
         initialized || hasStoredModerators
           ? storedModeratorRoles
           : this.defaults.moderatorRoles,
+      configUsers:
+        initialized || hasStoredConfigManagers
+          ? storedConfigUsers
+          : this.defaults.configUsers,
+      configRoles:
+        initialized || hasStoredConfigManagers
+          ? storedConfigRoles
+          : this.defaults.configRoles,
     });
   }
 
@@ -197,6 +223,18 @@ export class ConfigStore {
       ...this.defaults.moderatorRoles.map((id) => ({
         guildId,
         type: 'role' as const,
+        id,
+        createdAt: now,
+      })),
+      ...this.defaults.configUsers.map((id) => ({
+        guildId,
+        type: 'config_user' as const,
+        id,
+        createdAt: now,
+      })),
+      ...this.defaults.configRoles.map((id) => ({
+        guildId,
+        type: 'config_role' as const,
         id,
         createdAt: now,
       })),
@@ -320,14 +358,14 @@ export class ConfigStore {
       );
   }
 
-  async addModerator(guildId: string, type: 'user' | 'role', id: string) {
+  async addModerator(guildId: string, type: ModeratorType, id: string) {
     await this.db
       .insert(moderators)
       .values({ guildId, type, id, createdAt: new Date().toISOString() })
       .onConflictDoNothing();
   }
 
-  async removeModerator(guildId: string, type: 'user' | 'role', id: string) {
+  async removeModerator(guildId: string, type: ModeratorType, id: string) {
     await this.markGuildDefaultsInitialized(guildId);
     await this.db
       .delete(moderators)
@@ -340,7 +378,23 @@ export class ConfigStore {
       );
   }
 
-  async setModerators(guildId: string, type: 'user' | 'role', ids: string[]) {
+  async setModerators(guildId: string, type: ModeratorType, ids: string[]) {
+    await this.setAccessList(guildId, type, ids);
+  }
+
+  async setConfigManagers(
+    guildId: string,
+    type: ConfigManagerType,
+    ids: string[],
+  ) {
+    await this.setAccessList(guildId, type, ids);
+  }
+
+  private async setAccessList(
+    guildId: string,
+    type: AccessListType,
+    ids: string[],
+  ) {
     await this.markGuildDefaultsInitialized(guildId);
     await this.db
       .delete(moderators)
@@ -379,7 +433,7 @@ export function formatConfig(config: GuildConfig) {
   return [
     `moderation channel: ${config.moderationChannelId ?? 'unset'}`,
     `honeypots: ${config.honeypotChannelIds.length}`,
-    `crosschannel: ${config.crosschannelEnabled ? 'on' : 'off'} (${config.crosschannelChannelThreshold} channels/${config.crosschannelWindowSeconds}s)`,
+    `crosschannel: ${config.crosschannelEnabled ? 'on' : 'off'} (${config.crosschannelChannelThreshold}+ channels, ${config.crosschannelMinimumWindowSeconds}s minimum, ${config.crosschannelWindowSeconds}s max, steepness ${config.crosschannelWindowSteepness}, midpoint ${config.crosschannelWindowMidpointChannels})`,
     `review bypass: ${config.reviewBypassEnabled ? 'on' : 'off'}`,
     `punishment: ${formatPolicy(config.policies.punishment)}`,
     `dm notify: ${config.punishmentDmNotify ? 'on' : 'off'}`,
@@ -398,7 +452,11 @@ function settingsFromConfig(config: GuildConfig): GuildSettings {
   return {
     moderationChannelId: config.moderationChannelId,
     crosschannelEnabled: config.crosschannelEnabled,
+    crosschannelMinimumWindowSeconds: config.crosschannelMinimumWindowSeconds,
     crosschannelWindowSeconds: config.crosschannelWindowSeconds,
+    crosschannelWindowSteepness: config.crosschannelWindowSteepness,
+    crosschannelWindowMidpointChannels:
+      config.crosschannelWindowMidpointChannels,
     crosschannelChannelThreshold: config.crosschannelChannelThreshold,
     knownImageSimilarityThreshold: config.knownImageSimilarityThreshold,
     knownTextSimilarityThreshold: config.knownTextSimilarityThreshold,

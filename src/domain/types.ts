@@ -39,7 +39,10 @@ export type Policy = {
 export type GuildSettings = {
   moderationChannelId: string | null;
   crosschannelEnabled: boolean;
+  crosschannelMinimumWindowSeconds: number;
   crosschannelWindowSeconds: number;
+  crosschannelWindowSteepness: number;
+  crosschannelWindowMidpointChannels: number;
   crosschannelChannelThreshold: number;
   knownImageSimilarityThreshold: number;
   knownTextSimilarityThreshold: number;
@@ -57,6 +60,8 @@ export type GuildConfig = GuildSettings & {
   honeypotChannelIds: string[];
   moderatorUsers: string[];
   moderatorRoles: string[];
+  configUsers: string[];
+  configRoles: string[];
 };
 
 export type StoredAttachment = {

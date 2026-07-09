@@ -14,6 +14,7 @@ const AuthMode = Schema.Literals(['team', 'users']);
 const ImageStorageDriver = Schema.Literal('filesystem');
 const OptionalString = Schema.optionalKey(Schema.String);
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
+const PositiveNumber = Schema.Finite.check(Schema.isGreaterThan(0));
 const NonNegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const Threshold = Schema.Finite.check(
   Schema.isBetween({ minimum: 0, maximum: 1 }),
@@ -22,6 +23,7 @@ const OptionalStringArray = Schema.optionalKey(Schema.Array(Schema.String));
 const OptionalStringValue = Schema.optionalKey(Schema.String);
 const OptionalBoolean = Schema.optionalKey(Schema.Boolean);
 const OptionalPositiveInteger = Schema.optionalKey(PositiveInteger);
+const OptionalPositiveNumber = Schema.optionalKey(PositiveNumber);
 const OptionalThreshold = Schema.optionalKey(Threshold);
 const OptionalNonNegativeIntegerOrNull = Schema.optionalKey(
   Schema.Union([NonNegativeInteger, Schema.Null]),
@@ -33,22 +35,22 @@ const OptionalPunishmentAction = Schema.optionalKey(
   Schema.Literals(punishmentActions),
 );
 
-const defaultTextAdditionalSignalModels = [
-  'google/gemma-4-26b-a4b-it:free',
-  'nvidia/nemotron-3.5-content-safety:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-  'poolside/laguna-m.1:free',
-  'tencent/hy3:free',
-  'poolside/laguna-xs-2.1:free',
+const defaultTextAdditionalSignalModels: string[] = [
+  // 'google/gemma-4-26b-a4b-it:free',
+  // 'nvidia/nemotron-3.5-content-safety:free',
+  // 'nvidia/nemotron-3-ultra-550b-a55b:free',
+  // 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  // 'poolside/laguna-m.1:free',
+  // 'tencent/hy3:free',
+  // 'poolside/laguna-xs-2.1:free',
 ];
 
-const defaultImageAdditionalSignalModels = [
-  'google/gemma-4-26b-a4b-it:free',
-  'nvidia/nemotron-3.5-content-safety:free',
-  'nvidia/nemotron-3-ultra-550b-a55b:free',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-  'poolside/laguna-m.1:free',
+const defaultImageAdditionalSignalModels: string[] = [
+  // 'google/gemma-4-26b-a4b-it:free',
+  // 'nvidia/nemotron-3.5-content-safety:free',
+  // 'nvidia/nemotron-3-ultra-550b-a55b:free',
+  // 'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  // 'poolside/laguna-m.1:free',
 ];
 
 const EnvSchema = Schema.Struct({
@@ -91,7 +93,11 @@ const EnvSchema = Schema.Struct({
   HONEYBOT_DEFAULT_MODERATOR_USER_IDS: OptionalStringArray,
   HONEYBOT_DEFAULT_MODERATOR_ROLE_IDS: OptionalStringArray,
   HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED: OptionalBoolean,
+  HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS: OptionalPositiveInteger,
   HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS: OptionalPositiveInteger,
+  HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS: OptionalPositiveNumber,
+  HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS:
+    OptionalPositiveNumber,
   HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD: OptionalPositiveInteger,
   HONEYBOT_DEFAULT_KNOWN_IMAGE_SIMILARITY_THRESHOLD: OptionalThreshold,
   HONEYBOT_DEFAULT_KNOWN_TEXT_SIMILARITY_THRESHOLD: OptionalThreshold,
@@ -133,9 +139,18 @@ export const deploymentGuildDefaults: GuildConfig = defaultGuildConfig({
   crosschannelEnabled:
     env.HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED ??
     codeDefaults.crosschannelEnabled,
+  crosschannelMinimumWindowSeconds:
+    env.HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS ??
+    codeDefaults.crosschannelMinimumWindowSeconds,
   crosschannelWindowSeconds:
     env.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS ??
     codeDefaults.crosschannelWindowSeconds,
+  crosschannelWindowSteepness:
+    env.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS ??
+    codeDefaults.crosschannelWindowSteepness,
+  crosschannelWindowMidpointChannels:
+    env.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS ??
+    codeDefaults.crosschannelWindowMidpointChannels,
   crosschannelChannelThreshold:
     env.HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD ??
     codeDefaults.crosschannelChannelThreshold,
@@ -174,6 +189,8 @@ export const deploymentGuildDefaults: GuildConfig = defaultGuildConfig({
   moderatorRoles: [
     ...(env.HONEYBOT_DEFAULT_MODERATOR_ROLE_IDS ?? codeDefaults.moderatorRoles),
   ],
+  configUsers: [...codeDefaults.configUsers],
+  configRoles: [...codeDefaults.configRoles],
   policies: {
     honeypot_prevention: policyDefaults(
       codeDefaults.policies.honeypot_prevention,
@@ -337,9 +354,20 @@ function normalizeEnv(raw: NodeJS.ProcessEnv): Record<string, unknown> {
     HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED: optionalBoolean(
       raw.HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED,
     ),
+    HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS:
+      optionalPositiveInteger(
+        raw.HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS,
+      ),
     HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS: optionalPositiveInteger(
       raw.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS,
     ),
+    HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS: optionalPositiveNumber(
+      raw.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS,
+    ),
+    HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS:
+      optionalPositiveNumber(
+        raw.HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS,
+      ),
     HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD: optionalPositiveInteger(
       raw.HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD,
     ),
@@ -439,6 +467,11 @@ function optionalPositiveInteger(value: string | undefined) {
 }
 
 function optionalThreshold(value: string | undefined) {
+  if (value?.trim() === '') return undefined;
+  return value === undefined ? undefined : Number(value);
+}
+
+function optionalPositiveNumber(value: string | undefined) {
   if (value?.trim() === '') return undefined;
   return value === undefined ? undefined : Number(value);
 }

@@ -16,10 +16,12 @@ import { GlobalBanService } from './services/globalBanList.js';
 import { MessageCache } from './services/messageCache.js';
 import { ModelStore } from './services/modelStore.js';
 import { FileStorage } from './storage/fileStorage.js';
+import { loadVerboseLogging } from './services/verbose.js';
 
 const EPHEMERAL = 1 << 6;
 
 const database = openDatabase(env.DATABASE_URL);
+await loadVerboseLogging(database.db);
 const storage = new FileStorage(env.IMAGE_STORAGE_DIR);
 const configStore = new ConfigStore(database.db, deploymentGuildDefaults);
 const modelStore = new ModelStore(database.db, {

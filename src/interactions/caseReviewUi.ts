@@ -56,14 +56,22 @@ export function caseReviewMessage(
   } as MessageCreateOptions;
 }
 
-export function caseReviewEdit(input: CaseReviewInput): MessageEditOptions {
+export function caseReviewEdit(
+  input: CaseReviewInput,
+  existingComponents: readonly unknown[] = [],
+): MessageEditOptions {
   const files = reviewFiles(input.attachments, input.storage);
+  const nextComponents = caseReviewComponents(
+    input,
+    files.map((file) => file.filename),
+  );
+  const resolvedComponents = resolutionAndActions(existingComponents);
   return {
     files: files.map((file) => file.attachment),
-    components: caseReviewComponents(
-      input,
-      files.map((file) => file.filename),
-    ),
+    components:
+      resolvedComponents.length > 0
+        ? [...withoutResolutionOrActions(nextComponents), ...resolvedComponents]
+        : nextComponents,
     allowedMentions: allowedMentions(input),
   } as MessageEditOptions;
 }
@@ -268,6 +276,22 @@ function withoutResolutionOrActions(existingComponents: readonly unknown[]) {
     .filter((component) => component.type !== 1);
 }
 
+function resolutionAndActions(existingComponents: readonly unknown[]) {
+  const cloned = existingComponents.map((component) =>
+    cloneComponent(component),
+  );
+  const resolutionIndex = cloned.findIndex((component) =>
+    isResolutionContainer(component),
+  );
+  if (resolutionIndex === -1) return [];
+
+  return cloned
+    .slice(resolutionIndex)
+    .filter(
+      (component) => isResolutionContainer(component) || component.type === 1,
+    );
+}
+
 function cloneComponent(component: unknown): RawComponent {
   if (
     component &&
@@ -431,7 +455,7 @@ function reviewFiles(attachments: CaseAttachment[], storage: FileStorage) {
 
 function allowedMentions(input: CaseReviewInput) {
   return {
-    users: [input.userId, ...input.moderatorUserIds],
+    users: input.moderatorUserIds,
     roles: input.moderatorRoleIds,
   };
 }

@@ -4,6 +4,15 @@ import type { Db } from '../db/database.js';
 import { models } from '../db/schema.js';
 import type { ModelPurpose } from '../domain/types.js';
 
+const guildModelOverridePurposes = new Set<ModelPurpose>([
+  'text_classifier',
+  'image_classifier',
+]);
+
+function canOverrideModelId(purpose: ModelPurpose) {
+  return guildModelOverridePurposes.has(purpose);
+}
+
 export type ModelDefaults = Record<
   ModelPurpose,
   { provider: string; modelId: string | null }
@@ -34,7 +43,9 @@ export class ModelStore {
     const provider = row?.provider ?? this.defaultProvider(purpose);
     return {
       provider,
-      modelId: row?.modelId ?? this.defaultModel(purpose),
+      modelId: canOverrideModelId(purpose)
+        ? (row?.modelId ?? this.defaultModel(purpose))
+        : this.defaultModel(purpose),
       apiKey: row?.encryptedApiKey
         ? decryptKey(
             row.encryptedApiKey,
@@ -53,6 +64,7 @@ export class ModelStore {
     provider: string,
     modelId: string | null,
   ) {
+    const guildModelId = canOverrideModelId(purpose) ? modelId : null;
     const now = new Date().toISOString();
     await this.db
       .insert(models)
@@ -60,13 +72,13 @@ export class ModelStore {
         guildId,
         purpose,
         provider,
-        modelId,
+        modelId: guildModelId,
         createdAt: now,
         updatedAt: now,
       })
       .onConflictDoUpdate({
         target: [models.guildId, models.purpose],
-        set: { provider, modelId, updatedAt: now },
+        set: { provider, modelId: guildModelId, updatedAt: now },
       });
   }
 
@@ -84,7 +96,9 @@ export class ModelStore {
         guildId,
         purpose,
         provider: row?.provider ?? this.defaultProvider(purpose),
-        modelId: row?.modelId ?? this.defaultModel(purpose),
+        modelId: canOverrideModelId(purpose)
+          ? (row?.modelId ?? this.defaultModel(purpose))
+          : null,
         encryptedApiKey: encrypted.encrypted,
         apiKeyNonce: encrypted.nonce,
         apiKeyAuthTag: encrypted.authTag,

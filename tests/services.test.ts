@@ -11,7 +11,14 @@ import { defaultGuildConfig } from '../src/domain/defaults.js';
 import { handleMessageCreate } from '../src/events/messageCreate.js';
 import { FairQueue } from '../src/queues/fairQueue.js';
 import { CaseStore } from '../src/services/caseStore.js';
-import { DuplicateDetector } from '../src/services/duplicateDetector.js';
+import {
+  crosschannelCurveSvg,
+  renderCrosschannelCurveImage,
+} from '../src/services/crosschannelGraph.js';
+import {
+  crosschannelAllowedWindowSeconds,
+  DuplicateDetector,
+} from '../src/services/duplicateDetector.js';
 import type { EmbeddingResult } from '../src/services/embeddings.js';
 import {
   EvidenceAnalyzer,
@@ -19,6 +26,12 @@ import {
 } from '../src/services/evidenceAnalyzer.js';
 import { MessageCache } from '../src/services/messageCache.js';
 import { ModelStore } from '../src/services/modelStore.js';
+import {
+  isVerboseLoggingEnabled,
+  loadVerboseLogging,
+  setVerboseLogging,
+  toggleVerboseLogging,
+} from '../src/services/verbose.js';
 import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
 import type { AnalysisResult } from '../src/domain/types.js';
 import type { CachedMessage, ClassificationResult } from '../src/types.js';
@@ -58,6 +71,34 @@ describe('MessageCache', () => {
 });
 
 describe('DuplicateDetector', () => {
+  it('uses a normalized logistic S-curve for cross-channel windows', () => {
+    const config = defaultGuildConfig();
+
+    expect(crosschannelAllowedWindowSeconds(1, config)).toBe(0);
+    expect(crosschannelAllowedWindowSeconds(2, config)).toBe(5);
+    expect(crosschannelAllowedWindowSeconds(13, config)).toBeGreaterThan(1750);
+    expect(crosschannelAllowedWindowSeconds(13, config)).toBeLessThan(1850);
+    expect(crosschannelAllowedWindowSeconds(40, config)).toBeLessThanOrEqual(
+      3600,
+    );
+  });
+
+  it('renders the cross-channel curve as an image with point labels', async () => {
+    const config = defaultGuildConfig();
+    const svg = crosschannelCurveSvg(config);
+
+    expect(svg).toContain('2 ≤ channels &lt; 32.5');
+    expect(svg).toContain('2ch · 5s');
+    expect(svg).toContain('13ch · 29m54s');
+    expect(svg).toContain('fill-opacity="0.88"');
+
+    const image = await renderCrosschannelCurveImage(config);
+    expect(image.filename).toBe('honeybot-crosschannel-curve.png');
+    expect(image.buffer.subarray(0, 8)).toEqual(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    );
+  });
+
   it('matches repeated content across distinct channels within the window', () => {
     const detector = new DuplicateDetector();
     const config = defaultGuildConfig({
@@ -172,6 +213,96 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
+  it('sends DMs before prevention actions that remove the member', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    const deleted: string[] = [];
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild(deleted, actions);
+    const message = fakeDiscordMessage({
+      id: 'm1',
+      channelId: 'honey',
+      content: 'free nitro',
+      guild,
+    });
+    guild.register(message);
+
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual(['dm', 'ban']);
+    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'dm_notified')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('blocks prevention when DM notification is required but not delivered', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    const deleted: string[] = [];
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild(deleted, actions, {
+      dmError: new Error('closed'),
+    });
+    const message = fakeDiscordMessage({
+      id: 'm1',
+      channelId: 'honey',
+      content: 'free nitro',
+      guild,
+    });
+    guild.register(message);
+
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual([]);
+    expect(dependencies.moderationQueue.enqueue).not.toHaveBeenCalled();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
   it('deletes every duplicate message during cross-channel prevention', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({ moderationChannelId: null });
@@ -217,7 +348,7 @@ describe('handleMessageCreate', () => {
     await handleMessageCreate(second, dependencies);
 
     expect(deleted).toEqual(['m1', 'm2']);
-    expect(actions).toEqual(['timeout', 'delete:m1', 'delete:m2']);
+    expect(actions).toEqual(['dm', 'timeout', 'delete:m1', 'delete:m2']);
     expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
     database.sqlite.close();
   });
@@ -283,6 +414,24 @@ describe('ModelStore', () => {
     database.sqlite.close();
   });
 
+  it('ignores guild model overrides for embedding purposes', async () => {
+    const database = testDatabase();
+    const store = new ModelStore(database.db, testModelDefaults());
+
+    await store.setModel(
+      'guild',
+      'text_embeddings',
+      'custom-provider',
+      'guild-embed-model',
+    );
+    await expect(store.get('guild', 'text_embeddings')).resolves.toMatchObject({
+      provider: 'custom-provider',
+      modelId: 'text-embed',
+    });
+
+    database.sqlite.close();
+  });
+
   it('requires a valid encryption key before storing BYOK keys', async () => {
     const database = testDatabase();
     const missing = new ModelStore(
@@ -302,6 +451,25 @@ describe('ModelStore', () => {
     await expect(
       invalid.setApiKey('guild', 'text_classifier', 'secret'),
     ).rejects.toThrow('must be base64 encoded 32 bytes');
+
+    database.sqlite.close();
+  });
+});
+
+describe('verbose logging settings', () => {
+  it('persists admin verbose model logging in the database', async () => {
+    const database = testDatabase();
+
+    await setVerboseLogging(database.db, false);
+    expect(isVerboseLoggingEnabled()).toBe(false);
+
+    await expect(toggleVerboseLogging(database.db)).resolves.toBe(true);
+    expect(isVerboseLoggingEnabled()).toBe(true);
+    await expect(loadVerboseLogging(database.db)).resolves.toBe(true);
+
+    await expect(toggleVerboseLogging(database.db)).resolves.toBe(false);
+    expect(isVerboseLoggingEnabled()).toBe(false);
+    await expect(loadVerboseLogging(database.db)).resolves.toBe(false);
 
     database.sqlite.close();
   });
@@ -1077,7 +1245,27 @@ describe('CaseStore', () => {
   });
 });
 
-function fakeDiscordGuild(deleted: string[], actions: string[] = []) {
+function fakeDiscordGuild(
+  deleted: string[],
+  actions: string[] = [],
+  options: { dmError?: Error } = {},
+) {
+  const member = () => ({
+    id: 'user',
+    guild,
+    permissions: { has: () => false },
+    roles: { cache: { some: () => false } },
+    send: vi.fn(async () => {
+      if (options.dmError) throw options.dmError;
+      actions.push('dm');
+    }),
+    timeout: vi.fn(async () => {
+      actions.push('timeout');
+    }),
+    kick: vi.fn(async () => {
+      actions.push('kick');
+    }),
+  });
   const channels = new Map<
     string,
     {
@@ -1089,15 +1277,10 @@ function fakeDiscordGuild(deleted: string[], actions: string[] = []) {
     id: 'guild',
     ownerId: 'owner',
     members: {
-      fetch: vi.fn(async () => ({
-        id: 'user',
-        guild,
-        permissions: { has: () => false },
-        roles: { cache: { some: () => false } },
-        timeout: vi.fn(async () => {
-          actions.push('timeout');
-        }),
-      })),
+      fetch: vi.fn(async () => member()),
+      ban: vi.fn(async () => {
+        actions.push('ban');
+      }),
     },
     channels: {
       fetch: vi.fn(
@@ -1118,15 +1301,7 @@ function fakeDiscordGuild(deleted: string[], actions: string[] = []) {
       );
       channels.set(message.channelId, channel);
       message.guild = guild;
-      message.member = {
-        id: 'user',
-        guild,
-        permissions: { has: () => false },
-        roles: { cache: { some: () => false } },
-        timeout: vi.fn(async () => {
-          actions.push('timeout');
-        }),
-      };
+      message.member = member();
       message.delete = vi.fn(async () => {
         actions.push(`delete:${message.id}`);
         deleted.push(message.id);

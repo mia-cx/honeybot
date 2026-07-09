@@ -1,4 +1,10 @@
-import { AttachmentBuilder, PermissionFlagsBits, type Guild, type GuildMember, type Message } from 'discord.js';
+import {
+  AttachmentBuilder,
+  PermissionFlagsBits,
+  type Guild,
+  type GuildMember,
+  type Message,
+} from 'discord.js';
 import { logger } from '../logger.js';
 import type { GuildConfig, Policy } from '../domain/types.js';
 import type { CaseStore } from './caseStore.js';
@@ -15,70 +21,115 @@ export function hasBypass(member: GuildMember, config: GuildConfig) {
   if (config.moderatorUsers.includes(member.id)) return true;
   if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
-  return member.roles.cache.some((role) => config.moderatorRoles.includes(role.id));
+  return member.roles.cache.some((role) =>
+    config.moderatorRoles.includes(role.id),
+  );
 }
 
-export async function applyPolicy(member: GuildMember, policy: Policy, reason: string) {
+export async function applyPolicy(
+  member: GuildMember,
+  policy: Policy,
+  reason: string,
+) {
   await applyPolicyForUser(member.guild, member.id, policy, reason);
 }
 
-export async function applyPolicyForUser(guild: Guild, userId: string, policy: Policy, reason: string) {
+export async function applyPolicyForUser(
+  guild: Guild,
+  userId: string,
+  policy: Policy,
+  reason: string,
+) {
   switch (policy.actionType) {
     case 'log':
       return 'log action applied';
     case 'timeout': {
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return 'timeout could not be applied because the member is no longer in the guild';
-      const seconds = Math.min(policy.durationSeconds ?? 1_800, DISCORD_MAX_TIMEOUT_SECONDS);
+      if (!member)
+        return 'timeout could not be applied because the member is no longer in the guild';
+      const seconds = Math.min(
+        policy.durationSeconds ?? 1_800,
+        DISCORD_MAX_TIMEOUT_SECONDS,
+      );
       await member.timeout(seconds * 1000, reason);
       return 'timeout applied';
     }
     case 'role': {
       if (!policy.roleId) throw new Error('Role policy missing role_id');
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return 'role could not be applied because the member is no longer in the guild';
+      if (!member)
+        return 'role could not be applied because the member is no longer in the guild';
       await member.roles.add(policy.roleId, reason);
       return 'role applied';
     }
     case 'kick': {
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return 'kick could not be applied because the member is no longer in the guild';
+      if (!member)
+        return 'kick could not be applied because the member is no longer in the guild';
       await member.kick(moderationAuditReason(policy, reason));
       return 'user kicked';
     }
     case 'ban':
-      await guild.members.ban(userId, { reason: moderationAuditReason(policy, reason), deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0 });
+      await guild.members.ban(userId, {
+        reason: moderationAuditReason(policy, reason),
+        deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
+      });
       return 'user banned';
   }
 }
 
-export function honeybotAuditReason(input: { caseId: string; triggerType: string; decisionSource: string; confidence: number | null; actorId: string | null }) {
-  const confidence = input.confidence === null ? 'pending' : `${Math.round(input.confidence * 100)}%`;
+export function honeybotAuditReason(input: {
+  caseId: string;
+  triggerType: string;
+  decisionSource: string;
+  confidence: number | null;
+  actorId: string | null;
+}) {
+  const confidence =
+    input.confidence === null
+      ? 'pending'
+      : `${Math.round(input.confidence * 100)}%`;
   const actor = input.actorId ? `actor=${input.actorId}` : 'actor=bot';
   return `Honeybot case ${input.caseId} · ${input.triggerType} · ${input.decisionSource} · ${confidence} · ${actor}`;
 }
 
 export function moderationAuditReason(policy: Policy, reason: string) {
-  const prefix = policy.actionType === 'ban' ? 'Banned for likely scam • ' : policy.actionType === 'kick' ? 'Kicked for likely scam • ' : '';
+  const prefix =
+    policy.actionType === 'ban'
+      ? 'Banned for likely scam • '
+      : policy.actionType === 'kick'
+        ? 'Kicked for likely scam • '
+        : '';
   return truncate(`${prefix}${reason}`, 512);
 }
 
-export async function revertPolicy(member: GuildMember, policy: Policy, reason: string) {
+export async function revertPolicy(
+  member: GuildMember,
+  policy: Policy,
+  reason: string,
+) {
   return revertPolicyForUser(member.guild, member.id, policy, reason);
 }
 
-export async function revertPolicyForUser(guild: Guild, userId: string, policy: Policy, reason: string) {
+export async function revertPolicyForUser(
+  guild: Guild,
+  userId: string,
+  policy: Policy,
+  reason: string,
+) {
   switch (policy.actionType) {
     case 'timeout': {
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return 'timeout could not be removed because the member is no longer in the guild';
+      if (!member)
+        return 'timeout could not be removed because the member is no longer in the guild';
       await member.timeout(null, reason);
       return 'timeout removed';
     }
     case 'role': {
       if (!policy.roleId) return 'role policy had no role';
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member) return 'role could not be removed because the member is no longer in the guild';
+      if (!member)
+        return 'role could not be removed because the member is no longer in the guild';
       await member.roles.remove(policy.roleId, reason);
       return 'role removed';
     }
@@ -110,43 +161,110 @@ export async function dmPunishedUser(input: {
   const messages = await input.caseStore.listCaseMessages(input.caseId);
   const attachments = await input.caseStore.listCaseAttachments(input.caseId);
   const firstMessage = messages[0];
-  const files = [] as Array<{ filename: string; attachment: AttachmentBuilder }>;
+  const files = [] as Array<{
+    filename: string;
+    attachment: AttachmentBuilder;
+  }>;
   const omitted: string[] = [];
 
   for (const attachment of attachments.slice(0, 8)) {
     if (!attachment.storageKey) continue;
-    if (!attachment.contentType?.startsWith('image/') || attachment.sizeBytes > 8 * 1024 * 1024) {
+    if (
+      !attachment.contentType?.startsWith('image/') ||
+      attachment.sizeBytes > 8 * 1024 * 1024
+    ) {
       omitted.push(attachment.discordAttachmentId);
       continue;
     }
     const filename = `SPOILER_${attachment.id}_${safeName(attachment.name ?? `${attachment.discordAttachmentId}.bin`)}`;
-    files.push({ filename, attachment: new AttachmentBuilder(input.storage.pathFor(attachment.storageKey), { name: filename }) });
+    files.push({
+      filename,
+      attachment: new AttachmentBuilder(
+        input.storage.pathFor(attachment.storageKey),
+        { name: filename },
+      ),
+    });
   }
 
   try {
     await input.member.send({
       flags: COMPONENTS_V2,
       files: files.map((file) => file.attachment),
-      components: punishmentDmComponents(input, firstMessage?.content ?? '', files.map((file) => file.filename)),
+      components: punishmentDmComponents(
+        input,
+        firstMessage?.content ?? '',
+        files.map((file) => file.filename),
+      ),
       allowedMentions: { parse: [] },
     });
-    await input.caseStore.addEvent(input.caseId, 'dm_notified', 'bot', null, 'Punishment DM sent', { omitted });
+    await input.caseStore.addEvent(
+      input.caseId,
+      'dm_notified',
+      'bot',
+      null,
+      'Punishment DM sent',
+      { omitted },
+    );
+    return true;
   } catch (error) {
-    logger.warn('Failed to DM punished user', { guildId: input.member.guild.id, userId: input.member.id, error: error instanceof Error ? error.message : String(error) });
-    await input.caseStore.addEvent(input.caseId, 'failed', 'bot', null, 'Punishment DM failed', { error: error instanceof Error ? error.message : String(error), omitted });
+    logger.warn('Failed to DM punished user', {
+      guildId: input.member.guild.id,
+      userId: input.member.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await input.caseStore.addEvent(
+      input.caseId,
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      {
+        error: error instanceof Error ? error.message : String(error),
+        omitted,
+      },
+    );
+    return false;
   }
 }
 
-function punishmentDmComponents(input: { member: GuildMember; caseId: string; action: string; reason: string; auditReason?: string }, messageContent: string, attachmentFilenames: string[]): RawComponent[] {
+function punishmentDmComponents(
+  input: {
+    member: GuildMember;
+    caseId: string;
+    action: string;
+    reason: string;
+    auditReason?: string;
+  },
+  messageContent: string,
+  attachmentFilenames: string[],
+): RawComponent[] {
   const components: RawComponent[] = [
-    text(`## 🍯 Honeybot moderation notice\n-# Server: **${input.member.guild.name}** · Case \`${input.caseId}\``),
+    text(
+      `## 🍯 Honeybot moderation notice\n-# Server: **${input.member.guild.name}** · Case \`${input.caseId}\``,
+    ),
     separator(),
-    text(['## Punishment', `**Action:** ${actionLabel(input.action)}`, '', '**Reason**', quote(input.auditReason ?? input.reason, 900)].join('\n')),
+    text(
+      [
+        '## Punishment',
+        `**Action:** ${actionLabel(input.action)}`,
+        '',
+        '**Reason**',
+        quote(input.auditReason ?? input.reason, 900),
+      ].join('\n'),
+    ),
     separator(),
-    text(['## Message that triggered this', messageContent ? quote(messageContent, 1500) : '_empty or attachment-only_'].join('\n')),
+    text(
+      [
+        '## Message that triggered this',
+        messageContent
+          ? quote(messageContent, 1500)
+          : '_empty or attachment-only_',
+      ].join('\n'),
+    ),
   ];
 
-  if (attachmentFilenames.length > 0) components.push(mediaGallery(attachmentFilenames));
+  if (attachmentFilenames.length > 0)
+    components.push(mediaGallery(attachmentFilenames));
 
   return [container(components)];
 }

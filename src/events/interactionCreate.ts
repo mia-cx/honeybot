@@ -18,7 +18,12 @@ import type { ConfigStore } from '../services/configStore.js';
 import { formatPolicy } from '../services/configStore.js';
 import type { ModelStore } from '../services/modelStore.js';
 import type { CaseStore } from '../services/caseStore.js';
-import { canManageHoneybot, hasGlobalAuthority } from '../services/auth.js';
+import {
+  canActOnCases,
+  canConfigureHoneybot,
+  hasGlobalAuthority,
+} from '../services/auth.js';
+import { renderCrosschannelCurveImage } from '../services/crosschannelGraph.js';
 import { parseDurationSeconds } from '../services/duration.js';
 import { toggleVerboseLogging } from '../services/verbose.js';
 import type {
@@ -121,6 +126,7 @@ async function settingsReplyForGuild(
     policyScope,
     models,
     deps.additionalSignalModels,
+    await settingsCurveImage(config, page),
   );
 }
 
@@ -140,7 +146,14 @@ async function settingsUpdateForGuild(
     policyScope,
     models,
     deps.additionalSignalModels,
+    await settingsCurveImage(config, page),
   );
+}
+
+async function settingsCurveImage(config: GuildConfig, page: SettingsPage) {
+  return page === 'triggers_crosschannel'
+    ? renderCrosschannelCurveImage(config)
+    : undefined;
 }
 
 async function settingsModelConfigs(
@@ -212,16 +225,26 @@ export async function handleInteractionCreate(
       await handleKnownCorpusButton(interaction, deps);
       return;
     }
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
-      await interaction.reply({
-        content: 'Nope. Case actions are moderator-only.',
-        ephemeral: true,
-      });
-      return;
-    }
-    if (interaction.customId.startsWith('settings:'))
+    if (interaction.customId.startsWith('settings:')) {
+      if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
+        await interaction.reply({
+          content:
+            'Nope. Honeybot configuration is restricted to server managers/configurators.',
+          ephemeral: true,
+        });
+        return;
+      }
       await handleSettingsButton(interaction, deps);
-    else await handleCaseButton(interaction, deps);
+    } else {
+      if (!(await canActOnCases(interaction, deps.configStore))) {
+        await interaction.reply({
+          content: 'Nope. Case actions are moderator-only.',
+          ephemeral: true,
+        });
+        return;
+      }
+      await handleCaseButton(interaction, deps);
+    }
     return;
   }
 
@@ -229,7 +252,7 @@ export async function handleInteractionCreate(
     interaction.isStringSelectMenu() &&
     interaction.customId.startsWith('settings:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -242,7 +265,7 @@ export async function handleInteractionCreate(
     (interaction.customId.startsWith('settings:channel:') ||
       interaction.customId.startsWith('settings:channels:'))
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -254,7 +277,7 @@ export async function handleInteractionCreate(
     interaction.isMentionableSelectMenu() &&
     interaction.customId.startsWith('settings:mentionables:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -266,7 +289,7 @@ export async function handleInteractionCreate(
     interaction.isUserSelectMenu() &&
     interaction.customId.startsWith('settings:users:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -278,7 +301,7 @@ export async function handleInteractionCreate(
     interaction.isRoleSelectMenu() &&
     interaction.customId.startsWith('settings:roles:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -290,7 +313,7 @@ export async function handleInteractionCreate(
     interaction.isRoleSelectMenu() &&
     interaction.customId.startsWith('settings:policyRole:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -306,7 +329,7 @@ export async function handleInteractionCreate(
       interaction.customId.startsWith('settings:modelKeyModal:') ||
       interaction.customId === 'settings:honeypotWarningModal')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -318,7 +341,7 @@ export async function handleInteractionCreate(
     interaction.isModalSubmit() &&
     interaction.customId.startsWith('model:key:')
   ) {
-    if (!(await canManageHoneybot(interaction, deps.configStore))) {
+    if (!(await canConfigureHoneybot(interaction, deps.configStore))) {
       await interaction.reply({ content: 'Nope.', ephemeral: true });
       return;
     }
@@ -346,7 +369,7 @@ async function canUseCommand(
   ) {
     return hasGlobalAuthority(interaction);
   }
-  return canManageHoneybot(interaction, deps.configStore);
+  return canConfigureHoneybot(interaction, deps.configStore);
 }
 
 async function handleCommand(
@@ -485,7 +508,7 @@ async function handleCommand(
         return;
       }
       if (sub === 'verbose') {
-        const enabled = toggleVerboseLogging();
+        const enabled = await toggleVerboseLogging(deps.db);
         await interaction.reply({
           content: `Honeybot verbose model logging is now ${enabled ? 'enabled' : 'disabled'}.`,
           ephemeral: true,
@@ -1068,20 +1091,31 @@ async function handleSettingsMentionableSelect(
   deps: InteractionDependencies,
 ) {
   const [, , key, pageValue] = interaction.customId.split(':');
-  if (key !== 'moderators') {
+  if (key === 'moderators') {
+    await deps.configStore.setModerators(interaction.guildId, 'user', [
+      ...interaction.users.keys(),
+    ]);
+    await deps.configStore.setModerators(interaction.guildId, 'role', [
+      ...interaction.roles.keys(),
+    ]);
+  } else if (key === 'configManagers') {
+    await deps.configStore.setConfigManagers(
+      interaction.guildId,
+      'config_user',
+      [...interaction.users.keys()],
+    );
+    await deps.configStore.setConfigManagers(
+      interaction.guildId,
+      'config_role',
+      [...interaction.roles.keys()],
+    );
+  } else {
     await interaction.reply({
       content: 'Unknown mentionable setting.',
       ephemeral: true,
     });
     return;
   }
-
-  await deps.configStore.setModerators(interaction.guildId, 'user', [
-    ...interaction.users.keys(),
-  ]);
-  await deps.configStore.setModerators(interaction.guildId, 'role', [
-    ...interaction.roles.keys(),
-  ]);
   await interaction.update(
     await settingsUpdateForGuild(
       deps,
@@ -1188,8 +1222,9 @@ async function handleSettingsModal(
       return;
     }
     const provider = interaction.fields.getTextInputValue('provider').trim();
-    const modelId =
-      interaction.fields.getTextInputValue('model_id').trim() || null;
+    const modelId = isEmbeddingPurpose(purpose)
+      ? null
+      : interaction.fields.getTextInputValue('model_id').trim() || null;
     if (!provider) {
       await interaction.reply({
         content: 'Provider is required.',
@@ -1323,6 +1358,18 @@ async function clearSettingTarget(
       await deps.configStore.setModerators(interaction.guildId, 'user', []);
       await deps.configStore.setModerators(interaction.guildId, 'role', []);
       break;
+    case 'configManagers':
+      await deps.configStore.setConfigManagers(
+        interaction.guildId,
+        'config_user',
+        [],
+      );
+      await deps.configStore.setConfigManagers(
+        interaction.guildId,
+        'config_role',
+        [],
+      );
+      break;
     case 'moderatorUsers':
       await deps.configStore.setModerators(interaction.guildId, 'user', []);
       break;
@@ -1353,7 +1400,9 @@ async function handleModelCommand(
       true,
     ) as ModelPurpose;
     const provider = interaction.options.getString('provider') ?? 'openrouter';
-    const modelId = interaction.options.getString('model_id');
+    const modelId = isEmbeddingPurpose(purpose)
+      ? null
+      : interaction.options.getString('model_id');
     await deps.modelStore.setModel(
       interaction.guildId,
       purpose,
@@ -1481,8 +1530,28 @@ async function handleCaseButton(
     const member = await interaction.guild.members
       .fetch(caseRow.userId)
       .catch(() => null);
-    if (config.punishmentDmNotify && member) {
-      await dmPunishedUser({
+    if (config.punishmentDmNotify) {
+      if (!member) {
+        await deps.caseStore.addEvent(
+          caseId,
+          'failed',
+          'bot',
+          null,
+          'Punishment DM failed',
+          {
+            error: 'Cannot DM user because they are no longer in the guild',
+            omitted: [],
+          },
+        );
+        await interaction.reply({
+          content:
+            'Punishment not applied: Honeybot could not DM the user because they are no longer in the guild.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      const dmSent = await dmPunishedUser({
         member,
         caseId,
         action: policy.actionType,
@@ -1491,6 +1560,14 @@ async function handleCaseButton(
         caseStore: deps.caseStore,
         storage: deps.storage,
       });
+      if (!dmSent) {
+        await interaction.reply({
+          content:
+            'Punishment not applied: Discord did not confirm the DM notification was sent.',
+          ephemeral: true,
+        });
+        return;
+      }
     }
     const applyResult = await deps.moderationQueue.enqueue(
       interaction.guildId,
@@ -1665,13 +1742,20 @@ function isModelPurpose(value: string | undefined): value is ModelPurpose {
   return modelPurposes.some((purpose) => purpose === value);
 }
 
+function isEmbeddingPurpose(purpose: ModelPurpose) {
+  return purpose === 'text_embeddings' || purpose === 'image_embeddings';
+}
+
 function modelPageForPurpose(purpose: ModelPurpose): SettingsPage {
   return `model_${purpose}` as SettingsPage;
 }
 
 function isEditableSetting(key: string | undefined): key is EditableSetting {
   return (
+    key === 'crosschannelMinimumWindowSeconds' ||
     key === 'crosschannelWindowSeconds' ||
+    key === 'crosschannelWindowSteepness' ||
+    key === 'crosschannelWindowMidpointChannels' ||
     key === 'crosschannelChannelThreshold' ||
     key === 'evidenceConfidenceThreshold' ||
     key === 'knownTextSimilarityThreshold' ||

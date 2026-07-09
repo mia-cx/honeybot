@@ -18,6 +18,11 @@ const managedKeys = [
   'MODEL_RETRY_INITIAL_DELAY_MS',
   'MODEL_RETRY_MAX_DELAY_MS',
   'GLOBAL_AUTH_MODE',
+  'HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS',
+  'HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS',
+  'HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS',
+  'HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS',
+  'HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD',
 ] as const;
 
 const savedEnv = new Map<string, string | undefined>();
@@ -50,23 +55,9 @@ describe('environment defaults', () => {
     expect(env.DEFAULT_IMAGE_PRIMARY_PROVIDER).toBe('openrouter');
     expect(env.DEFAULT_IMAGE_PRIMARY_MODEL).toBe('google/gemma-4-31b-it');
     expect(env.ADDITIONAL_TEXT_SIGNAL_PROVIDER).toBe('openrouter');
-    expect(env.ADDITIONAL_TEXT_SIGNAL_MODELS).toEqual([
-      'google/gemma-4-26b-a4b-it:free',
-      'nvidia/nemotron-3.5-content-safety:free',
-      'nvidia/nemotron-3-ultra-550b-a55b:free',
-      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-      'poolside/laguna-m.1:free',
-      'tencent/hy3:free',
-      'poolside/laguna-xs-2.1:free',
-    ]);
+    expect(env.ADDITIONAL_TEXT_SIGNAL_MODELS).toEqual([]);
     expect(env.ADDITIONAL_IMAGE_SIGNAL_PROVIDER).toBe('openrouter');
-    expect(env.ADDITIONAL_IMAGE_SIGNAL_MODELS).toEqual([
-      'google/gemma-4-26b-a4b-it:free',
-      'nvidia/nemotron-3.5-content-safety:free',
-      'nvidia/nemotron-3-ultra-550b-a55b:free',
-      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-      'poolside/laguna-m.1:free',
-    ]);
+    expect(env.ADDITIONAL_IMAGE_SIGNAL_MODELS).toEqual([]);
     expect(env.DEFAULT_TEXT_EMBEDDINGS_PROVIDER).toBe('openrouter');
     expect(env.DEFAULT_TEXT_EMBEDDINGS_MODEL).toBe(
       'nvidia/llama-nemotron-embed-vl-1b-v2:free',
@@ -80,5 +71,15 @@ describe('environment defaults', () => {
     expect(env.MODEL_RETRY_INITIAL_DELAY_MS).toBe(300);
     expect(env.MODEL_RETRY_MAX_DELAY_MS).toBe(15_000);
     expect(env.GLOBAL_AUTH_MODE).toBe('team');
+  });
+
+  it('uses the curve-based cross-channel deployment defaults', async () => {
+    const { deploymentGuildDefaults } = await import('../src/env.js');
+
+    expect(deploymentGuildDefaults.crosschannelMinimumWindowSeconds).toBe(5);
+    expect(deploymentGuildDefaults.crosschannelWindowSeconds).toBe(3600);
+    expect(deploymentGuildDefaults.crosschannelWindowSteepness).toBe(0.49);
+    expect(deploymentGuildDefaults.crosschannelWindowMidpointChannels).toBe(13);
+    expect(deploymentGuildDefaults.crosschannelChannelThreshold).toBe(2);
   });
 });

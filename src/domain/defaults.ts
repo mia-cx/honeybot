@@ -1,9 +1,17 @@
-import type { GuildConfig, GuildSettings, Policy, PolicyScope } from './types.js';
+import type {
+  GuildConfig,
+  GuildSettings,
+  Policy,
+  PolicyScope,
+} from './types.js';
 
 export const defaultSettings: GuildSettings = {
   moderationChannelId: null,
   crosschannelEnabled: true,
-  crosschannelWindowSeconds: 60,
+  crosschannelMinimumWindowSeconds: 5,
+  crosschannelWindowSeconds: 3_600,
+  crosschannelWindowSteepness: 0.49,
+  crosschannelWindowMidpointChannels: 13,
   crosschannelChannelThreshold: 2,
   knownImageSimilarityThreshold: 0.92,
   knownTextSimilarityThreshold: 0.82,
@@ -40,18 +48,24 @@ export const defaultPolicies: Record<PolicyScope, Policy> = {
   },
 };
 
-export function defaultGuildConfig(overrides: Partial<GuildConfig> = {}): GuildConfig {
+export function defaultGuildConfig(
+  overrides: Partial<GuildConfig> = {},
+): GuildConfig {
   return {
     ...defaultSettings,
     policies: clonePolicies(defaultPolicies),
     honeypotChannelIds: [],
     moderatorUsers: [],
     moderatorRoles: [],
+    configUsers: [],
+    configRoles: [],
     ...overrides,
   };
 }
 
-export function clonePolicies(policies: Record<PolicyScope, Policy>): Record<PolicyScope, Policy> {
+export function clonePolicies(
+  policies: Record<PolicyScope, Policy>,
+): Record<PolicyScope, Policy> {
   return {
     honeypot_prevention: { ...policies.honeypot_prevention },
     crosschannel_prevention: { ...policies.crosschannel_prevention },

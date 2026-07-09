@@ -19,6 +19,10 @@ describe('fresh guild defaults', () => {
       actionType: 'ban',
       deleteMessages: true,
     });
+    expect(config.crosschannelMinimumWindowSeconds).toBe(5);
+    expect(config.crosschannelWindowSeconds).toBe(3600);
+    expect(config.crosschannelWindowSteepness).toBe(0.49);
+    expect(config.crosschannelWindowMidpointChannels).toBe(13);
     expect(config.reviewBypassEnabled).toBe(false);
     expect(config.punishmentDmNotify).toBe(true);
     expect(config.evidenceConfidenceThreshold).toBe(0.9);

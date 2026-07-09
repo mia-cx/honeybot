@@ -40,9 +40,9 @@ export class DuplicateDetector {
 
     const now = Date.now();
     const key = `${message.guildId}:${message.author.id}:${signal}`;
-    const windowMs = config.crosschannelWindowSeconds * 1000;
+    const maxWindowMs = config.crosschannelWindowSeconds * 1000;
     const fresh = (this.entries.get(key) ?? []).filter(
-      (entry) => now - entry.timestamp <= windowMs,
+      (entry) => now - entry.timestamp <= maxWindowMs,
     );
 
     fresh.push({
@@ -53,15 +53,15 @@ export class DuplicateDetector {
     });
     this.entries.set(key, fresh.slice(-config.crosschannelMaxEntriesPerUser));
 
-    const channelIds = [...new Set(fresh.map((entry) => entry.channelId))];
-    const messages = fresh.map(({ channelId, messageId }) => ({
-      channelId,
-      messageId,
-    }));
+    const match = matchingWindow(fresh, config);
+    const resultEntries = match ?? fresh;
     return {
-      matched: channelIds.length >= config.crosschannelChannelThreshold,
-      channelIds,
-      messages,
+      matched: match !== null,
+      channelIds: uniqueChannelIds(resultEntries),
+      messages: resultEntries.map(({ channelId, messageId }) => ({
+        channelId,
+        messageId,
+      })),
     };
   }
 
@@ -73,4 +73,63 @@ export class DuplicateDetector {
       else this.entries.set(key, fresh);
     }
   }
+}
+
+function matchingWindow(
+  entries: DuplicateEntry[],
+  config: GuildConfig,
+): DuplicateEntry[] | null {
+  const latest = entries.at(-1);
+  if (!latest) return null;
+
+  for (let start = 0; start < entries.length; start += 1) {
+    const candidate = entries.slice(start);
+    const channelCount = uniqueChannelIds(candidate).length;
+    if (channelCount < config.crosschannelChannelThreshold) continue;
+
+    const elapsedSeconds = (latest.timestamp - candidate[0]!.timestamp) / 1000;
+    if (
+      elapsedSeconds <= crosschannelAllowedWindowSeconds(channelCount, config)
+    ) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
+export function crosschannelAllowedWindowSeconds(
+  channelCount: number,
+  config: Pick<
+    GuildConfig,
+    | 'crosschannelMinimumWindowSeconds'
+    | 'crosschannelWindowSeconds'
+    | 'crosschannelWindowSteepness'
+    | 'crosschannelWindowMidpointChannels'
+  >,
+) {
+  if (channelCount < 2) return 0;
+  const sigmoid = (x: number) =>
+    1 /
+    (1 +
+      Math.exp(
+        -config.crosschannelWindowSteepness *
+          (x - config.crosschannelWindowMidpointChannels),
+      ));
+  const floor = sigmoid(2);
+  const normalized = (sigmoid(channelCount) - floor) / (1 - floor);
+  const curvedWindow =
+    config.crosschannelMinimumWindowSeconds +
+    (config.crosschannelWindowSeconds -
+      config.crosschannelMinimumWindowSeconds) *
+      normalized;
+
+  return Math.min(
+    config.crosschannelWindowSeconds,
+    Math.max(config.crosschannelMinimumWindowSeconds, curvedWindow),
+  );
+}
+
+function uniqueChannelIds(entries: DuplicateEntry[]) {
+  return [...new Set(entries.map((entry) => entry.channelId))];
 }

@@ -77,6 +77,8 @@ describe('settings UI', () => {
       honeypotChannelIds: ['111', '222'],
       moderatorUsers: ['333'],
       moderatorRoles: ['444'],
+      configUsers: ['777'],
+      configRoles: ['888'],
       moderationChannelId: '555',
       policies: {
         ...defaultGuildConfig().policies,
@@ -107,6 +109,16 @@ describe('settings UI', () => {
     ).toEqual([
       { id: '333', type: 'user' },
       { id: '444', type: 'role' },
+    ]);
+    expect(
+      select(
+        config,
+        'permissions',
+        'settings:mentionables:configManagers:permissions',
+      ).default_values,
+    ).toEqual([
+      { id: '777', type: 'user' },
+      { id: '888', type: 'role' },
     ]);
     expect(
       select(config, 'config', 'settings:channel:moderationChannelId:config')
@@ -178,7 +190,10 @@ describe('settings UI', () => {
       expect.arrayContaining([
         'settings:subcategory:triggers',
         'settings:toggle:crosschannelEnabled:triggers_crosschannel',
+        'settings:edit:crosschannelMinimumWindowSeconds:triggers_crosschannel',
         'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
+        'settings:edit:crosschannelWindowSteepness:triggers_crosschannel',
+        'settings:edit:crosschannelWindowMidpointChannels:triggers_crosschannel',
         'settings:edit:crosschannelChannelThreshold:triggers_crosschannel',
       ]),
     );
@@ -194,13 +209,41 @@ describe('settings UI', () => {
       ),
     ).toEqual([
       'settings:edit:crosschannelChannelThreshold:triggers_crosschannel',
+      'settings:edit:crosschannelMinimumWindowSeconds:triggers_crosschannel',
+      'settings:edit:crosschannelWindowSteepness:triggers_crosschannel',
+      'settings:edit:crosschannelWindowMidpointChannels:triggers_crosschannel',
       'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
     ]);
+
+    const graphReply = settingsReply(
+      config,
+      'triggers_crosschannel',
+      'punishment',
+      [],
+      undefined,
+      { filename: 'curve.png', buffer: Buffer.from('graph') },
+    );
+    expect(graphReply.files).toHaveLength(1);
+    expect(flatten(graphReply.components as Raw[])).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 12,
+          items: [
+            expect.objectContaining({
+              media: { url: 'attachment://curve.png' },
+            }),
+          ],
+        }),
+      ]),
+    );
 
     expect(
       customIds(settingsReply(config, 'permissions').components as Raw[]),
     ).toEqual(
-      expect.arrayContaining(['settings:mentionables:moderators:permissions']),
+      expect.arrayContaining([
+        'settings:mentionables:moderators:permissions',
+        'settings:mentionables:configManagers:permissions',
+      ]),
     );
 
     expect(
@@ -395,6 +438,15 @@ describe('settings UI', () => {
     ).toBeNull();
     expect(parseEditableSettingValue('retentionCaseDays', '1.5')).toBeNull();
     expect(parseEditableSettingValue('retentionCaseDays', '-1')).toBeNull();
+    expect(
+      parseEditableSettingValue('crosschannelWindowSteepness', '0.49'),
+    ).toBe(0.49);
+    expect(
+      parseEditableSettingValue('crosschannelWindowMidpointChannels', '13'),
+    ).toBe(13);
+    expect(
+      parseEditableSettingValue('crosschannelWindowSteepness', '0'),
+    ).toBeNull();
     expect(pageFromValue('nope')).toBe('none');
     expect(pageForPolicyScope('punishment')).toBe('policies_punishment');
     expect(pageForPolicyScope('honeypot_prevention')).toBe(
@@ -423,6 +475,16 @@ describe('settings UI', () => {
         apiKeyHint: null,
       }).toJSON(),
     ).toMatchObject({ custom_id: 'settings:modelModal:text_classifier' });
+    const embeddingProviderModal = modelConfigModal('text_embeddings', {
+      purpose: 'text_embeddings',
+      provider: 'openrouter',
+      modelId: 'text-embed',
+      apiKeyHint: null,
+    }).toJSON();
+    expect(embeddingProviderModal).toMatchObject({
+      custom_id: 'settings:modelModal:text_embeddings',
+    });
+    expect(JSON.stringify(embeddingProviderModal)).not.toContain('model_id');
     expect(modelApiKeyModal('image_embeddings').toJSON()).toMatchObject({
       custom_id: 'settings:modelKeyModal:image_embeddings',
     });

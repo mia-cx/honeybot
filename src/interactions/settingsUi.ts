@@ -1,5 +1,6 @@
 import {
   ActionRowBuilder,
+  AttachmentBuilder,
   ChannelType,
   ModalBuilder,
   TextInputBuilder,
@@ -15,6 +16,7 @@ import type {
   PolicyScope,
 } from '../domain/types.js';
 import { formatPolicy } from '../services/configStore.js';
+import type { CrosschannelCurveImage } from '../services/crosschannelGraph.js';
 import { formatDurationSeconds } from '../services/duration.js';
 
 const COMPONENTS_V2 = 1 << 15;
@@ -36,7 +38,10 @@ export type SettingsPage =
   | 'model_text_embeddings'
   | 'model_image_embeddings';
 export type EditableSetting =
+  | 'crosschannelMinimumWindowSeconds'
   | 'crosschannelWindowSeconds'
+  | 'crosschannelWindowSteepness'
+  | 'crosschannelWindowMidpointChannels'
   | 'crosschannelChannelThreshold'
   | 'evidenceConfidenceThreshold'
   | 'knownTextSimilarityThreshold'
@@ -62,6 +67,7 @@ type SettingsRenderContext = {
   policyScope: PolicyScope;
   models: Partial<Record<ModelPurpose, SettingsModelConfig>>;
   additionalSignals: SettingsAdditionalSignalConfig;
+  crosschannelCurveImage: CrosschannelCurveImage | undefined;
 };
 type SettingsRenderer = (context: SettingsRenderContext) => RawComponent[];
 type SettingsSection = {
@@ -217,7 +223,10 @@ const settingsParentByChildId = new Map(
 );
 
 const settingLabels: Record<EditableSetting, string> = {
-  crosschannelWindowSeconds: 'Crosschannel window seconds',
+  crosschannelMinimumWindowSeconds: 'Crosschannel minimum window seconds',
+  crosschannelWindowSeconds: 'Crosschannel max window seconds',
+  crosschannelWindowSteepness: 'Crosschannel S-curve steepness',
+  crosschannelWindowMidpointChannels: 'Crosschannel S-curve midpoint channels',
   crosschannelChannelThreshold: 'Crosschannel channel threshold',
   evidenceConfidenceThreshold: 'Evidence threshold percent',
   knownTextSimilarityThreshold: 'Known text threshold percent',
@@ -230,6 +239,10 @@ const percentSettings = new Set<EditableSetting>([
   'knownTextSimilarityThreshold',
   'knownImageSimilarityThreshold',
 ]);
+const decimalSettings = new Set<EditableSetting>([
+  'crosschannelWindowSteepness',
+  'crosschannelWindowMidpointChannels',
+]);
 
 export function settingsReply(
   config: GuildConfig,
@@ -237,17 +250,22 @@ export function settingsReply(
   policyScope: PolicyScope = 'punishment',
   models: SettingsModelConfig[] = [],
   additionalSignals: SettingsAdditionalSignalConfig = emptyAdditionalSignals,
+  crosschannelCurveImage?: CrosschannelCurveImage,
 ): InteractionReplyOptions {
-  return {
-    flags: COMPONENTS_V2 | EPHEMERAL,
-    components: settingsComponents(
-      config,
-      page,
-      policyScope,
-      models,
-      additionalSignals,
-    ),
-  } as InteractionReplyOptions;
+  return withCurveImage(
+    {
+      flags: COMPONENTS_V2 | EPHEMERAL,
+      components: settingsComponents(
+        config,
+        page,
+        policyScope,
+        models,
+        additionalSignals,
+        crosschannelCurveImage,
+      ),
+    } as InteractionReplyOptions,
+    crosschannelCurveImage,
+  );
 }
 
 export function settingsUpdate(
@@ -256,16 +274,31 @@ export function settingsUpdate(
   policyScope: PolicyScope = 'punishment',
   models: SettingsModelConfig[] = [],
   additionalSignals: SettingsAdditionalSignalConfig = emptyAdditionalSignals,
+  crosschannelCurveImage?: CrosschannelCurveImage,
 ): InteractionUpdateOptions {
+  return withCurveImage(
+    {
+      components: settingsComponents(
+        config,
+        page,
+        policyScope,
+        models,
+        additionalSignals,
+        crosschannelCurveImage,
+      ),
+    } as InteractionUpdateOptions,
+    crosschannelCurveImage,
+  );
+}
+
+function withCurveImage<
+  Options extends InteractionReplyOptions | InteractionUpdateOptions,
+>(options: Options, image: CrosschannelCurveImage | undefined): Options {
+  if (!image) return options;
   return {
-    components: settingsComponents(
-      config,
-      page,
-      policyScope,
-      models,
-      additionalSignals,
-    ),
-  } as InteractionUpdateOptions;
+    ...options,
+    files: [new AttachmentBuilder(image.buffer, { name: image.filename })],
+  };
 }
 
 export function honeypotWarningModal(
@@ -415,9 +448,13 @@ export function modelConfigModal(
   purpose: ModelPurpose,
   current: SettingsModelConfig | undefined,
 ) {
-  return new ModalBuilder()
+  const modal = new ModalBuilder()
     .setCustomId(`settings:modelModal:${purpose}`)
-    .setTitle(`${modelPurposeLabels[purpose]} model`)
+    .setTitle(
+      isEmbeddingPurpose(purpose)
+        ? `${modelPurposeLabels[purpose]} provider`
+        : `${modelPurposeLabels[purpose]} model`,
+    )
     .addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
@@ -427,6 +464,10 @@ export function modelConfigModal(
           .setValue(current?.provider ?? 'openrouter')
           .setRequired(true),
       ),
+    );
+
+  if (!isEmbeddingPurpose(purpose)) {
+    modal.addComponents(
       new ActionRowBuilder<TextInputBuilder>().addComponents(
         new TextInputBuilder()
           .setCustomId('model_id')
@@ -436,6 +477,9 @@ export function modelConfigModal(
           .setRequired(false),
       ),
     );
+  }
+
+  return modal;
 }
 
 export function modelApiKeyModal(purpose: ModelPurpose) {
@@ -467,6 +511,7 @@ export function parseEditableSettingValue(key: EditableSetting, raw: string) {
     if (value > 100) return null;
     return value / 100;
   }
+  if (decimalSettings.has(key)) return value > 0 ? value : null;
   if (!Number.isInteger(value)) return null;
   return value;
 }
@@ -477,6 +522,7 @@ function settingsComponents(
   policyScope: PolicyScope,
   models: SettingsModelConfig[],
   additionalSignals: SettingsAdditionalSignalConfig,
+  crosschannelCurveImage: CrosschannelCurveImage | undefined,
 ): RawComponent[] {
   const context = {
     config,
@@ -486,6 +532,7 @@ function settingsComponents(
       models.map((model) => [model.purpose, model]),
     ) as Partial<Record<ModelPurpose, SettingsModelConfig>>,
     additionalSignals,
+    crosschannelCurveImage,
   };
   const selectedCategory = categoryForPage(page);
   const selectedSubcategory = subcategoryForPage(page);
@@ -691,10 +738,19 @@ function crosschannelControls(context: SettingsRenderContext): RawComponent[] {
       ],
     ),
     settingsSection(
-      'Match window',
+      'Match curve',
       ({ config }) =>
-        `Messages must repeat across **${config.crosschannelChannelThreshold}** distinct channels within **${config.crosschannelWindowSeconds}s**.`,
-      () => [
+        `Messages must repeat across **${config.crosschannelChannelThreshold}+** distinct channels. The allowed time follows an S-curve from **${formatDurationSeconds(config.crosschannelMinimumWindowSeconds)}** at 2 channels toward **${formatDurationSeconds(config.crosschannelWindowSeconds)}** max, with steepness **${config.crosschannelWindowSteepness}** and midpoint **${config.crosschannelWindowMidpointChannels}** channels.`,
+      ({ crosschannelCurveImage }) => [
+        ...(crosschannelCurveImage
+          ? [
+              mediaGallery(
+                crosschannelCurveImage.filename,
+                'Cross-channel detection threshold curve',
+              ),
+              separator(),
+            ]
+          : []),
         buttonRow([
           button(
             'settings:edit:crosschannelChannelThreshold:triggers_crosschannel',
@@ -702,8 +758,25 @@ function crosschannelControls(context: SettingsRenderContext): RawComponent[] {
             2,
           ),
           button(
+            'settings:edit:crosschannelMinimumWindowSeconds:triggers_crosschannel',
+            'Edit minimum window',
+            2,
+          ),
+        ]),
+        buttonRow([
+          button(
+            'settings:edit:crosschannelWindowSteepness:triggers_crosschannel',
+            'Edit steepness',
+            2,
+          ),
+          button(
+            'settings:edit:crosschannelWindowMidpointChannels:triggers_crosschannel',
+            'Edit midpoint',
+            2,
+          ),
+          button(
             'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
-            'Edit window',
+            'Edit max window',
             2,
           ),
         ]),
@@ -715,16 +788,33 @@ function crosschannelControls(context: SettingsRenderContext): RawComponent[] {
 function permissionControls(context: SettingsRenderContext): RawComponent[] {
   return renderSections(context, [
     settingsSection(
-      'Moderator access',
-      'These users and roles can configure Honeybot and are bypassed by automated scans.',
+      'Case moderators',
+      'These users and roles can act on review cases and are bypassed by automated scans. They cannot configure Honeybot unless they also have configuration access.',
       ({ config }) => [
         selectRow({
           type: 7,
           custom_id: 'settings:mentionables:moderators:permissions',
-          placeholder: 'Replace moderator users and roles',
+          placeholder: 'Replace case moderator users and roles',
           min_values: 0,
           max_values: 25,
-          ...mentionableDefaultValues(config),
+          ...mentionableDefaultValues(
+            config.moderatorUsers,
+            config.moderatorRoles,
+          ),
+        }),
+      ],
+    ),
+    settingsSection(
+      'Honeybot configuration',
+      'Server owner, Administrator, Manage Server, Honeybot global admins, and these users/roles can configure Honeybot.',
+      ({ config }) => [
+        selectRow({
+          type: 7,
+          custom_id: 'settings:mentionables:configManagers:permissions',
+          placeholder: 'Replace configuration users and roles',
+          min_values: 0,
+          max_values: 25,
+          ...mentionableDefaultValues(config.configUsers, config.configRoles),
         }),
       ],
     ),
@@ -818,6 +908,7 @@ function modelPurposeControls(
   purpose: ModelPurpose,
 ): RawComponent[] {
   const page = modelPageByPurpose[purpose];
+  const embeddingPurpose = isEmbeddingPurpose(purpose);
   return renderSections(context, [
     settingsSection(
       'Configuration',
@@ -825,7 +916,7 @@ function modelPurposeControls(
         const model = models[purpose];
         return [
           `Provider: **${model?.provider ?? 'bot default'}**`,
-          `Model: **${model?.modelId ?? 'bot default'}**`,
+          `Model: **${model?.modelId ?? 'bot default'}${embeddingPurpose ? ' (managed by Honeybot)' : ''}**`,
           `Guild BYOK key: **${model?.apiKeyHint ?? 'not set'}**`,
         ].join('\n');
       },
@@ -833,7 +924,7 @@ function modelPurposeControls(
         buttonRow([
           button(
             `settings:modelEdit:${purpose}:${page}`,
-            'Edit provider/model',
+            embeddingPurpose ? 'Edit provider' : 'Edit provider/model',
             2,
           ),
           button(`settings:modelKey:${purpose}:${page}`, 'Set API key', 2),
@@ -847,6 +938,10 @@ function modelPurposeControls(
     ),
     ...additionalSignalSections(purpose),
   ]);
+}
+
+function isEmbeddingPurpose(purpose: ModelPurpose) {
+  return purpose === 'text_embeddings' || purpose === 'image_embeddings';
 }
 
 function additionalSignalSections(purpose: ModelPurpose): SettingsSection[] {
@@ -987,6 +1082,13 @@ function text(content: string): RawComponent {
   return { type: 10, content };
 }
 
+function mediaGallery(filename: string, description: string): RawComponent {
+  return {
+    type: 12,
+    items: [{ media: { url: `attachment://${filename}` }, description }],
+  };
+}
+
 function separator(): RawComponent {
   return { type: 14, divider: true, spacing: 1 };
 }
@@ -1001,10 +1103,10 @@ function defaultValues(ids: string[], type: 'channel' | 'role' | 'user') {
     : {};
 }
 
-function mentionableDefaultValues(config: GuildConfig) {
+function mentionableDefaultValues(userIds: string[], roleIds: string[]) {
   const defaultValues = [
-    ...config.moderatorUsers.map((id) => ({ id, type: 'user' })),
-    ...config.moderatorRoles.map((id) => ({ id, type: 'role' })),
+    ...userIds.map((id) => ({ id, type: 'user' })),
+    ...roleIds.map((id) => ({ id, type: 'role' })),
   ].slice(0, 25);
   return defaultValues.length > 0 ? { default_values: defaultValues } : {};
 }

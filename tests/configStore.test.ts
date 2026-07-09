@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import type { DatabaseHandle } from '../src/db/database.js';
-import { honeypots, models, moderators, policies, settings } from '../src/db/schema.js';
+import {
+  honeypots,
+  models,
+  moderators,
+  policies,
+  settings,
+} from '../src/db/schema.js';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
 import { ConfigStore } from '../src/services/configStore.js';
 import { cleanupTempDirs, testDatabase } from './helpers.js';
@@ -15,9 +21,13 @@ describe('ConfigStore deployment defaults', () => {
       crosschannelWindowSeconds: 90,
       honeypotChannelIds: ['honeypot-default'],
       moderatorRoles: ['mod-role-default'],
+      configRoles: ['config-role-default'],
       policies: {
         ...defaultGuildConfig().policies,
-        punishment: { ...defaultGuildConfig().policies.punishment, actionType: 'kick' },
+        punishment: {
+          ...defaultGuildConfig().policies.punishment,
+          actionType: 'kick',
+        },
       },
     });
     const store = new ConfigStore(database.db, deploymentDefaults);
@@ -27,6 +37,7 @@ describe('ConfigStore deployment defaults', () => {
       crosschannelWindowSeconds: 90,
       honeypotChannelIds: ['honeypot-default'],
       moderatorRoles: ['mod-role-default'],
+      configRoles: ['config-role-default'],
       policies: { punishment: expect.objectContaining({ actionType: 'kick' }) },
     });
 
@@ -36,6 +47,26 @@ describe('ConfigStore deployment defaults', () => {
       crosschannelWindowSeconds: 30,
       honeypotChannelIds: [],
       moderatorRoles: ['mod-role-default'],
+      configRoles: ['config-role-default'],
+    });
+
+    database.sqlite.close();
+  });
+
+  it('stores case moderators separately from configuration managers', async () => {
+    const database = testDatabase();
+    const store = new ConfigStore(database.db);
+
+    await store.setModerators('guild', 'user', ['case-user']);
+    await store.setModerators('guild', 'role', ['case-role']);
+    await store.setConfigManagers('guild', 'config_user', ['config-user']);
+    await store.setConfigManagers('guild', 'config_role', ['config-role']);
+
+    expect(await store.getGuildConfig('guild')).toMatchObject({
+      moderatorUsers: ['case-user'],
+      moderatorRoles: ['case-role'],
+      configUsers: ['config-user'],
+      configRoles: ['config-role'],
     });
 
     database.sqlite.close();
@@ -43,7 +74,10 @@ describe('ConfigStore deployment defaults', () => {
 
   it('retains removed guild settings for re-adds before purging after 30 days', async () => {
     const database = testDatabase();
-    const store = new ConfigStore(database.db, defaultGuildConfig({ honeypotChannelIds: ['honeypot-default'] }));
+    const store = new ConfigStore(
+      database.db,
+      defaultGuildConfig({ honeypotChannelIds: ['honeypot-default'] }),
+    );
 
     await store.initializeGuildDefaults('guild');
     await store.setSetting('guild', 'crosschannelWindowSeconds', 30);
@@ -51,11 +85,27 @@ describe('ConfigStore deployment defaults', () => {
     await store.markGuildRemoved('guild');
     await store.initializeGuildDefaults('guild');
 
-    expect(await store.getGuildConfig('guild')).toMatchObject({ crosschannelWindowSeconds: 30, honeypotChannelIds: [] });
+    expect(await store.getGuildConfig('guild')).toMatchObject({
+      crosschannelWindowSeconds: 30,
+      honeypotChannelIds: [],
+    });
 
     await store.markGuildRemoved('guild');
-    await database.db.insert(models).values({ guildId: 'guild', purpose: 'text_classifier', provider: 'openrouter', modelId: 'model', encryptedApiKey: null, apiKeyHint: null, apiKeyNonce: null, apiKeyAuthTag: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
-    const purged = await store.purgeExpiredRemovedGuildSettings(new Date(Date.now() + 31 * 24 * 60 * 60 * 1000));
+    await database.db.insert(models).values({
+      guildId: 'guild',
+      purpose: 'text_classifier',
+      provider: 'openrouter',
+      modelId: 'model',
+      encryptedApiKey: null,
+      apiKeyHint: null,
+      apiKeyNonce: null,
+      apiKeyAuthTag: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const purged = await store.purgeExpiredRemovedGuildSettings(
+      new Date(Date.now() + 31 * 24 * 60 * 60 * 1000),
+    );
 
     expect(purged).toBe(1);
     await expectConfigRows(database, 'guild', 0);
@@ -63,15 +113,20 @@ describe('ConfigStore deployment defaults', () => {
   });
 });
 
-async function expectConfigRows(database: DatabaseHandle, guildId: string, count: number) {
+async function expectConfigRows(
+  database: DatabaseHandle,
+  guildId: string,
+  count: number,
+) {
   const rows = await Promise.all([
     database.db.select().from(settings).where(eq(settings.guildId, guildId)),
     database.db.select().from(policies).where(eq(policies.guildId, guildId)),
     database.db.select().from(honeypots).where(eq(honeypots.guildId, guildId)),
-    database.db.select().from(moderators).where(eq(moderators.guildId, guildId)),
+    database.db
+      .select()
+      .from(moderators)
+      .where(eq(moderators.guildId, guildId)),
     database.db.select().from(models).where(eq(models.guildId, guildId)),
   ]);
   expect(rows.flat()).toHaveLength(count);
 }
-
-
