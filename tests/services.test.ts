@@ -994,6 +994,62 @@ describe('EvidenceAnalyzer', () => {
 });
 
 describe('CaseStore', () => {
+  it('allows only one concurrent transition from the expected case status', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    const transitions = await Promise.all([
+      store.transition(
+        caseRow.id,
+        'pending_review',
+        'dismissed',
+        null,
+        'moderator-1',
+        'dismissed',
+      ),
+      store.transition(
+        caseRow.id,
+        'pending_review',
+        'punished',
+        'ban',
+        'moderator-2',
+        'punished',
+      ),
+    ]);
+
+    expect(transitions.filter(Boolean)).toHaveLength(1);
+    await expect(
+      store.transition(
+        caseRow.id,
+        'pending_review',
+        'dismissed',
+        null,
+        'moderator-3',
+        'stale dismissal',
+      ),
+    ).resolves.toBeNull();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.caseId, caseRow.id)),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: expect.stringMatching(/^(dismissed|punished)$/),
+        }),
+      ]),
+    );
+
+    database.sqlite.close();
+  });
+
   it('creates cases once, persists messages, resolves, and finds by message ids', async () => {
     const database = testDatabase();
     const storage = fakeStorage();

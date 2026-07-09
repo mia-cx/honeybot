@@ -317,6 +317,15 @@ async function handleTriggeredMessage(
       confidence: analysis.confidence,
       actorId: null,
     });
+    const claimed = await dependencies.caseStore.transition(
+      caseRow.id,
+      'pending_review',
+      'punished',
+      punishment.actionType,
+      null,
+      analysis.reason,
+    );
+    if (!claimed) return;
     if (guildConfig.punishmentDmNotify) {
       const dmSent = await dmPunishedUser({
         member,
@@ -328,6 +337,14 @@ async function handleTriggeredMessage(
         storage: dependencies.storage,
       });
       if (!dmSent) {
+        await dependencies.caseStore.transition(
+          caseRow.id,
+          'punished',
+          'pending_review',
+          null,
+          null,
+          'Auto-punishment cancelled because the user could not be notified',
+        );
         await upsertReviewIfConfigured(
           message,
           caseRow.id,
@@ -348,13 +365,6 @@ async function handleTriggeredMessage(
     }
     await dependencies.moderationQueue.enqueue(message.guildId, () =>
       applyPolicy(member, punishment, auditReason),
-    );
-    await dependencies.caseStore.resolve(
-      caseRow.id,
-      'punished',
-      punishment.actionType,
-      null,
-      analysis.reason,
     );
     await upsertReviewIfConfigured(
       message,

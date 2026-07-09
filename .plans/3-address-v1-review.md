@@ -19,8 +19,8 @@ fresh review.
 
 ## TODOs
 
-- [ ] Add conditional case transitions and use them for every review-button
-      resolution/revert path, with stale and concurrent regression tests.
+- [x] Add conditional case transitions and use them for every review-button
+  resolution/revert path, with stale and concurrent regression tests.
 - [ ] Bound attachment download size, duration, and processing counts while
       retaining metadata for skipped evidence, with regression tests.
 - [ ] Harden image normalization against decompression-heavy or unsupported
@@ -36,3 +36,5 @@ fresh review.
   `docs/PLAN.md:547`: failed DMs currently block moderation.
 - Worktree: `.worktrees/3-address-v1-review`.
 - Branch: `codex/issue-3-review-fixes` from current `main` at `a935361`.
+- Conditional transition validation: `../../node_modules/.bin/tsc --noEmit` and
+  `../../node_modules/.bin/vitest run tests/services.test.ts` (30 tests passed).

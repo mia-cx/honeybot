@@ -261,6 +261,45 @@ export class CaseStore {
     );
   }
 
+  async transition(
+    caseId: string,
+    expectedStatus: CaseStatus,
+    status: CaseStatus,
+    actionTaken: string | null,
+    actorId: string | null,
+    reason: string,
+  ) {
+    const now = new Date().toISOString();
+    const [updated] = await this.db
+      .update(cases)
+      .set({ status, actionTaken, reason, updatedAt: now })
+      .where(and(eq(cases.id, caseId), eq(cases.status, expectedStatus)))
+      .returning();
+    if (!updated) return null;
+
+    await this.addEvent(
+      caseId,
+      status,
+      actorId ? 'user' : 'bot',
+      actorId,
+      reason,
+      { actionTaken, previousStatus: expectedStatus },
+    );
+    return updated;
+  }
+
+  async updateResolutionDetails(
+    caseId: string,
+    status: CaseStatus,
+    actionTaken: string | null,
+    reason: string,
+  ) {
+    await this.db
+      .update(cases)
+      .set({ actionTaken, reason, updatedAt: new Date().toISOString() })
+      .where(and(eq(cases.id, caseId), eq(cases.status, status)));
+  }
+
   async setReviewMessage(caseId: string, channelId: string, messageId: string) {
     await this.db
       .update(cases)

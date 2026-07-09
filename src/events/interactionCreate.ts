@@ -27,6 +27,7 @@ import { renderCrosschannelCurveImage } from '../services/crosschannelGraph.js';
 import { parseDurationSeconds } from '../services/duration.js';
 import { toggleVerboseLogging } from '../services/verbose.js';
 import type {
+  CaseStatus,
   GuildConfig,
   Policy,
   PolicyScope,
@@ -1475,6 +1476,17 @@ async function handleCaseButton(
   }
 
   if (action === 'dismiss') {
+    if (
+      !(await transitionCaseOrReply(interaction, deps, {
+        caseId,
+        expectedStatus: 'pending_review',
+        status: 'dismissed',
+        actionTaken: null,
+        reason: 'Dismissed by moderator',
+      }))
+    ) {
+      return;
+    }
     const config = await deps.configStore.getGuildConfig(interaction.guildId);
     const revertResult = await revertPrevention(interaction, caseRow, config);
     await deps.caseStore.addEvent(
@@ -1485,11 +1497,10 @@ async function handleCaseButton(
       'Dismissed by moderator',
       { revertResult },
     );
-    await deps.caseStore.resolve(
+    await deps.caseStore.updateResolutionDetails(
       caseId,
       'dismissed',
       null,
-      interaction.user.id,
       `Dismissed by moderator; prevention revert: ${revertResult}`,
     );
     await interaction.update(
@@ -1527,11 +1538,30 @@ async function handleCaseButton(
       confidence: caseConfidence(caseRow.evidenceSummaryJson),
       actorId: interaction.user.id,
     });
+    if (
+      !(await transitionCaseOrReply(interaction, deps, {
+        caseId,
+        expectedStatus: 'pending_review',
+        status: 'punished',
+        actionTaken: policy.actionType,
+        reason,
+      }))
+    ) {
+      return;
+    }
     const member = await interaction.guild.members
       .fetch(caseRow.userId)
       .catch(() => null);
     if (config.punishmentDmNotify) {
       if (!member) {
+        await deps.caseStore.transition(
+          caseId,
+          'punished',
+          'pending_review',
+          null,
+          interaction.user.id,
+          'Punishment cancelled because the user could not be notified',
+        );
         await deps.caseStore.addEvent(
           caseId,
           'failed',
@@ -1561,6 +1591,14 @@ async function handleCaseButton(
         storage: deps.storage,
       });
       if (!dmSent) {
+        await deps.caseStore.transition(
+          caseId,
+          'punished',
+          'pending_review',
+          null,
+          interaction.user.id,
+          'Punishment cancelled because the user could not be notified',
+        );
         await interaction.reply({
           content:
             'Punishment not applied: Discord did not confirm the DM notification was sent.',
@@ -1587,13 +1625,6 @@ async function handleCaseButton(
       reason,
       { applyResult },
     );
-    await deps.caseStore.resolve(
-      caseId,
-      'punished',
-      policy.actionType,
-      interaction.user.id,
-      reason,
-    );
     await interaction.update(
       caseReviewResolutionUpdate(interaction.message.components, {
         caseId,
@@ -1610,6 +1641,17 @@ async function handleCaseButton(
 
   if (action === 'revert') {
     if (caseRow.status === 'punished') {
+      if (
+        !(await transitionCaseOrReply(interaction, deps, {
+          caseId,
+          expectedStatus: 'punished',
+          status: 'pending_review',
+          actionTaken: null,
+          reason: 'Reverting punishment by moderator',
+        }))
+      ) {
+        return;
+      }
       const revertResult = await revertPolicyForUser(
         interaction.guild,
         caseRow.userId,
@@ -1624,11 +1666,10 @@ async function handleCaseButton(
         'Reverted punishment by moderator',
         { revertResult },
       );
-      await deps.caseStore.resolve(
+      await deps.caseStore.updateResolutionDetails(
         caseId,
         'pending_review',
         null,
-        interaction.user.id,
         `Reverted punishment by moderator: ${revertResult}`,
       );
       await interaction.update(
@@ -1645,6 +1686,17 @@ async function handleCaseButton(
         caseRow.triggerType === 'honeypot'
           ? config.policies.honeypot_prevention
           : config.policies.crosschannel_prevention;
+      if (
+        !(await transitionCaseOrReply(interaction, deps, {
+          caseId,
+          expectedStatus: 'dismissed',
+          status: 'pending_review',
+          actionTaken: prevention.actionType,
+          reason: 'Reverting dismissal by moderator',
+        }))
+      ) {
+        return;
+      }
       const applyResult = await deps.moderationQueue.enqueue(
         interaction.guildId,
         () =>
@@ -1669,11 +1721,10 @@ async function handleCaseButton(
         'Reverted dismissal and reapplied prevention',
         { applyResult },
       );
-      await deps.caseStore.resolve(
+      await deps.caseStore.updateResolutionDetails(
         caseId,
         'pending_review',
         prevention.actionType,
-        interaction.user.id,
         `Reverted dismissal; prevention reapplied: ${applyResult}`,
       );
       await interaction.update(
@@ -1693,6 +1744,34 @@ async function handleCaseButton(
   }
 
   await interaction.reply({ content: 'Unknown case action.', ephemeral: true });
+}
+
+async function transitionCaseOrReply(
+  interaction: ButtonInteraction<'cached'>,
+  deps: InteractionDependencies,
+  input: {
+    caseId: string;
+    expectedStatus: CaseStatus;
+    status: CaseStatus;
+    actionTaken: string | null;
+    reason: string;
+  },
+) {
+  const updated = await deps.caseStore.transition(
+    input.caseId,
+    input.expectedStatus,
+    input.status,
+    input.actionTaken,
+    interaction.user.id,
+    input.reason,
+  );
+  if (updated) return true;
+
+  await interaction.reply({
+    content: 'Case already resolved by another moderator.',
+    ephemeral: true,
+  });
+  return false;
 }
 
 async function revertPrevention(
