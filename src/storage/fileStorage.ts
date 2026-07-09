@@ -4,6 +4,11 @@ import { basename, join } from 'node:path';
 import { sha256 } from '../utils/fingerprints.js';
 import { normalizeAttachmentFile } from './imageNormalization.js';
 
+export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
+export const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
+export const MAX_ATTACHMENTS_PER_MESSAGE = 8;
+export const MAX_ATTACHMENTS_PER_CASE = 32;
+
 export type StoredFile = {
   storageKey: string;
   sha256: string;
@@ -14,21 +19,47 @@ export type StoredFile = {
   normalized: boolean;
 };
 
+export type FileStorageLimits = {
+  maxAttachmentBytes?: number;
+  fetchTimeoutMs?: number;
+};
+
+export class AttachmentResourceLimitError extends Error {}
+
 export class FileStorage {
-  constructor(private readonly rootDir: string) {}
+  constructor(
+    private readonly rootDir: string,
+    private readonly limits: FileStorageLimits = {},
+  ) {}
 
   async saveFromUrl(
     url: string,
     parts: string[],
     fallbackName: string,
-    options: { contentType?: string | null } = {},
+    options: {
+      contentType?: string | null;
+      expectedSizeBytes?: number;
+    } = {},
   ): Promise<StoredFile> {
-    const response = await fetch(url);
+    const maxBytes = this.limits.maxAttachmentBytes ?? MAX_ATTACHMENT_BYTES;
+    if (
+      options.expectedSizeBytes !== undefined &&
+      options.expectedSizeBytes > maxBytes
+    ) {
+      throw new AttachmentResourceLimitError(
+        `Attachment exceeds the ${maxBytes} byte download limit`,
+      );
+    }
+
+    const response = await fetch(url, {
+      signal: AbortSignal.timeout(
+        this.limits.fetchTimeoutMs ?? ATTACHMENT_FETCH_TIMEOUT_MS,
+      ),
+    });
     if (!response.ok)
       throw new Error(`Failed to download attachment: ${response.status}`);
 
-    const arrayBuffer = await response.arrayBuffer();
-    const downloaded = Buffer.from(arrayBuffer);
+    const downloaded = await readBoundedResponse(response, maxBytes);
     const stored = await normalizeAttachmentFile(
       downloaded,
       options.contentType ?? response.headers.get('content-type'),
@@ -69,6 +100,43 @@ export class FileStorage {
     if (!storageKey) return;
     await rm(this.pathFor(storageKey), { force: true });
   }
+}
+
+async function readBoundedResponse(response: Response, maxBytes: number) {
+  const contentLength = response.headers.get('content-length');
+  if (contentLength !== null) {
+    const parsed = Number(contentLength);
+    if (Number.isFinite(parsed) && parsed > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new AttachmentResourceLimitError(
+        `Attachment exceeds the ${maxBytes} byte download limit`,
+      );
+    }
+  }
+
+  if (!response.body) throw new Error('Attachment response has no body');
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new AttachmentResourceLimitError(
+          `Attachment exceeds the ${maxBytes} byte download limit`,
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, receivedBytes);
 }
 
 function safeBasename(name: string) {

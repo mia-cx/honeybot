@@ -26,7 +26,13 @@ import {
   shingles,
   textHash,
 } from '../utils/fingerprints.js';
-import type { FileStorage, StoredFile } from '../storage/fileStorage.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_CASE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  type FileStorage,
+  type StoredFile,
+} from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
 
 const caseId = customAlphabet(
@@ -124,17 +130,33 @@ export class CaseStore {
     if (!caseMessage) throw new Error('Failed to persist case message');
 
     const storedAttachments = [] as Array<typeof caseAttachments.$inferSelect>;
+    const existingAttachmentCount = (
+      await this.db
+        .select({ id: caseAttachments.id })
+        .from(caseAttachments)
+        .where(eq(caseAttachments.caseId, caseId))
+    ).length;
+    let attachmentIndex = 0;
     for (const attachment of message.attachments.values()) {
       let stored: StoredFile | null = null;
-      try {
-        stored = await this.storage.saveFromUrl(
-          attachment.url,
-          [message.guildId, caseId],
-          attachment.name ?? `${attachment.id}.bin`,
-          { contentType: attachment.contentType ?? null },
-        );
-      } catch {
-        // Keep metadata even if Discord CDN download fails.
+      const shouldProcess =
+        attachmentIndex < MAX_ATTACHMENTS_PER_MESSAGE &&
+        existingAttachmentCount + attachmentIndex < MAX_ATTACHMENTS_PER_CASE &&
+        attachment.size <= MAX_ATTACHMENT_BYTES;
+      if (shouldProcess) {
+        try {
+          stored = await this.storage.saveFromUrl(
+            attachment.url,
+            [message.guildId, caseId],
+            attachment.name ?? `${attachment.id}.bin`,
+            {
+              contentType: attachment.contentType ?? null,
+              expectedSizeBytes: attachment.size,
+            },
+          );
+        } catch {
+          // Keep metadata even if the download fails or exceeds resource limits.
+        }
       }
 
       const [row] = await this.db
@@ -155,6 +177,7 @@ export class CaseStore {
         })
         .returning();
       if (row) storedAttachments.push(row);
+      attachmentIndex += 1;
     }
 
     return { caseMessage, attachments: storedAttachments };

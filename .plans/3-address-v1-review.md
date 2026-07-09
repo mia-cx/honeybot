@@ -20,8 +20,8 @@ fresh review.
 ## TODOs
 
 - [x] Add conditional case transitions and use them for every review-button
-  resolution/revert path, with stale and concurrent regression tests.
-- [ ] Bound attachment download size, duration, and processing counts while
+      resolution/revert path, with stale and concurrent regression tests.
+- [x] Bound attachment download size, duration, and processing counts while
       retaining metadata for skipped evidence, with regression tests.
 - [ ] Harden image normalization against decompression-heavy or unsupported
       inputs, with regression tests.
@@ -38,3 +38,5 @@ fresh review.
 - Branch: `codex/issue-3-review-fixes` from current `main` at `a935361`.
 - Conditional transition validation: `../../node_modules/.bin/tsc --noEmit` and
   `../../node_modules/.bin/vitest run tests/services.test.ts` (30 tests passed).
+- Attachment-limit validation: typecheck plus `tests/services.test.ts` (31 tests)
+  and `tests/ui-and-integrations.test.ts` (26 tests) passed.

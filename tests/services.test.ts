@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
 import {
+  caseAttachments,
   cases,
   caseEvents,
   caseMessages,
@@ -32,6 +33,11 @@ import {
   setVerboseLogging,
   toggleVerboseLogging,
 } from '../src/services/verbose.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_CASE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from '../src/storage/fileStorage.js';
 import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
 import type { AnalysisResult } from '../src/domain/types.js';
 import type { CachedMessage, ClassificationResult } from '../src/types.js';
@@ -994,6 +1000,91 @@ describe('EvidenceAnalyzer', () => {
 });
 
 describe('CaseStore', () => {
+  it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const perMessageCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'per-message-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    await store.attachMessage(
+      perMessageCase.id,
+      fakeMessage({
+        id: 'per-message',
+        attachments: Array.from({ length: 10 }, (_, index) =>
+          attachment({ id: `per-message-${index}` }),
+        ),
+      }),
+    );
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
+
+    const perCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'per-case-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+
+    for (let messageIndex = 0; messageIndex < 5; messageIndex += 1) {
+      await store.attachMessage(
+        perCase.id,
+        fakeMessage({
+          id: `per-case-message-${messageIndex}`,
+          attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+            attachment({
+              id: `per-case-${messageIndex}-${attachmentIndex}`,
+            }),
+          ),
+        }),
+      );
+    }
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE + MAX_ATTACHMENTS_PER_CASE,
+    );
+
+    const oversizedCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'oversized-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+    await store.attachMessage(
+      oversizedCase.id,
+      fakeMessage({
+        id: 'oversized-message',
+        attachments: [
+          attachment({ id: 'oversized', size: MAX_ATTACHMENT_BYTES + 1 }),
+        ],
+      }),
+    );
+
+    const [oversized] = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, oversizedCase.id));
+    expect(oversized).toMatchObject({
+      sizeBytes: MAX_ATTACHMENT_BYTES + 1,
+      storageKey: null,
+      sha256: null,
+    });
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE + MAX_ATTACHMENTS_PER_CASE,
+    );
+
+    database.sqlite.close();
+  });
+
   it('allows only one concurrent transition from the expected case status', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());

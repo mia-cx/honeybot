@@ -990,6 +990,58 @@ describe('FileStorage and prompts', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
+  it('rejects declared and streamed attachment bodies over the byte limit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { maxAttachmentBytes: 8 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    await expect(
+      storage.saveFromUrl('https://cdn.test/declared', ['guild'], 'large.bin', {
+        expectedSizeBytes: 9,
+      }),
+    ).rejects.toThrow('8 byte download limit');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Buffer.alloc(5));
+            controller.enqueue(Buffer.alloc(5));
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/streamed', ['guild'], 'large.bin'),
+    ).rejects.toThrow('8 byte download limit');
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('aborts attachment downloads that exceed the fetch deadline', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { fetchTimeoutMs: 5 });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return reject(new Error('Missing abort signal'));
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+
+    await expect(
+      storage.saveFromUrl('https://cdn.test/slow', ['guild'], 'slow.bin'),
+    ).rejects.toBeInstanceOf(Error);
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it('normalizes downloaded model evidence images to webp', async () => {
     const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
     const svg = Buffer.from(
