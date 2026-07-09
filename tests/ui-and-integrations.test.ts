@@ -984,6 +984,16 @@ describe('moderation actions', () => {
           sizeBytes: 10,
           discordAttachmentId: 'att',
           name: 'proof.png',
+          originalUrl: 'https://cdn.test/stored.png',
+        },
+        {
+          id: 2,
+          storageKey: null,
+          contentType: 'image/png',
+          sizeBytes: 10,
+          discordAttachmentId: 'pending-att',
+          name: 'pending.png',
+          originalUrl: 'https://cdn.test/pending.png',
         },
       ]),
       addEvent: vi.fn(async () => undefined),
@@ -1003,13 +1013,16 @@ describe('moderation actions', () => {
         components: expect.any(Array),
       }),
     );
+    expect(JSON.stringify(member.send.mock.calls[0]?.[0])).toContain(
+      'https://cdn.test/pending.png',
+    );
     expect(caseStore.addEvent).toHaveBeenCalledWith(
       'case1',
       'dm_notified',
       'bot',
       null,
       'Punishment DM sent',
-      expect.any(Object),
+      { omitted: ['pending-att'] },
     );
 
     member.send.mockRejectedValueOnce(new Error('closed'));
@@ -1029,6 +1042,20 @@ describe('moderation actions', () => {
       'Punishment DM failed',
       expect.objectContaining({ error: 'closed' }),
     );
+
+    caseStore.listCaseMessages.mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    await expect(
+      dmPunishedUser({
+        member,
+        caseId: 'case1',
+        action: 'ban',
+        reason: 'reason',
+        caseStore: caseStore as any,
+        storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+      }),
+    ).resolves.toBe(false);
   });
 });
 

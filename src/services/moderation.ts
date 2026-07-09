@@ -173,7 +173,7 @@ export async function deleteMessage(message: Message<true>) {
   return true;
 }
 
-export async function dmPunishedUser(input: {
+type PunishmentDmInput = {
   member: GuildMember;
   caseId: string;
   action: string;
@@ -181,46 +181,82 @@ export async function dmPunishedUser(input: {
   auditReason?: string;
   caseStore: CaseStore;
   storage: FileStorage;
-}) {
-  const messages = await input.caseStore.listCaseMessages(input.caseId);
-  const attachments = await input.caseStore.listCaseAttachments(input.caseId);
-  const firstMessage = messages[0];
-  const files = [] as Array<{
-    filename: string;
-    attachment: AttachmentBuilder;
-  }>;
+};
+
+export async function dmPunishedUser(input: PunishmentDmInput) {
   const omitted: string[] = [];
-
-  for (const attachment of attachments.slice(0, 8)) {
-    if (!attachment.storageKey) continue;
-    if (
-      !attachment.contentType?.startsWith('image/') ||
-      attachment.sizeBytes > 8 * 1024 * 1024
-    ) {
-      omitted.push(attachment.discordAttachmentId);
-      continue;
-    }
-    const filename = `SPOILER_${attachment.id}_${safeName(attachment.name ?? `${attachment.discordAttachmentId}.bin`)}`;
-    files.push({
-      filename,
-      attachment: new AttachmentBuilder(
-        input.storage.pathFor(attachment.storageKey),
-        { name: filename },
-      ),
-    });
-  }
-
   try {
+    const messages = await input.caseStore.listCaseMessages(input.caseId);
+    const attachments = await input.caseStore.listCaseAttachments(input.caseId);
+    const files: Array<{
+      filename: string;
+      attachment: AttachmentBuilder;
+    }> = [];
+    const pendingEvidenceUrls: string[] = [];
+
+    for (const attachment of attachments.slice(0, 8)) {
+      if (!attachment.storageKey) {
+        omitted.push(attachment.discordAttachmentId);
+        pendingEvidenceUrls.push(attachment.originalUrl);
+        continue;
+      }
+      if (
+        !attachment.contentType?.startsWith('image/') ||
+        attachment.sizeBytes > 8 * 1024 * 1024
+      ) {
+        omitted.push(attachment.discordAttachmentId);
+        continue;
+      }
+      const filename = `SPOILER_${attachment.id}_${safeName(attachment.name ?? `${attachment.discordAttachmentId}.bin`)}`;
+      files.push({
+        filename,
+        attachment: new AttachmentBuilder(
+          input.storage.pathFor(attachment.storageKey),
+          { name: filename },
+        ),
+      });
+    }
+
     await input.member.send({
       flags: COMPONENTS_V2,
       files: files.map((file) => file.attachment),
       components: punishmentDmComponents(
         input,
-        firstMessage?.content ?? '',
+        messages[0]?.content ?? '',
         files.map((file) => file.filename),
+        pendingEvidenceUrls,
       ),
       allowedMentions: { parse: [] },
     });
+  } catch (error) {
+    logger.warn('Failed to DM punished user', {
+      guildId: input.member.guild.id,
+      userId: input.member.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    try {
+      await input.caseStore.addEvent(
+        input.caseId,
+        'failed',
+        'bot',
+        null,
+        'Punishment DM failed',
+        {
+          error: error instanceof Error ? error.message : String(error),
+          omitted,
+        },
+      );
+    } catch (eventError) {
+      logger.warn('Failed to record punishment DM failure', {
+        caseId: input.caseId,
+        error:
+          eventError instanceof Error ? eventError.message : String(eventError),
+      });
+    }
+    return false;
+  }
+
+  try {
     await input.caseStore.addEvent(
       input.caseId,
       'dm_notified',
@@ -229,26 +265,13 @@ export async function dmPunishedUser(input: {
       'Punishment DM sent',
       { omitted },
     );
-    return true;
   } catch (error) {
-    logger.warn('Failed to DM punished user', {
-      guildId: input.member.guild.id,
-      userId: input.member.id,
+    logger.warn('Failed to record punishment DM success', {
+      caseId: input.caseId,
       error: error instanceof Error ? error.message : String(error),
     });
-    await input.caseStore.addEvent(
-      input.caseId,
-      'failed',
-      'bot',
-      null,
-      'Punishment DM failed',
-      {
-        error: error instanceof Error ? error.message : String(error),
-        omitted,
-      },
-    );
-    return false;
   }
+  return true;
 }
 
 function punishmentDmComponents(
@@ -261,6 +284,7 @@ function punishmentDmComponents(
   },
   messageContent: string,
   attachmentFilenames: string[],
+  pendingEvidenceUrls: string[],
 ): RawComponent[] {
   const components: RawComponent[] = [
     text(
@@ -289,6 +313,17 @@ function punishmentDmComponents(
 
   if (attachmentFilenames.length > 0)
     components.push(mediaGallery(attachmentFilenames));
+  if (pendingEvidenceUrls.length > 0) {
+    components.push(
+      separator(),
+      text(
+        [
+          '## Evidence still processing',
+          ...pendingEvidenceUrls.map((url) => `- ${url}`),
+        ].join('\n'),
+      ),
+    );
+  }
 
   return [container(components)];
 }

@@ -116,17 +116,15 @@ async function handleTriggeredMessage(
   });
 
   if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
-    await attempt('notify punished user', () =>
-      dmPunishedUser({
-        member,
-        caseId: caseRow.id,
-        action: policy.actionType,
-        reason: moderationReason,
-        auditReason: preventionAuditReason,
-        caseStore: dependencies.caseStore,
-        storage: dependencies.storage,
-      }),
-    );
+    await dmPunishedUser({
+      member,
+      caseId: caseRow.id,
+      action: policy.actionType,
+      reason: moderationReason,
+      auditReason: preventionAuditReason,
+      caseStore: dependencies.caseStore,
+      storage: dependencies.storage,
+    });
   }
   const preventionResult = await dependencies.moderationQueue.enqueue(
     message.guildId,
