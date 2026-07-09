@@ -29,10 +29,7 @@ FROM base AS runtime
 ARG HONEYBOT_UID=10001
 ARG HONEYBOT_GID=10001
 
-ENV NODE_ENV=production \
-    DATABASE_URL=file:data/honeybot.sqlite \
-    IMAGE_STORAGE_DRIVER=filesystem \
-    IMAGE_STORAGE_DIR=data/images
+ENV NODE_ENV=production
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates \
