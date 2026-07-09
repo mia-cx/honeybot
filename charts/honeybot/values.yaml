@@ -1,0 +1,139 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/mia-cx/honeybot
+  pullPolicy: IfNotPresent
+  # Defaults to chart appVersion when empty.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 10001
+  fsGroupChangePolicy: OnRootMismatch
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: false
+  runAsGroup: 10001
+  runAsNonRoot: true
+  runAsUser: 10001
+
+resources: {}
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+persistence:
+  enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+
+secret:
+  create: true
+  # Set this to use an externally managed Secret instead of rendering one.
+  existingSecret: ""
+  keys:
+    discordToken: DISCORD_TOKEN
+    openrouterApiKey: OPENROUTER_API_KEY
+    apiKeyEncryptionKey: API_KEY_ENCRYPTION_KEY
+
+secrets:
+  # Required. Discord bot token.
+  discordToken: ""
+  # Optional when every guild brings its own model API keys, but recommended for bot defaults.
+  openrouterApiKey: ""
+  # Strongly recommended. Generate with: openssl rand -base64 32
+  apiKeyEncryptionKey: ""
+
+# Non-secret environment variables. Values are rendered into a ConfigMap.
+env:
+  LOG_LEVEL: info
+  DATABASE_URL: file:data/honeybot.sqlite
+  IMAGE_STORAGE_DRIVER: filesystem
+  IMAGE_STORAGE_DIR: data/images
+
+  DEFAULT_TEXT_PRIMARY_PROVIDER: openrouter
+  DEFAULT_TEXT_PRIMARY_MODEL: google/gemma-4-31b-it
+  DEFAULT_IMAGE_PRIMARY_PROVIDER: openrouter
+  DEFAULT_IMAGE_PRIMARY_MODEL: google/gemma-4-31b-it
+
+  ADDITIONAL_TEXT_SIGNAL_PROVIDER: openrouter
+  ADDITIONAL_TEXT_SIGNAL_MODELS: ""
+  ADDITIONAL_IMAGE_SIGNAL_PROVIDER: openrouter
+  ADDITIONAL_IMAGE_SIGNAL_MODELS: ""
+
+  DEFAULT_TEXT_EMBEDDINGS_PROVIDER: openrouter
+  DEFAULT_TEXT_EMBEDDINGS_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  DEFAULT_IMAGE_EMBEDDINGS_PROVIDER: openrouter
+  DEFAULT_IMAGE_EMBEDDINGS_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  DEFAULT_EMBEDDINGS_DIMENSIONS: "2048"
+
+  MODEL_CALL_LIMIT: "6000"
+  MODEL_CALL_LIMIT_PER_GUILD: "20"
+  MODEL_CALL_WINDOW_SECONDS: "60"
+  MODEL_RETRY_MAX_ATTEMPTS: "3"
+  MODEL_RETRY_INITIAL_DELAY_MS: "300"
+  MODEL_RETRY_MAX_DELAY_MS: "15000"
+  MODERATION_ACTION_LIMIT: "30"
+  MODERATION_ACTION_LIMIT_PER_GUILD: "10"
+  MODERATION_ACTION_WINDOW_SECONDS: "60"
+
+  GLOBAL_AUTH_MODE: team
+  GLOBAL_AUTH_TEAM_ID: ""
+  GLOBAL_AUTH_USER_IDS: ""
+
+  HONEYBOT_DEFAULT_MODERATION_CHANNEL_ID: ""
+  HONEYBOT_DEFAULT_HONEYPOT_CHANNEL_IDS: ""
+  HONEYBOT_DEFAULT_MODERATOR_USER_IDS: ""
+  HONEYBOT_DEFAULT_MODERATOR_ROLE_IDS: ""
+  HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED: "true"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS: "5"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS: "3600"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS: "0.49"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS: "13"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD: "2"
+  HONEYBOT_DEFAULT_KNOWN_IMAGE_SIMILARITY_THRESHOLD: "0.92"
+  HONEYBOT_DEFAULT_KNOWN_TEXT_SIMILARITY_THRESHOLD: "0.82"
+  HONEYBOT_DEFAULT_EVIDENCE_CONFIDENCE_THRESHOLD: "0.90"
+  HONEYBOT_DEFAULT_AUTO_PUNISH_ENABLED: "false"
+  HONEYBOT_DEFAULT_PUNISHMENT_DM_NOTIFY: "true"
+  HONEYBOT_DEFAULT_RETENTION_CASE_DAYS: "180"
+  HONEYBOT_DEFAULT_GLOBAL_BANS_ENABLED: "false"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_GUILD: "10000"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_USER: "200"
+  HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_ACTION: timeout
+  HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_DURATION_SECONDS: "21600"
+  HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_ROLE_ID: ""
+  HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_DELETE_MESSAGES: "true"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_ACTION: timeout
+  HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_DURATION_SECONDS: "1800"
+  HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_ROLE_ID: ""
+  HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_DELETE_MESSAGES: "true"
+  HONEYBOT_DEFAULT_PUNISHMENT_ACTION: ban
+  HONEYBOT_DEFAULT_PUNISHMENT_DURATION_SECONDS: "null"
+  HONEYBOT_DEFAULT_PUNISHMENT_ROLE_ID: ""
+  HONEYBOT_DEFAULT_PUNISHMENT_DELETE_MESSAGES: "true"
+
+extraEnv: []
+extraEnvFrom: []
+extraVolumes: []
+extraVolumeMounts: []

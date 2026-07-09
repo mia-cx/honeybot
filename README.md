@@ -101,10 +101,40 @@ pnpm eval:fixtures # run prompt evals against text fixtures + local EVAL_CORPUS_
 
 ## Hosting notes
 
-Planned default deployment shape:
+Default deployment shape:
 
 - SQLite database at `data/honeybot.sqlite`
 - local image/evidence storage under `data/images/`
-- `data/` mounted as a persistent Docker/Railway volume
+- `data/` mounted as a persistent Docker/Railway/Kubernetes volume
 
 Without a persistent volume, redeploys can lose config, cases, and known scam evidence.
+
+Build the Docker image locally:
+
+```bash
+docker build -f docker/Dockerfile -t honeybot:local .
+```
+
+GitHub Actions builds every PR and push to `main`. Pushes to `main` publish multi-arch images to GHCR as `ghcr.io/mia-cx/honeybot:main`, `:latest`, and `:sha-...`. Docker Hub publishing is enabled when these repository settings exist:
+
+- Secret `DOCKERHUB_USERNAME`
+- Secret `DOCKERHUB_TOKEN`
+- Optional variable `DOCKERHUB_REPOSITORY` (defaults to `honeybot`)
+
+Kubernetes/k3s options:
+
+- Raw starter manifest: [`k8s/honeybot.yaml`](k8s/honeybot.yaml)
+- Helm chart: [`charts/honeybot`](charts/honeybot)
+
+Example Helm install:
+
+```bash
+helm upgrade --install honeybot ./charts/honeybot \
+  --namespace honeybot --create-namespace \
+  --set image.repository=ghcr.io/YOUR_ORG/honeybot \
+  --set image.tag=0.1.0 \
+  --set secrets.discordToken='YOUR_DISCORD_TOKEN' \
+  --set secrets.openrouterApiKey='YOUR_OPENROUTER_KEY' \
+  --set secrets.apiKeyEncryptionKey='BASE64_32_BYTE_KEY' \
+  --set env.GLOBAL_AUTH_TEAM_ID='YOUR_DISCORD_APP_TEAM_ID'
+```

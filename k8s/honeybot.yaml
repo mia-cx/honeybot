@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: honeybot
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: honeybot-secret
+  namespace: honeybot
+type: Opaque
+stringData:
+  DISCORD_TOKEN: replace-me
+  OPENROUTER_API_KEY: replace-me
+  # Generate with: openssl rand -base64 32
+  API_KEY_ENCRYPTION_KEY: replace-me
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: honeybot-config
+  namespace: honeybot
+data:
+  LOG_LEVEL: info
+  DATABASE_URL: file:data/honeybot.sqlite
+  IMAGE_STORAGE_DRIVER: filesystem
+  IMAGE_STORAGE_DIR: data/images
+  DEFAULT_TEXT_PRIMARY_PROVIDER: openrouter
+  DEFAULT_TEXT_PRIMARY_MODEL: google/gemma-4-31b-it
+  DEFAULT_IMAGE_PRIMARY_PROVIDER: openrouter
+  DEFAULT_IMAGE_PRIMARY_MODEL: google/gemma-4-31b-it
+  ADDITIONAL_TEXT_SIGNAL_PROVIDER: openrouter
+  ADDITIONAL_TEXT_SIGNAL_MODELS: ""
+  ADDITIONAL_IMAGE_SIGNAL_PROVIDER: openrouter
+  ADDITIONAL_IMAGE_SIGNAL_MODELS: ""
+  DEFAULT_TEXT_EMBEDDINGS_PROVIDER: openrouter
+  DEFAULT_TEXT_EMBEDDINGS_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  DEFAULT_IMAGE_EMBEDDINGS_PROVIDER: openrouter
+  DEFAULT_IMAGE_EMBEDDINGS_MODEL: nvidia/llama-nemotron-embed-vl-1b-v2:free
+  DEFAULT_EMBEDDINGS_DIMENSIONS: "2048"
+  MODEL_CALL_LIMIT: "6000"
+  MODEL_CALL_LIMIT_PER_GUILD: "20"
+  MODEL_CALL_WINDOW_SECONDS: "60"
+  MODEL_RETRY_MAX_ATTEMPTS: "3"
+  MODEL_RETRY_INITIAL_DELAY_MS: "300"
+  MODEL_RETRY_MAX_DELAY_MS: "15000"
+  MODERATION_ACTION_LIMIT: "30"
+  MODERATION_ACTION_LIMIT_PER_GUILD: "10"
+  MODERATION_ACTION_WINDOW_SECONDS: "60"
+  GLOBAL_AUTH_MODE: team
+  GLOBAL_AUTH_TEAM_ID: replace-me
+  GLOBAL_AUTH_USER_IDS: ""
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: honeybot-data
+  namespace: honeybot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: honeybot
+  namespace: honeybot
+  labels:
+    app.kubernetes.io/name: honeybot
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: honeybot
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: honeybot
+    spec:
+      securityContext:
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: honeybot
+          image: ghcr.io/mia-cx/honeybot:0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: false
+            runAsGroup: 10001
+            runAsNonRoot: true
+            runAsUser: 10001
+          envFrom:
+            - configMapRef:
+                name: honeybot-config
+            - secretRef:
+                name: honeybot-secret
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: honeybot-data

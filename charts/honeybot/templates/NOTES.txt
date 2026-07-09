@@ -1,0 +1,19 @@
+Honeybot has been installed.
+
+This chart runs a single long-lived Discord bot pod. It does not create a Service because Honeybot only makes outbound connections to Discord/OpenRouter.
+
+Required secret values:
+  - secrets.discordToken
+  - secrets.apiKeyEncryptionKey (generate with: openssl rand -base64 32)
+  - secrets.openrouterApiKey, unless every guild provides BYOK keys
+
+Data is stored in /app/data using a ReadWriteOnce PVC by default:
+  {{- if .Values.persistence.enabled }}
+  claim: {{ default (printf "%s-data" (include "honeybot.fullname" .)) .Values.persistence.existingClaim }}
+  size: {{ .Values.persistence.size }}
+  {{- else }}
+  persistence is disabled; data will be lost when the pod is replaced.
+  {{- end }}
+
+Check logs:
+  kubectl logs deploy/{{ include "honeybot.fullname" . }} -n {{ .Release.Namespace }} -f

@@ -1,0 +1,29 @@
+# Secrets and local env files
+.env
+.env.*
+!.env.example
+
+# Dependencies/build output
+node_modules
+dist
+build
+coverage
+.vitest
+
+# Runtime data
+data
+*.sqlite
+*.sqlite-*
+
+# VCS/editor/system files
+.git
+.gitignore
+.DS_Store
+.idea
+.vscode
+
+# Logs/temp
+*.log
+pnpm-debug.log*
+.tmp
+tmp

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: honeybot
+description: A Discord moderation bot for honeypot and scam raid detection.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - discord
+  - moderation
+  - bot
+  - honeybot
+home: https://github.com/mia-cx/honeybot
+sources:
+  - https://github.com/mia-cx/honeybot
