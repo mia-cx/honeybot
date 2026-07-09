@@ -976,10 +976,10 @@ describe('FileStorage and prompts', () => {
     const stored = await storage.saveFromUrl(
       'https://cdn.test/file',
       ['guild', 'case'],
-      '../bad name.png',
+      '../bad name.txt',
     );
     expect(stored.storageKey).toMatch(
-      /^guild\/case\/[a-f0-9]{64}-bad_name\.png$/,
+      /^guild\/case\/[a-f0-9]{64}-bad_name\.txt$/,
     );
     await expect(storage.read(stored.storageKey)).resolves.toEqual(
       Buffer.from('hello'),
@@ -1067,6 +1067,39 @@ describe('FileStorage and prompts', () => {
     expect(stored.normalized).toBe(true);
     expect(stored.storageKey).toMatch(/\.webp$/);
     await expect(storage.read(stored.storageKey)).resolves.not.toEqual(svg);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('rejects unsupported and over-pixel-limit images as metadata-only evidence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { image: { maxInputPixels: 1 } });
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(Buffer.from('not an image'), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/bad', ['guild'], 'bad.png'),
+    ).rejects.toThrow('Image could not be normalized safely');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        Buffer.from(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
+        ),
+        {
+          status: 200,
+          headers: { 'content-type': 'image/svg+xml' },
+        },
+      ),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/large', ['guild'], 'large.svg'),
+    ).rejects.toThrow('Image could not be normalized safely');
+
     rmSync(root, { recursive: true, force: true });
   });
 

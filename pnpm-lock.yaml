@@ -25,9 +25,6 @@ importers:
       effect:
         specifier: 4.0.0-beta.93
         version: 4.0.0-beta.93
-      heic-convert:
-        specifier: ^2.1.0
-        version: 2.1.0
       nanoid:
         specifier: ^5.1.16
         version: 5.1.16
@@ -1779,20 +1776,6 @@ packages:
       }
     engines: { node: '>=8' }
 
-  heic-convert@2.1.0:
-    resolution:
-      {
-        integrity: sha512-1qDuRvEHifTVAj3pFIgkqGgJIr0M3X7cxEPjEp0oG4mo8GFjq99DpCo8Eg3kg17Cy0MTjxpFdoBHOatj7ZVKtg==,
-      }
-    engines: { node: '>=12.0.0' }
-
-  heic-decode@2.1.0:
-    resolution:
-      {
-        integrity: sha512-0fB3O3WMk38+PScbHLVp66jcNhsZ/ErtQ6u2lMYu/YxXgbBtl+oKOhGQHa4RpvE68k8IzbWkABzHnyAIjR758A==,
-      }
-    engines: { node: '>=8.0.0' }
-
   html-escaper@2.0.2:
     resolution:
       {
@@ -1893,12 +1876,6 @@ packages:
       }
     engines: { node: '>=8' }
 
-  jpeg-js@0.4.4:
-    resolution:
-      {
-        integrity: sha512-WZzeDOEtTOBK4Mdsar0IqEU5sMr3vSV2RqkAIzUEV2BHnUfKGyswWFPFwK5EeDo93K3FohSHbLAjj0s1Wzd+dg==,
-      }
-
   js-tokens@10.0.0:
     resolution:
       {
@@ -1948,13 +1925,6 @@ packages:
         integrity: sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ==,
       }
     engines: { node: '>= 0.8.0' }
-
-  libheif-js@1.19.8:
-    resolution:
-      {
-        integrity: sha512-vQJWusIxO7wavpON1dusciL8Go9jsIQ+EUrckauFYAiSTjcmLAsuJh3SszLpvkwPci3JcL41ek2n+LUZGFpPIQ==,
-      }
-    engines: { node: '>=8.0.0' }
 
   lightningcss-android-arm64@1.32.0:
     resolution:
@@ -2288,13 +2258,6 @@ packages:
         integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==,
       }
     engines: { node: '>=12' }
-
-  pngjs@6.0.0:
-    resolution:
-      {
-        integrity: sha512-TRzzuFRRmEoSW/p1KVAmiOgPco2Irlah+bGFCeNfJXxxYGwSw7YwAOAcd7X28K/m5bjBWKsC29KyoMfHbypayg==,
-      }
-    engines: { node: '>=12.13.0' }
 
   postcss@8.5.16:
     resolution:
@@ -3676,16 +3639,6 @@ snapshots:
 
   has-flag@4.0.0: {}
 
-  heic-convert@2.1.0:
-    dependencies:
-      heic-decode: 2.1.0
-      jpeg-js: 0.4.4
-      pngjs: 6.0.0
-
-  heic-decode@2.1.0:
-    dependencies:
-      libheif-js: 1.19.8
-
   html-escaper@2.0.2: {}
 
   ieee754@1.2.1: {}
@@ -3728,8 +3681,6 @@ snapshots:
       html-escaper: 2.0.2
       istanbul-lib-report: 3.0.1
 
-  jpeg-js@0.4.4: {}
-
   js-tokens@10.0.0: {}
 
   js-yaml@4.3.0:
@@ -3752,8 +3703,6 @@ snapshots:
     dependencies:
       prelude-ls: 1.2.1
       type-check: 0.4.0
-
-  libheif-js@1.19.8: {}
 
   lightningcss-android-arm64@1.32.0:
     optional: true
@@ -3917,8 +3866,6 @@ snapshots:
   picocolors@1.1.1: {}
 
   picomatch@4.0.5: {}
-
-  pngjs@6.0.0: {}
 
   postcss@8.5.16:
     dependencies:

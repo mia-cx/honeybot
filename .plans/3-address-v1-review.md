@@ -23,7 +23,7 @@ fresh review.
       resolution/revert path, with stale and concurrent regression tests.
 - [x] Bound attachment download size, duration, and processing counts while
       retaining metadata for skipped evidence, with regression tests.
-- [ ] Harden image normalization against decompression-heavy or unsupported
+- [x] Harden image normalization against decompression-heavy or unsupported
       inputs, with regression tests.
 - [ ] Make punishment DMs best-effort and non-blocking in prevention,
       auto-punish, and moderator-review paths, with regression tests.
@@ -40,3 +40,5 @@ fresh review.
   `../../node_modules/.bin/vitest run tests/services.test.ts` (30 tests passed).
 - Attachment-limit validation: typecheck plus `tests/services.test.ts` (31 tests)
   and `tests/ui-and-integrations.test.ts` (26 tests) passed.
+- Image-normalization validation: typecheck and
+  `tests/ui-and-integrations.test.ts` (27 tests) passed.

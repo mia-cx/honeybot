@@ -1,7 +1,8 @@
 import sharp from 'sharp';
-import heicConvert from 'heic-convert';
 
 export const normalizedImageContentType = 'image/webp';
+export const MAX_IMAGE_PIXELS = 40_000_000;
+export const IMAGE_PROCESSING_TIMEOUT_SECONDS = 5;
 
 export type NormalizedAttachmentFile = {
   buffer: Buffer;
@@ -10,10 +11,18 @@ export type NormalizedAttachmentFile = {
   normalized: boolean;
 };
 
+export type ImageNormalizationLimits = {
+  maxInputPixels?: number;
+  timeoutSeconds?: number;
+};
+
+export class UnsafeImageError extends Error {}
+
 export async function normalizeAttachmentFile(
   buffer: Buffer,
   contentType: string | null | undefined,
   fileName: string,
+  limits: ImageNormalizationLimits = {},
 ): Promise<NormalizedAttachmentFile> {
   const cleanContentType =
     contentTypeWithoutParameters(contentType) ??
@@ -22,14 +31,14 @@ export async function normalizeAttachmentFile(
     return originalFile(buffer, cleanContentType, fileName);
   }
 
-  const normalized =
-    (await normalizeWithSharp(buffer).catch(async () =>
-      isHeic(cleanContentType, fileName)
-        ? normalizeHeicWithFallback(buffer).catch(() => null)
-        : null,
-    )) ?? null;
-
-  if (!normalized) return originalFile(buffer, cleanContentType, fileName);
+  let normalized: Buffer;
+  try {
+    normalized = await normalizeWithSharp(buffer, limits);
+  } catch (error) {
+    throw new UnsafeImageError('Image could not be normalized safely', {
+      cause: error,
+    });
+  }
 
   return {
     buffer: normalized,
@@ -39,23 +48,22 @@ export async function normalizeAttachmentFile(
   };
 }
 
-async function normalizeWithSharp(buffer: Buffer) {
-  return sharp(buffer, { animated: false })
+async function normalizeWithSharp(
+  buffer: Buffer,
+  limits: ImageNormalizationLimits,
+) {
+  return sharp(buffer, {
+    animated: false,
+    failOn: 'warning',
+    limitInputPixels: limits.maxInputPixels ?? MAX_IMAGE_PIXELS,
+    sequentialRead: true,
+  })
     .rotate()
     .webp({ quality: 90 })
+    .timeout({
+      seconds: limits.timeoutSeconds ?? IMAGE_PROCESSING_TIMEOUT_SECONDS,
+    })
     .toBuffer();
-}
-
-async function normalizeHeicWithFallback(buffer: Buffer) {
-  const converted = await heicConvert({
-    buffer,
-    format: 'JPEG',
-    quality: 0.92,
-  });
-  const jpegBuffer = Buffer.from(
-    converted instanceof ArrayBuffer ? new Uint8Array(converted) : converted,
-  );
-  return normalizeWithSharp(jpegBuffer);
 }
 
 function originalFile(
@@ -69,16 +77,6 @@ function originalFile(
     fileName,
     normalized: false,
   };
-}
-
-function isHeic(contentType: string, fileName: string) {
-  const lowerName = fileName.toLowerCase();
-  return (
-    contentType === 'image/heic' ||
-    contentType === 'image/heif' ||
-    lowerName.endsWith('.heic') ||
-    lowerName.endsWith('.heif')
-  );
 }
 
 function contentTypeWithoutParameters(contentType: string | null | undefined) {

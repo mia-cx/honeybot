@@ -2,7 +2,10 @@ import { createReadStream } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { sha256 } from '../utils/fingerprints.js';
-import { normalizeAttachmentFile } from './imageNormalization.js';
+import {
+  normalizeAttachmentFile,
+  type ImageNormalizationLimits,
+} from './imageNormalization.js';
 
 export const MAX_ATTACHMENT_BYTES = 16 * 1024 * 1024;
 export const ATTACHMENT_FETCH_TIMEOUT_MS = 10_000;
@@ -22,6 +25,7 @@ export type StoredFile = {
 export type FileStorageLimits = {
   maxAttachmentBytes?: number;
   fetchTimeoutMs?: number;
+  image?: ImageNormalizationLimits;
 };
 
 export class AttachmentResourceLimitError extends Error {}
@@ -64,7 +68,13 @@ export class FileStorage {
       downloaded,
       options.contentType ?? response.headers.get('content-type'),
       fallbackName,
+      this.limits.image,
     );
+    if (stored.buffer.byteLength > maxBytes) {
+      throw new AttachmentResourceLimitError(
+        `Normalized attachment exceeds the ${maxBytes} byte storage limit`,
+      );
+    }
     const digest = sha256(stored.buffer);
     const safeName = safeBasename(stored.fileName);
     const storageKey = [...parts, `${digest}-${safeName}`].join('/');
