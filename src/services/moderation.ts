@@ -1,6 +1,7 @@
 import {
   AttachmentBuilder,
   PermissionFlagsBits,
+  RESTJSONErrorCodes,
   type Guild,
   type GuildMember,
   type Message,
@@ -31,7 +32,7 @@ export async function applyPolicy(
   policy: Policy,
   reason: string,
 ) {
-  await applyPolicyForUser(member.guild, member.id, policy, reason);
+  return applyPolicyForUser(member.guild, member.id, policy, reason);
 }
 
 export async function applyPolicyForUser(
@@ -149,8 +150,62 @@ export async function deleteMessage(message: Message<true>) {
   return true;
 }
 
+export async function applyPolicyWithBestEffortDm(input: {
+  guild: Guild;
+  userId: string;
+  policy: Policy;
+  reason: string;
+  dm: {
+    caseId: string;
+    reason: string;
+    auditReason?: string;
+    caseStore: CaseStore;
+    storage: FileStorage;
+  } | null;
+}) {
+  if (input.dm) {
+    let dmSent = false;
+    try {
+      dmSent = await dmPunishedUser({
+        guild: input.guild,
+        userId: input.userId,
+        caseId: input.dm.caseId,
+        action: input.policy.actionType,
+        reason: input.dm.reason,
+        ...(input.dm.auditReason === undefined
+          ? {}
+          : { auditReason: input.dm.auditReason }),
+        caseStore: input.dm.caseStore,
+        storage: input.dm.storage,
+      });
+    } catch (error) {
+      logger.warn('Punishment DM attempt failed unexpectedly', {
+        guildId: input.guild.id,
+        userId: input.userId,
+        caseId: input.dm.caseId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    if (!dmSent) {
+      logger.info('Continuing punishment after DM delivery failure', {
+        guildId: input.guild.id,
+        userId: input.userId,
+        caseId: input.dm.caseId,
+      });
+    }
+  }
+
+  return applyPolicyForUser(
+    input.guild,
+    input.userId,
+    input.policy,
+    input.reason,
+  );
+}
+
 export async function dmPunishedUser(input: {
-  member: GuildMember;
+  guild: Guild;
+  userId: string;
   caseId: string;
   action: string;
   reason: string;
@@ -158,6 +213,30 @@ export async function dmPunishedUser(input: {
   caseStore: CaseStore;
   storage: FileStorage;
 }) {
+  let member: GuildMember;
+  try {
+    member = await input.guild.members.fetch({
+      user: input.userId,
+      force: true,
+    });
+  } catch (error) {
+    const detail = isUnknownMemberError(error)
+      ? 'Cannot DM user because they are no longer in the guild'
+      : `Cannot fetch user for punishment DM: ${error instanceof Error ? error.message : String(error)}`;
+    const context = {
+      guildId: input.guild.id,
+      userId: input.userId,
+      error: detail,
+    };
+    if (isUnknownMemberError(error)) {
+      logger.info('Skipped punishment DM for user outside guild', context);
+    } else {
+      logger.warn('Failed to fetch punished user for DM', context);
+    }
+    await recordDmFailure(input, detail, []);
+    return false;
+  }
+
   const messages = await input.caseStore.listCaseMessages(input.caseId);
   const attachments = await input.caseStore.listCaseAttachments(input.caseId);
   const firstMessage = messages[0];
@@ -187,7 +266,7 @@ export async function dmPunishedUser(input: {
   }
 
   try {
-    await input.member.send({
+    await member.send({
       flags: COMPONENTS_V2,
       files: files.map((file) => file.attachment),
       components: punishmentDmComponents(
@@ -208,28 +287,46 @@ export async function dmPunishedUser(input: {
     return true;
   } catch (error) {
     logger.warn('Failed to DM punished user', {
-      guildId: input.member.guild.id,
-      userId: input.member.id,
+      guildId: input.guild.id,
+      userId: input.userId,
       error: error instanceof Error ? error.message : String(error),
     });
-    await input.caseStore.addEvent(
-      input.caseId,
-      'failed',
-      'bot',
-      null,
-      'Punishment DM failed',
-      {
-        error: error instanceof Error ? error.message : String(error),
-        omitted,
-      },
+    await recordDmFailure(
+      input,
+      error instanceof Error ? error.message : String(error),
+      omitted,
     );
     return false;
   }
 }
 
+function isUnknownMemberError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === RESTJSONErrorCodes.UnknownMember
+  );
+}
+
+async function recordDmFailure(
+  input: Pick<Parameters<typeof dmPunishedUser>[0], 'caseId' | 'caseStore'>,
+  error: string,
+  omitted: string[],
+) {
+  await input.caseStore.addEvent(
+    input.caseId,
+    'failed',
+    'bot',
+    null,
+    'Punishment DM failed',
+    { error, omitted },
+  );
+}
+
 function punishmentDmComponents(
   input: {
-    member: GuildMember;
+    guild: Guild;
     caseId: string;
     action: string;
     reason: string;
@@ -240,7 +337,7 @@ function punishmentDmComponents(
 ): RawComponent[] {
   const components: RawComponent[] = [
     text(
-      `## 🍯 Honeybot moderation notice\n-# Server: **${input.member.guild.name}** · Case \`${input.caseId}\``,
+      `## 🍯 Honeybot moderation notice\n-# Server: **${input.guild.name}** · Case \`${input.caseId}\``,
     ),
     separator(),
     text(
