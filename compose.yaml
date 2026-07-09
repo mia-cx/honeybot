@@ -3,14 +3,8 @@ services:
     image: miacx/honeybot:latest
     container_name: honeybot
     restart: unless-stopped
-    environment:
-      DISCORD_TOKEN: ${DISCORD_TOKEN}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      API_KEY_ENCRYPTION_KEY: ${API_KEY_ENCRYPTION_KEY:-}
-      GLOBAL_AUTH_MODE: ${GLOBAL_AUTH_MODE:-team}
-      GLOBAL_AUTH_TEAM_ID: ${GLOBAL_AUTH_TEAM_ID:-}
-      GLOBAL_AUTH_USER_IDS: ${GLOBAL_AUTH_USER_IDS:-}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
+    env_file:
+      - .env
     volumes:
       - honeybot-data:/app/data
 

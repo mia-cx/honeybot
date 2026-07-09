@@ -37,14 +37,31 @@ Enable these privileged gateway intents in the Discord Developer Portal:
 - Server Members Intent
 - Message Content Intent
 
-Invite the bot with permissions for the actions you enable:
+Default install scopes:
 
-- View Channels
-- Read Message History
+| Install type | Scopes |
+| --- | --- |
+| User install | `applications.commands` |
+| Guild install | `applications.commands`, `bot` |
+
+Default guild-install permissions:
+
+- Attach Files
+- Ban Members
+- Embed Links
+- Kick Members
+- Manage Channels
 - Manage Messages
+- Manage Roles
 - Moderate Members
-- Ban Members, if using ban punishment
-- Manage Roles, if using role punishment
+- Send Messages
+- Send Messages in Threads
+- Use External Emojis
+- Use Slash Commands
+- View Audit Log
+- View Channels
+
+Some permissions are only needed when the matching moderation policy is enabled, but the default install set lets every Honeybot feature work without regenerating the invite.
 
 ## Quick start
 
@@ -123,7 +140,13 @@ Without a persistent volume, redeploys can lose config, cases, verbose-mode stat
 
 A starter [`compose.yaml`](compose.yaml) is included.
 
-Create a local `.env` for Compose variable substitution:
+Create a local `.env`; Compose loads it into the container via `env_file`:
+
+```bash
+cp .env.example .env
+```
+
+Then fill in at least:
 
 ```bash
 DISCORD_TOKEN=your-bot-token
@@ -185,32 +208,113 @@ Kubernetes notes:
 
 Honeybot reads ordinary environment variables from `process.env`. Docker, Compose, Kubernetes ConfigMaps, and Kubernetes Secrets all work without any special adapter.
 
-Required:
+Notes:
 
-| Variable | Description |
-| --- | --- |
-| `DISCORD_TOKEN` | Discord bot token |
+- `DISCORD_TOKEN` is the only required variable.
+- Empty strings are treated as omitted for optional values.
+- Comma-separated variables ignore blank entries.
+- Booleans accept `true/false`, `1/0`, `yes/no`, and `on/off`.
+- Deployment guild defaults only affect newly initialized guild config. Existing SQLite guild settings are not overwritten.
 
-Recommended:
+### Core runtime
 
-| Variable | Default | Description |
+| Variable | Default if omitted | What it does |
 | --- | --- | --- |
-| `OPENROUTER_API_KEY` | unset | Deployment default model key. Guilds can also BYOK in Discord. |
-| `API_KEY_ENCRYPTION_KEY` | unset | Base64 32-byte key for encrypting guild BYOK keys. |
-| `GLOBAL_AUTH_MODE` | `team` | `team` or `users` global-admin mode. |
-| `GLOBAL_AUTH_TEAM_ID` | unset | Discord Developer Team ID when `GLOBAL_AUTH_MODE=team`. |
-| `GLOBAL_AUTH_USER_IDS` | empty | Comma-separated global admin user IDs when `GLOBAL_AUTH_MODE=users`. |
-| `LOG_LEVEL` | `info` | Log verbosity. |
+| `DISCORD_TOKEN` | **Required** | Discord bot token from the Developer Portal. |
+| `LOG_LEVEL` | `info` | Logger verbosity: `debug`, `info`, `warn`, or `error`. |
+| `DATABASE_URL` | `file:data/honeybot.sqlite` | SQLite database URL for durable bot state. |
+| `IMAGE_STORAGE_DRIVER` | `filesystem` | Evidence/image storage backend. Only `filesystem` is currently supported. |
+| `IMAGE_STORAGE_DIR` | `data/images` | Directory for stored evidence images when using filesystem storage. |
+| `API_KEY_ENCRYPTION_KEY` | unset | Base64 32-byte key for encrypting guild BYOK model API keys. Losing it makes stored keys unrecoverable. |
+| `OPENROUTER_API_KEY` | unset | Deployment default OpenRouter API key. Guild BYOK keys can override this per purpose. |
+| `EVAL_CORPUS_DIR` | unset | Optional local/private fixture corpus directory for eval scripts. |
 
-Storage defaults are hardcoded in the app:
+### Model defaults
 
-| Variable | Default |
-| --- | --- |
-| `DATABASE_URL` | `file:data/honeybot.sqlite` |
-| `IMAGE_STORAGE_DRIVER` | `filesystem` |
-| `IMAGE_STORAGE_DIR` | `data/images` |
+| Variable | Default if omitted | What it does |
+| --- | --- | --- |
+| `DEFAULT_TEXT_PRIMARY_PROVIDER` | `openrouter` | Provider used by the primary text-only scam classifier. |
+| `DEFAULT_TEXT_PRIMARY_MODEL` | `google/gemma-4-31b-it` | Model ID used by the primary text-only scam classifier. |
+| `DEFAULT_IMAGE_PRIMARY_PROVIDER` | `openrouter` | Provider used by the primary multimodal image classifier. |
+| `DEFAULT_IMAGE_PRIMARY_MODEL` | `google/gemma-4-31b-it` | Model ID used by the primary multimodal image classifier. |
+| `ADDITIONAL_TEXT_SIGNAL_PROVIDER` | `openrouter` | Provider for optional advisory text classifiers. |
+| `ADDITIONAL_TEXT_SIGNAL_MODELS` | empty list | Comma-separated advisory text classifier model IDs. Advisory signals do not independently trigger auto-punishment. |
+| `ADDITIONAL_IMAGE_SIGNAL_PROVIDER` | `openrouter` | Provider for optional advisory image classifiers. |
+| `ADDITIONAL_IMAGE_SIGNAL_MODELS` | empty list | Comma-separated advisory image classifier model IDs. Advisory signals do not independently trigger auto-punishment. |
+| `DEFAULT_TEXT_EMBEDDINGS_PROVIDER` | `openrouter` | Provider used for text embeddings. |
+| `DEFAULT_TEXT_EMBEDDINGS_MODEL` | `nvidia/llama-nemotron-embed-vl-1b-v2:free` | Model ID used for text embeddings and text corpus vectors. |
+| `DEFAULT_IMAGE_EMBEDDINGS_PROVIDER` | `openrouter` | Provider used for image embeddings. |
+| `DEFAULT_IMAGE_EMBEDDINGS_MODEL` | `nvidia/llama-nemotron-embed-vl-1b-v2:free` | Model ID used for image embeddings and image corpus vectors. |
+| `DEFAULT_EMBEDDINGS_DIMENSIONS` | `2048` | Expected embedding vector size. Nemotron returns fixed 2048-dimension vectors. |
 
-See [`.env.example`](.env.example) for every advanced model, queue, trigger, and policy default.
+### Rate limits and retries
+
+| Variable | Default if omitted | What it does |
+| --- | --- | --- |
+| `MODEL_CALL_LIMIT` | `6000` | Deployment-wide rolling-window model/provider call limit. |
+| `MODEL_CALL_LIMIT_PER_GUILD` | `20` | Per-guild rolling-window model/provider call limit. |
+| `MODEL_CALL_WINDOW_SECONDS` | `60` | Rolling-window duration for model call limits. |
+| `MODEL_RETRY_MAX_ATTEMPTS` | `3` | Maximum retry attempts for transient model/provider failures. |
+| `MODEL_RETRY_INITIAL_DELAY_MS` | `300` | Initial exponential-backoff delay for model retries. |
+| `MODEL_RETRY_MAX_DELAY_MS` | `15000` | Maximum exponential-backoff delay for model retries. |
+| `MODERATION_ACTION_LIMIT` | `30` | Deployment-wide rolling-window Discord moderation action limit. |
+| `MODERATION_ACTION_LIMIT_PER_GUILD` | `10` | Per-guild rolling-window Discord moderation action limit. |
+| `MODERATION_ACTION_WINDOW_SECONDS` | `60` | Rolling-window duration for moderation action limits. |
+
+### Global-admin authority
+
+| Variable | Default if omitted | What it does |
+| --- | --- | --- |
+| `GLOBAL_AUTH_MODE` | `team` | Global admin mode: `team` checks Discord Developer Team membership; `users` checks `GLOBAL_AUTH_USER_IDS`. |
+| `GLOBAL_AUTH_TEAM_ID` | unset | Discord Developer Team ID used when `GLOBAL_AUTH_MODE=team`. |
+| `GLOBAL_AUTH_USER_IDS` | empty string | Comma-separated Discord user IDs granted global authority when `GLOBAL_AUTH_MODE=users`. |
+
+### Deployment defaults for new guilds
+
+| Variable | Default if omitted | What it does |
+| --- | --- | --- |
+| `HONEYBOT_DEFAULT_MODERATION_CHANNEL_ID` | unset | Default moderation/case-feed channel ID. |
+| `HONEYBOT_DEFAULT_HONEYPOT_CHANNEL_IDS` | empty list | Comma-separated default honeypot channel IDs. |
+| `HONEYBOT_DEFAULT_MODERATOR_USER_IDS` | empty list | Comma-separated default case-moderator user IDs. |
+| `HONEYBOT_DEFAULT_MODERATOR_ROLE_IDS` | empty list | Comma-separated default case-moderator role IDs. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED` | `true` | Enables cross-channel repeated-content trigger for newly initialized guilds. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS` | `5` | Minimum cross-channel match window at the 2-channel threshold. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS` | `3600` | Maximum/asymptotic cross-channel match window. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS` | `0.49` | Steepness for the normalized logistic cross-channel window curve. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS` | `13` | Channel count at the midpoint of the cross-channel window curve. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_CHANNEL_THRESHOLD` | `2` | Number of channels needed to trigger cross-channel detection. |
+| `HONEYBOT_DEFAULT_KNOWN_IMAGE_SIMILARITY_THRESHOLD` | `0.92` | Similarity threshold for known image evidence matches. |
+| `HONEYBOT_DEFAULT_KNOWN_TEXT_SIMILARITY_THRESHOLD` | `0.82` | Similarity threshold for known text evidence matches. |
+| `HONEYBOT_DEFAULT_EVIDENCE_CONFIDENCE_THRESHOLD` | `0.90` | Confidence threshold used by review-bypass auto-punishment. |
+| `HONEYBOT_DEFAULT_AUTO_PUNISH_ENABLED` | `false` | Enables review-bypass auto-punishment for newly initialized guilds. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_DM_NOTIFY` | `true` | Requires a confirmed punishment DM before applying non-log actions. |
+| `HONEYBOT_DEFAULT_RETENTION_CASE_DAYS` | `180` | Case/evidence retention duration in days. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_GUILD` | `10000` | Maximum cached cross-channel detector entries per guild. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_USER` | `200` | Maximum cached cross-channel detector entries per user. |
+| `HONEYBOT_DEFAULT_GLOBAL_BANS_ENABLED` | `false` | Opts newly initialized guilds into global-ban enforcement. |
+
+### Policy defaults for new guilds
+
+Actions:
+
+- Prevention actions: `log`, `timeout`, `role`, `kick`, `ban`
+- Punishment actions: `timeout`, `role`, `kick`, `ban`
+- Durations are seconds; use `null` or `none` for no duration.
+
+| Variable | Default if omitted | What it does |
+| --- | --- | --- |
+| `HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_ACTION` | `timeout` | Immediate prevention action after a honeypot trigger. |
+| `HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_DURATION_SECONDS` | `21600` | Duration for honeypot timeout/temporary role actions. |
+| `HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_ROLE_ID` | unset | Role ID used when honeypot prevention action is `role`. |
+| `HONEYBOT_DEFAULT_HONEYPOT_PREVENTION_DELETE_MESSAGES` | `true` | Deletes trigger messages after honeypot prevention. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_ACTION` | `timeout` | Immediate prevention action after a cross-channel trigger. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_DURATION_SECONDS` | `1800` | Duration for cross-channel timeout/temporary role actions. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_ROLE_ID` | unset | Role ID used when cross-channel prevention action is `role`. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_PREVENTION_DELETE_MESSAGES` | `true` | Deletes duplicate trigger messages after cross-channel prevention. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_ACTION` | `ban` | Final punishment action after moderator approval or review-bypass. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_DURATION_SECONDS` | `null` | Duration for final timeout/temporary role punishments. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_ROLE_ID` | unset | Role ID used when final punishment action is `role`. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_DELETE_MESSAGES` | `true` | Deletes retained case messages when final punishment runs. |
 
 ## Image tags
 
