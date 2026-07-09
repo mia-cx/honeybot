@@ -64,6 +64,12 @@ const embedder = new OpenRouterEmbeddings(
   env.DEFAULT_EMBEDDINGS_DIMENSIONS,
 );
 const caseStore = new CaseStore(database.db, storage, embedder);
+const recoveredCaseOperations = await caseStore.recoverInterruptedOperations();
+if (recoveredCaseOperations > 0) {
+  logger.warn('Recovered interrupted case operations', {
+    recoveredCaseOperations,
+  });
+}
 const classifier = new OpenRouterScamClassifier(modelStore, modelQueue, {
   text: {
     provider: env.ADDITIONAL_TEXT_SIGNAL_PROVIDER,

@@ -78,6 +78,15 @@ const caseOperationTransitions = {
 
 export type CaseOperation = keyof typeof caseOperationTransitions;
 
+type CaseOperationTransition =
+  (typeof caseOperationTransitions)[CaseOperation];
+
+function operationTransitions() {
+  return Object.entries(caseOperationTransitions) as Array<
+    [CaseOperation, CaseOperationTransition]
+  >;
+}
+
 export class CaseStore {
   constructor(
     private readonly db: Db,
@@ -366,6 +375,69 @@ export class CaseStore {
       actorId,
       reason,
       { actionTaken },
+    );
+  }
+
+  async recoverInterruptedOperations() {
+    return this.db.transaction(
+      (tx) => {
+        const transitions = operationTransitions();
+        const interruptedCases = tx
+          .select()
+          .from(cases)
+          .where(
+            inArray(
+              cases.status,
+              transitions.map(([, transition]) => transition.claimed),
+            ),
+          )
+          .all();
+        let recovered = 0;
+
+        for (const caseRow of interruptedCases) {
+          const entry = transitions.find(
+            ([, transition]) => transition.claimed === caseRow.status,
+          );
+          if (!entry) {
+            throw new Error(
+              `Missing recovery transition for case status: ${caseRow.status}`,
+            );
+          }
+          const [operation, transition] = entry;
+          const updated = tx
+            .update(cases)
+            .set({
+              status: transition.from,
+              updatedAt: new Date().toISOString(),
+            })
+            .where(
+              and(
+                eq(cases.id, caseRow.id),
+                eq(cases.status, transition.claimed),
+              ),
+            )
+            .returning()
+            .get();
+          if (!updated) continue;
+
+          tx.insert(caseEvents)
+            .values(
+              caseEventValues(
+                caseRow.id,
+                'operation_recovered',
+                'bot',
+                null,
+                `Recovered interrupted case operation: ${operation}`,
+                { operation, restoredStatus: transition.from },
+              ),
+            )
+            .run();
+          recovered += 1;
+        }
+
+        return recovered;
+      },
+      { behavior: 'immediate' },
     );
   }
 

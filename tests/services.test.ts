@@ -1391,6 +1391,61 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('recovers interrupted operations into their retryable states on startup', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const pendingCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'pending-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const punishedCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'punished-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+    await store.resolve(
+      punishedCase.id,
+      'punished',
+      'ban',
+      'moderator',
+      'punished',
+    );
+    await store.claimOperation(pendingCase.id, 'punish', 'moderator');
+    await store.claimOperation(
+      punishedCase.id,
+      'revert_punishment',
+      'moderator',
+    );
+
+    await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
+    await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
+    expect(await store.getCase(pendingCase.id)).toMatchObject({
+      status: 'pending_review',
+      actionTaken: null,
+    });
+    expect(await store.getCase(punishedCase.id)).toMatchObject({
+      status: 'punished',
+      actionTaken: 'ban',
+    });
+    await expect(
+      store.claimOperation(pendingCase.id, 'punish', 'moderator'),
+    ).resolves.not.toBeNull();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_recovered')),
+    ).toHaveLength(2);
+
+    database.sqlite.close();
+  });
+
   it('creates cases once, persists messages, resolves, and finds by message ids', async () => {
     const database = testDatabase();
     const storage = fakeStorage();
