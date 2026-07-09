@@ -1013,7 +1013,7 @@ describe('moderation actions', () => {
         components: expect.any(Array),
       }),
     );
-    expect(JSON.stringify(member.send.mock.calls[0]?.[0])).toContain(
+    expect(JSON.stringify(member.send.mock.calls[0]?.[0])).not.toContain(
       'https://cdn.test/pending.png',
     );
     expect(caseStore.addEvent).toHaveBeenCalledWith(

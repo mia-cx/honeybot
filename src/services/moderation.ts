@@ -192,12 +192,10 @@ export async function dmPunishedUser(input: PunishmentDmInput) {
       filename: string;
       attachment: AttachmentBuilder;
     }> = [];
-    const pendingEvidenceUrls: string[] = [];
 
     for (const attachment of attachments.slice(0, 8)) {
       if (!attachment.storageKey) {
         omitted.push(attachment.discordAttachmentId);
-        pendingEvidenceUrls.push(attachment.originalUrl);
         continue;
       }
       if (
@@ -224,7 +222,6 @@ export async function dmPunishedUser(input: PunishmentDmInput) {
         input,
         messages[0]?.content ?? '',
         files.map((file) => file.filename),
-        pendingEvidenceUrls,
       ),
       allowedMentions: { parse: [] },
     });
@@ -284,7 +281,6 @@ function punishmentDmComponents(
   },
   messageContent: string,
   attachmentFilenames: string[],
-  pendingEvidenceUrls: string[],
 ): RawComponent[] {
   const components: RawComponent[] = [
     text(
@@ -313,17 +309,6 @@ function punishmentDmComponents(
 
   if (attachmentFilenames.length > 0)
     components.push(mediaGallery(attachmentFilenames));
-  if (pendingEvidenceUrls.length > 0) {
-    components.push(
-      separator(),
-      text(
-        [
-          '## Evidence still processing',
-          ...pendingEvidenceUrls.map((url) => `- ${url}`),
-        ].join('\n'),
-      ),
-    );
-  }
 
   return [container(components)];
 }
