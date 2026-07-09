@@ -115,26 +115,29 @@ async function handleTriggeredMessage(
   });
 
   if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
-    await dmPunishedUser({
-      member,
-      caseId: caseRow.id,
-      action: policy.actionType,
-      reason: moderationReason,
-      auditReason: preventionAuditReason,
-      caseStore: dependencies.caseStore,
-      storage: dependencies.storage,
-    });
+    await attempt('notify punished user', () =>
+      dmPunishedUser({
+        member,
+        caseId: caseRow.id,
+        action: policy.actionType,
+        reason: moderationReason,
+        auditReason: preventionAuditReason,
+        caseStore: dependencies.caseStore,
+        storage: dependencies.storage,
+      }),
+    );
   }
+  const preventionResult = await dependencies.moderationQueue.enqueue(
+    message.guildId,
+    () => applyPolicy(member, policy, preventionAuditReason),
+  );
   await dependencies.caseStore.addEvent(
     caseRow.id,
-    'prevention_applied',
+    preventionResult.applied ? 'prevention_applied' : 'prevention_not_applied',
     'bot',
     null,
-    moderationReason,
+    preventionResult.applied ? moderationReason : preventionResult.detail,
     { policy },
-  );
-  await dependencies.moderationQueue.enqueue(message.guildId, () =>
-    applyPolicy(member, policy, preventionAuditReason),
   );
   const preventionAppliedAtMs = Date.now();
 

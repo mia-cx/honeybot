@@ -310,6 +310,108 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
+  it('continues prevention when DM preparation fails', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions);
+    const message = fakeDiscordMessage({
+      id: 'dm-preparation-failure',
+      channelId: 'honey',
+      guild,
+    });
+    guild.register(message);
+    const caseStore = new CaseStore(database.db, fakeStorage());
+    vi.spyOn(caseStore, 'listCaseMessages').mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore,
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual(['ban']);
+    expect(dependencies.moderationQueue.enqueue).toHaveBeenCalledOnce();
+    database.sqlite.close();
+  });
+
+  it('does not record unapplied prevention as successful', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: false,
+    });
+    config.policies.honeypot_prevention.actionType = 'timeout';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions);
+    const message = fakeDiscordMessage({
+      id: 'unapplied-prevention',
+      channelId: 'honey',
+      guild,
+    });
+    guild.register(message);
+    (guild.members.fetch as any)
+      .mockResolvedValueOnce(message.member)
+      .mockResolvedValueOnce(null);
+    const analyzer = {
+      analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+        confidence: 0,
+        shouldPunish: false,
+        reason: 'review required',
+        evidence: [],
+      })),
+    };
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual([]);
+    expect(analyzer.analyze).toHaveBeenCalledOnce();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'prevention_applied')),
+    ).toHaveLength(0);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'prevention_not_applied')),
+    ).toEqual([
+      expect.objectContaining({
+        reason:
+          'timeout could not be applied because the member is no longer in the guild',
+      }),
+    ]);
+    database.sqlite.close();
+  });
+
   it('applies prevention before slow attachment storage completes', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
