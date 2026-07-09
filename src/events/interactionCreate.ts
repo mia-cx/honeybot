@@ -38,6 +38,7 @@ import {
   dmPunishedUser,
   honeybotAuditReason,
   moderationAuditReason,
+  requireAppliedPolicy,
   revertPolicyForUser,
 } from '../services/moderation.js';
 import type { FairQueue } from '../queues/fairQueue.js';
@@ -1551,15 +1552,15 @@ async function handleCaseButton(
             storage: deps.storage,
           });
         }
-        const applyResult = await deps.moderationQueue.enqueue(
-          interaction.guildId,
-          () =>
+        const applyResult = requireAppliedPolicy(
+          await deps.moderationQueue.enqueue(interaction.guildId, () =>
             applyPolicyForUser(
               interaction.guild,
               caseRow.userId,
               policy,
               auditReason,
             ),
+          ),
         );
         return { applyResult, member };
       },
@@ -1648,19 +1649,21 @@ async function handleCaseButton(
       const operation = await runCaseOperation(interaction, deps, {
         caseId,
         operation: 'revert_dismissal',
-        run: () =>
-          deps.moderationQueue.enqueue(interaction.guildId, () =>
-            applyPolicyForUser(
-              interaction.guild,
-              caseRow.userId,
-              prevention,
-              honeybotAuditReason({
-                caseId,
-                triggerType: caseRow.triggerType,
-                decisionSource: 'dismissal-reverted',
-                confidence: caseConfidence(caseRow.evidenceSummaryJson),
-                actorId: interaction.user.id,
-              }),
+        run: async () =>
+          requireAppliedPolicy(
+            await deps.moderationQueue.enqueue(interaction.guildId, () =>
+              applyPolicyForUser(
+                interaction.guild,
+                caseRow.userId,
+                prevention,
+                honeybotAuditReason({
+                  caseId,
+                  triggerType: caseRow.triggerType,
+                  decisionSource: 'dismissal-reverted',
+                  confidence: caseConfidence(caseRow.evidenceSummaryJson),
+                  actorId: interaction.user.id,
+                }),
+              ),
             ),
           ),
         completion: (applyResult) => ({

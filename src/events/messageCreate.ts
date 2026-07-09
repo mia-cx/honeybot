@@ -12,6 +12,7 @@ import {
   dmPunishedUser,
   hasBypass,
   honeybotAuditReason,
+  requireAppliedPolicy,
 } from '../services/moderation.js';
 import type { CaseStore } from '../services/caseStore.js';
 import type { EvidenceAnalyzer } from '../services/evidenceAnalyzer.js';
@@ -319,9 +320,10 @@ async function handleTriggeredMessage(
           storage: dependencies.storage,
         });
       }
-      applyResult = await dependencies.moderationQueue.enqueue(
-        message.guildId,
-        () => applyPolicy(member, punishment, auditReason),
+      applyResult = requireAppliedPolicy(
+        await dependencies.moderationQueue.enqueue(message.guildId, () =>
+          applyPolicy(member, punishment, auditReason),
+        ),
       );
     } catch (error) {
       await dependencies.caseStore.failOperation(

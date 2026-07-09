@@ -16,6 +16,14 @@ const BAN_DELETE_SECONDS = 7 * 24 * 60 * 60;
 
 type RawComponent = { type: number; [key: string]: unknown };
 
+export type PolicyApplicationResult =
+  { applied: true; detail: string } | { applied: false; detail: string };
+
+export function requireAppliedPolicy(result: PolicyApplicationResult) {
+  if (!result.applied) throw new Error(result.detail);
+  return result.detail;
+}
+
 export function hasBypass(member: GuildMember, config: GuildConfig) {
   if (member.id === member.guild.ownerId) return true;
   if (config.moderatorUsers.includes(member.id)) return true;
@@ -31,7 +39,7 @@ export async function applyPolicy(
   policy: Policy,
   reason: string,
 ) {
-  await applyPolicyForUser(member.guild, member.id, policy, reason);
+  return applyPolicyForUser(member.guild, member.id, policy, reason);
 }
 
 export async function applyPolicyForUser(
@@ -42,39 +50,54 @@ export async function applyPolicyForUser(
 ) {
   switch (policy.actionType) {
     case 'log':
-      return 'log action applied';
+      return { applied: true, detail: 'log action applied' } as const;
     case 'timeout': {
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'timeout could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'timeout could not be applied because the member is no longer in the guild',
+        } as const;
+      }
       const seconds = Math.min(
         policy.durationSeconds ?? 1_800,
         DISCORD_MAX_TIMEOUT_SECONDS,
       );
       await member.timeout(seconds * 1000, reason);
-      return 'timeout applied';
+      return { applied: true, detail: 'timeout applied' } as const;
     }
     case 'role': {
       if (!policy.roleId) throw new Error('Role policy missing role_id');
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'role could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'role could not be applied because the member is no longer in the guild',
+        } as const;
+      }
       await member.roles.add(policy.roleId, reason);
-      return 'role applied';
+      return { applied: true, detail: 'role applied' } as const;
     }
     case 'kick': {
       const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'kick could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'kick could not be applied because the member is no longer in the guild',
+        } as const;
+      }
       await member.kick(moderationAuditReason(policy, reason));
-      return 'user kicked';
+      return { applied: true, detail: 'user kicked' } as const;
     }
     case 'ban':
       await guild.members.ban(userId, {
         reason: moderationAuditReason(policy, reason),
         deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
       });
-      return 'user banned';
+      return { applied: true, detail: 'user banned' } as const;
   }
 }
 

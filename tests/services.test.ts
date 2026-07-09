@@ -537,6 +537,61 @@ describe('case review interactions', () => {
     database.sqlite.close();
   });
 
+  it('keeps absent-member punishments retryable when no action was applied', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: false,
+    });
+    config.policies.punishment.actionType = 'timeout';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'departed-user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: {
+        fetch: vi.fn(async () => null),
+      },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'pending_review',
+      actionTaken: null,
+    });
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: expect.stringContaining('no longer in the guild'),
+      ephemeral: true,
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
   it('applies one concurrent punishment and treats the failed DM as best-effort', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({

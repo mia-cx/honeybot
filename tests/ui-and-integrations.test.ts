@@ -845,7 +845,7 @@ describe('moderation actions', () => {
         policy('timeout', { durationSeconds: 999999999 }),
         'reason',
       ),
-    ).resolves.toBe('timeout applied');
+    ).resolves.toEqual({ applied: true, detail: 'timeout applied' });
     expect(member.timeout).toHaveBeenCalledWith(
       28 * 24 * 60 * 60 * 1000,
       'reason',
@@ -857,11 +857,11 @@ describe('moderation actions', () => {
         policy('role', { roleId: 'role' }),
         'reason',
       ),
-    ).resolves.toBe('role applied');
+    ).resolves.toEqual({ applied: true, detail: 'role applied' });
     expect(member.roles.add).toHaveBeenCalledWith('role', 'reason');
     await expect(
       applyPolicyForUser(guild, 'user', policy('kick'), 'reason'),
-    ).resolves.toBe('user kicked');
+    ).resolves.toEqual({ applied: true, detail: 'user kicked' });
     await expect(
       applyPolicyForUser(
         guild,
@@ -869,7 +869,7 @@ describe('moderation actions', () => {
         policy('ban', { deleteMessages: true }),
         'reason',
       ),
-    ).resolves.toBe('user banned');
+    ).resolves.toEqual({ applied: true, detail: 'user banned' });
     expect(guild.members.ban).toHaveBeenCalledWith(
       'user',
       expect.objectContaining({ deleteMessageSeconds: 604800 }),
@@ -895,7 +895,30 @@ describe('moderation actions', () => {
     const guild = fakeGuild(null);
     await expect(
       applyPolicyForUser(guild, 'user', policy('timeout'), 'reason'),
-    ).resolves.toContain('no longer in the guild');
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'timeout could not be applied because the member is no longer in the guild',
+    });
+    await expect(
+      applyPolicyForUser(
+        guild,
+        'user',
+        policy('role', { roleId: 'role' }),
+        'reason',
+      ),
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'role could not be applied because the member is no longer in the guild',
+    });
+    await expect(
+      applyPolicyForUser(guild, 'user', policy('kick'), 'reason'),
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'kick could not be applied because the member is no longer in the guild',
+    });
     await expect(
       applyPolicyForUser(guild, 'user', policy('role'), 'reason'),
     ).rejects.toThrow('missing role_id');
