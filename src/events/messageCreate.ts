@@ -8,7 +8,7 @@ import type {
 import type { MessageCache } from '../services/messageCache.js';
 import {
   deleteMessage,
-  applyPolicy,
+  applyPolicyForUser,
   applyPolicyWithBestEffortDm,
   hasBypass,
   honeybotAuditReason,
@@ -106,7 +106,6 @@ async function handleTriggeredMessage(
     message,
   );
 
-  const member = await message.guild.members.fetch(message.author.id);
   const preventionAuditReason = honeybotAuditReason({
     caseId: caseRow.id,
     triggerType,
@@ -117,7 +116,13 @@ async function handleTriggeredMessage(
 
   const preventionResult = await dependencies.moderationQueue.enqueue(
     message.guildId,
-    () => applyPolicy(member, policy, preventionAuditReason),
+    () =>
+      applyPolicyForUser(
+        message.guild,
+        message.author.id,
+        policy,
+        preventionAuditReason,
+      ),
   );
   await dependencies.caseStore.addEvent(
     caseRow.id,

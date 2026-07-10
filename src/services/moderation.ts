@@ -40,21 +40,6 @@ type DiscordMutationLifecycle = {
   onMutationStarted?: () => void;
 };
 
-export async function applyPolicy(
-  member: GuildMember,
-  policy: Policy,
-  reason: string,
-  lifecycle: DiscordMutationLifecycle = {},
-) {
-  return applyPolicyForUser(
-    member.guild,
-    member.id,
-    policy,
-    reason,
-    lifecycle,
-  );
-}
-
 export async function applyPolicyForUser(
   guild: Guild,
   userId: string,

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RESTJSONErrorCodes } from 'discord.js';
 import { eq, inArray } from 'drizzle-orm';
 import {
   caseAttachments,
@@ -342,9 +343,9 @@ describe('handleMessageCreate', () => {
       }),
     };
     guild.channels.fetch.mockResolvedValue(reviewChannel);
-    (guild.members.fetch as any)
-      .mockResolvedValueOnce(message.member)
-      .mockResolvedValueOnce(null);
+    guild.members.fetch.mockRejectedValueOnce({
+      code: RESTJSONErrorCodes.UnknownMember,
+    });
     const analyzer = {
       analyze: vi.fn(async (): Promise<AnalysisResult> => ({
         confidence: 0,
@@ -398,6 +399,58 @@ describe('handleMessageCreate', () => {
     ]);
     database.sqlite.close();
   });
+
+  it.each(['ban', 'log'] as const)(
+    'applies %s prevention by user id after the member leaves',
+    async (action) => {
+      const database = testDatabase();
+      const config = defaultGuildConfig({
+        honeypotChannelIds: ['honey'],
+        moderationChannelId: null,
+        punishmentDmNotify: false,
+      });
+      config.policies.honeypot_prevention.actionType = action;
+      config.policies.honeypot_prevention.deleteMessages = false;
+
+      const actions: string[] = [];
+      const guild = fakeDiscordGuild([], actions);
+      const message = fakeDiscordMessage({ channelId: 'honey', guild });
+      guild.register(message);
+      guild.members.fetch.mockRejectedValueOnce({
+        code: RESTJSONErrorCodes.UnknownMember,
+      });
+      const analyzer = {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 0,
+          shouldPunish: false,
+          reason: 'review required',
+          evidence: [],
+        })),
+      };
+      const dependencies = {
+        configStore: { getGuildConfig: vi.fn(async () => config) },
+        messageCache: new MessageCache(),
+        duplicateDetector: new DuplicateDetector(),
+        caseStore: new CaseStore(database.db, fakeStorage()),
+        analyzer,
+        moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+        storage: fakeStorage(),
+      } as any;
+
+      await handleMessageCreate(message, dependencies);
+
+      expect(guild.members.fetch).not.toHaveBeenCalled();
+      expect(actions).toEqual(action === 'ban' ? ['ban'] : []);
+      expect(
+        await database.db
+          .select()
+          .from(caseEvents)
+          .where(eq(caseEvents.eventType, 'prevention_applied')),
+      ).toHaveLength(1);
+      expect(analyzer.analyze).toHaveBeenCalledTimes(action === 'log' ? 1 : 0);
+      database.sqlite.close();
+    },
+  );
 
   it('applies prevention before slow attachment storage completes', async () => {
     const database = testDatabase();
