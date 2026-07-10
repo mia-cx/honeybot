@@ -1306,7 +1306,7 @@ describe('FileStorage and prompts', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('normalizes downloaded model evidence images to webp', async () => {
+  it('normalizes filename-identified model evidence images to webp', async () => {
     const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
     const svg = Buffer.from(
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="red"/></svg>',
@@ -1314,7 +1314,7 @@ describe('FileStorage and prompts', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(svg, {
         status: 200,
-        headers: { 'content-type': 'image/svg+xml' },
+        headers: { 'content-type': 'application/octet-stream' },
       }),
     );
     const storage = new FileStorage(root);
@@ -1323,7 +1323,7 @@ describe('FileStorage and prompts', () => {
       'https://cdn.test/image.png',
       ['guild', 'case'],
       'image.svg',
-      { contentType: 'image/svg+xml' },
+      { contentType: 'application/octet-stream' },
     );
 
     expect(stored.contentType).toBe('image/webp');

@@ -34,6 +34,7 @@ import {
 } from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
 import { FairQueue } from '../queues/fairQueue.js';
+import { resolveImageContentType } from '../storage/imageNormalization.js';
 import { logger } from '../logger.js';
 
 const caseId = customAlphabet(
@@ -206,8 +207,11 @@ export class CaseStore {
     const attachmentStorage: Array<Promise<CaseAttachmentRow>> = [];
     let admittedAttachments = 0;
     for (const attachment of message.attachments.values()) {
+      const attachmentName =
+        attachment.name ?? `${attachment.id}.bin`;
       const eligibleForProcessing =
-        attachment.contentType?.startsWith('image/') === true &&
+        resolveImageContentType(attachment.contentType, attachmentName) !==
+          null &&
         admittedAttachments < MAX_ATTACHMENTS_PER_MESSAGE &&
         attachment.size <= MAX_ATTACHMENT_BYTES;
       const row = this.db.transaction(

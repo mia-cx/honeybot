@@ -2007,6 +2007,59 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('admits image filenames when Discord omits or generalizes content type', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'inferred-image-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'inferred-image-message',
+        attachments: [
+          attachment({
+            id: 'missing-type',
+            name: 'evidence.png',
+            contentType: null,
+          }),
+          attachment({
+            id: 'generic-type',
+            name: 'evidence.jpg',
+            contentType: 'application/octet-stream',
+          }),
+          attachment({
+            id: 'non-image',
+            name: 'evidence.bin',
+            contentType: 'application/octet-stream',
+          }),
+        ],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(2);
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(
+      rows
+        .filter((row) => row.processingState === 'stored')
+        .map((row) => row.discordAttachmentId),
+    ).toEqual(['missing-type', 'generic-type']);
+    expect(
+      rows.find((row) => row.discordAttachmentId === 'non-image'),
+    ).toMatchObject({ processingState: null, storageKey: null });
+
+    database.sqlite.close();
+  });
+
   it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
     const database = testDatabase();
     const storage = fakeStorage();
@@ -2733,7 +2786,7 @@ function attachment(
   input: Partial<{
     id: string;
     name: string;
-    contentType: string;
+    contentType: string | null;
     size: number;
     url: string;
     proxyURL: string;
@@ -2742,7 +2795,8 @@ function attachment(
   return {
     id: input.id ?? 'attachment',
     name: input.name ?? 'image.png',
-    contentType: input.contentType ?? 'image/png',
+    contentType:
+      input.contentType === undefined ? 'image/png' : input.contentType,
     size: input.size ?? 123,
     url: input.url ?? 'https://cdn.discordapp.test/image.png',
     proxyURL: input.proxyURL ?? 'https://proxy.discordapp.test/image.png',

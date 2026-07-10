@@ -25,8 +25,8 @@ export async function normalizeAttachmentFile(
   limits: ImageNormalizationLimits = {},
 ): Promise<NormalizedAttachmentFile> {
   const cleanContentType =
-    contentTypeWithoutParameters(contentType) ??
-    imageContentTypeFromName(fileName);
+    resolveImageContentType(contentType, fileName) ??
+    contentTypeWithoutParameters(contentType);
   if (!cleanContentType?.startsWith('image/')) {
     return originalFile(buffer, cleanContentType, fileName);
   }
@@ -81,6 +81,15 @@ function originalFile(
 
 function contentTypeWithoutParameters(contentType: string | null | undefined) {
   return contentType?.split(';', 1)[0]?.trim().toLowerCase() || null;
+}
+
+export function resolveImageContentType(
+  contentType: string | null | undefined,
+  fileName: string,
+) {
+  const declaredContentType = contentTypeWithoutParameters(contentType);
+  if (declaredContentType?.startsWith('image/')) return declaredContentType;
+  return imageContentTypeFromName(fileName);
 }
 
 function imageContentTypeFromName(fileName: string) {
