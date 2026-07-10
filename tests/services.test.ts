@@ -1801,6 +1801,57 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('does not let non-images consume image evidence slots', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'mixed-evidence-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const nonImages = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE },
+      (_, index) =>
+        attachment({
+          id: `document-${index}`,
+          name: `document-${index}.pdf`,
+          contentType: 'application/pdf',
+        }),
+    );
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'mixed-evidence-message',
+        attachments: [
+          ...nonImages,
+          attachment({ id: 'image-evidence' }),
+        ],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(
+      rows.find((row) => row.discordAttachmentId === 'image-evidence'),
+    ).toMatchObject({ processingState: 'stored' });
+    const documentRows = rows.filter((row) =>
+      row.discordAttachmentId.startsWith('document-'),
+    );
+    expect(documentRows).toHaveLength(MAX_ATTACHMENTS_PER_MESSAGE);
+    for (const row of documentRows) {
+      expect(row).toMatchObject({ processingState: null, storageKey: null });
+    }
+
+    database.sqlite.close();
+  });
+
   it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
     const database = testDatabase();
     const storage = fakeStorage();

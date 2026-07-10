@@ -207,6 +207,7 @@ export class CaseStore {
     let admittedAttachments = 0;
     for (const attachment of message.attachments.values()) {
       const eligibleForProcessing =
+        attachment.contentType?.startsWith('image/') === true &&
         admittedAttachments < MAX_ATTACHMENTS_PER_MESSAGE &&
         attachment.size <= MAX_ATTACHMENT_BYTES;
       const row = this.db.transaction(
