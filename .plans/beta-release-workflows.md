@@ -141,19 +141,19 @@ Run moving-alias promotion as a separate serialized reconciler. Each attempt ign
 
 ### `.github/workflows/release.yml`
 
-Keep the existing Changesets version-PR job and add stable-release orchestration.
+Keep the existing Changesets version-PR job and add stable-release orchestration. Grant the workflow only the capabilities its jobs exercise: `contents: write` for release tags, `pull-requests: write` for the version PR, and `packages: write` for GHCR publication; retain the default read-only posture for everything else. The stable publisher must receive `packages: write` before any registry login or tag mutation so a missing permission cannot strand a Git tag without its GHCR image.
 
 Generate a short-lived installation token from a dedicated GitHub App with only repository contents and pull-request write permissions, and pass it to `changesets/action`. Unlike `GITHUB_TOKEN`, the App token allows release-PR `pull_request` events to run required CI without entering `action_required`; pin the token action to an immutable SHA and fail closed when App credentials are unavailable.
 
 On each push to `main`:
 
 1. Continue running `changesets/action` with the GitHub App token so `changeset-release/main` is created or updated from pending fragments and receives normal CI.
-2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`, set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`.
+2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`; set up the pinned pnpm and Node versions; run `pnpm install --frozen-lockfile`; then set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`. Jobs share no filesystem or dependency state, so this setup is required independently of the version-PR job.
 3. The script finds the latest complete stable release, then scans first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. It validates each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; it does not infer the release solely from the current push's `before`/`sha` pair.
 4. The script reconciles every candidate oldest-first in-process. For each exact release SHA it:
    - requires a valid increasing stable semantic version;
    - fetches and preflights `vX.Y.Z`, failing if it points elsewhere and accepting it if it already points to the release SHA;
-   - when absent, creates a temporary detached worktree at the release SHA, runs `pnpm changeset tag` there, then verifies and pushes the resulting tag so a later batched commit cannot become the target;
+   - when absent, creates a temporary detached worktree at the release SHA, runs a frozen dependency install inside that worktree followed by `pnpm changeset tag`, then verifies and pushes the resulting tag so a later batched commit cannot become the target;
    - calls the shared `containerPublication` module to reconcile both registries from absent, partial-valid, or complete state;
    - requires the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
 5. After every immutable candidate is complete, derive the desired stable alias map across all complete stable releases: each minor alias points to the newest release in that minor line, each major alias to the newest release in that major line, and `latest` to the newest release globally. Reconcile the entire map from canonical digests without rebuilding, repairing aliases for every recovered release line rather than only the newest release.
