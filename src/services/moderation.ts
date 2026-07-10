@@ -36,12 +36,23 @@ export function hasBypass(member: GuildMember, config: GuildConfig) {
   );
 }
 
+type DiscordMutationLifecycle = {
+  onMutationStarted?: () => void;
+};
+
 export async function applyPolicy(
   member: GuildMember,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
-  return applyPolicyForUser(member.guild, member.id, policy, reason);
+  return applyPolicyForUser(
+    member.guild,
+    member.id,
+    policy,
+    reason,
+    lifecycle,
+  );
 }
 
 export async function applyPolicyForUser(
@@ -49,11 +60,19 @@ export async function applyPolicyForUser(
   userId: string,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
   const member = policyRequiresMember(policy)
     ? await fetchCurrentMember(guild, userId)
     : null;
-  return applyPolicyWithMember(guild, userId, member, policy, reason);
+  return applyPolicyWithMember(
+    guild,
+    userId,
+    member,
+    policy,
+    reason,
+    lifecycle,
+  );
 }
 
 async function applyPolicyWithMember(
@@ -62,6 +81,7 @@ async function applyPolicyWithMember(
   member: GuildMember | null,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle,
 ) {
   switch (policy.actionType) {
     case 'log':
@@ -78,6 +98,7 @@ async function applyPolicyWithMember(
         policy.durationSeconds ?? 1_800,
         DISCORD_MAX_TIMEOUT_SECONDS,
       );
+      lifecycle.onMutationStarted?.();
       await member.timeout(seconds * 1000, reason);
       return { applied: true, detail: 'timeout applied' } as const;
     }
@@ -90,6 +111,7 @@ async function applyPolicyWithMember(
             'role could not be applied because the member is no longer in the guild',
         } as const;
       }
+      lifecycle.onMutationStarted?.();
       await member.roles.add(policy.roleId, reason);
       return { applied: true, detail: 'role applied' } as const;
     }
@@ -101,10 +123,12 @@ async function applyPolicyWithMember(
             'kick could not be applied because the member is no longer in the guild',
         } as const;
       }
+      lifecycle.onMutationStarted?.();
       await member.kick(moderationAuditReason(policy, reason));
       return { applied: true, detail: 'user kicked' } as const;
     }
     case 'ban':
+      lifecycle.onMutationStarted?.();
       await guild.members.ban(userId, {
         reason: moderationAuditReason(policy, reason),
         deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
@@ -159,8 +183,15 @@ export async function revertPolicy(
   member: GuildMember,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
-  return revertPolicyForUser(member.guild, member.id, policy, reason);
+  return revertPolicyForUser(
+    member.guild,
+    member.id,
+    policy,
+    reason,
+    lifecycle,
+  );
 }
 
 export async function revertPolicyForUser(
@@ -168,12 +199,14 @@ export async function revertPolicyForUser(
   userId: string,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
   switch (policy.actionType) {
     case 'timeout': {
       const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'timeout could not be removed because the member is no longer in the guild';
+      lifecycle.onMutationStarted?.();
       await member.timeout(null, reason);
       return 'timeout removed';
     }
@@ -182,10 +215,12 @@ export async function revertPolicyForUser(
       const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'role could not be removed because the member is no longer in the guild';
+      lifecycle.onMutationStarted?.();
       await member.roles.remove(policy.roleId, reason);
       return 'role removed';
     }
     case 'ban':
+      lifecycle.onMutationStarted?.();
       await guild.members.unban(userId, reason);
       return 'user unbanned';
     case 'kick':
@@ -215,6 +250,7 @@ export async function applyPolicyWithBestEffortDm(input: {
   policy: Policy;
   reason: string;
   dm: PunishmentDmContext | null;
+  onMutationStarted?: () => void;
 }) {
   const member =
     input.dm || policyRequiresMember(input.policy)
@@ -254,6 +290,7 @@ export async function applyPolicyWithBestEffortDm(input: {
     member,
     input.policy,
     input.reason,
+    input,
   );
 }
 

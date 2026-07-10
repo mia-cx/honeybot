@@ -310,6 +310,7 @@ async function handleTriggeredMessage(
       punishment.actionType,
     );
     if (!claimed) return;
+    let mutationStarted = false;
     let applyResult;
     try {
       applyResult = requireAppliedPolicy(
@@ -328,10 +329,45 @@ async function handleTriggeredMessage(
                   storage: dependencies.storage,
                 }
               : null,
+            onMutationStarted: () => {
+              mutationStarted = true;
+            },
           }),
         ),
       );
     } catch (error) {
+      if (mutationStarted) {
+        const uncertain = await dependencies.caseStore.markOperationUncertain(
+          caseRow.id,
+          'punish',
+          null,
+          error,
+        );
+        if (!uncertain) throw error;
+        logger.error('Auto-punishment outcome requires reconciliation', {
+          caseId: caseRow.id,
+          guildId: message.guildId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await upsertReviewIfConfigured(
+          message,
+          caseRow.id,
+          guildConfig,
+          dependencies,
+          {
+            status: 'punishment_uncertain',
+            reason:
+              'Discord may have applied the automatic punishment before reporting a failure. Verify the user state and reconcile the case.',
+            duplicateChannelIds,
+            triggerMessageDeleted,
+            preventionOutcome,
+            analysis,
+            punishmentReady: true,
+          },
+        );
+        return;
+      }
+
       await dependencies.caseStore.failOperation(
         caseRow.id,
         'punish',

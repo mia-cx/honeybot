@@ -9,7 +9,8 @@ fresh review.
 ## Acceptance criteria
 
 - [x] Dismiss, punish, and revert buttons conditionally transition the expected
-      case status before Discord side effects.
+      case status before Discord side effects; pre-dispatch failures remain
+      retryable while dispatched failures require explicit reconciliation.
 - [x] Stale or concurrent case actions are no-ops with an ephemeral response.
 - [x] Attachment downloads have byte, time, per-message, and per-case limits.
 - [x] Oversized, slow, unsupported, and unsafe images remain metadata-only.

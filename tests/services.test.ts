@@ -561,6 +561,61 @@ describe('handleMessageCreate', () => {
     ).toHaveLength(1);
     database.sqlite.close();
   });
+
+  it('marks a failed dispatched auto-punishment uncertain', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: false,
+      reviewBypassEnabled: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'log';
+    config.policies.honeypot_prevention.deleteMessages = false;
+    config.policies.punishment.actionType = 'ban';
+
+    const guild = fakeDiscordGuild([]);
+    guild.members.ban.mockRejectedValueOnce(
+      new Error('Discord response lost'),
+    );
+    const message = fakeDiscordMessage({ channelId: 'honey', guild });
+    guild.register(message);
+    const caseStore = new CaseStore(database.db, fakeStorage());
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore,
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 1,
+          shouldPunish: true,
+          reason: 'known scam',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(guild.members.ban).toHaveBeenCalledOnce();
+    expect(await database.db.select().from(cases)).toEqual([
+      expect.objectContaining({
+        status: 'punishment_uncertain',
+        actionTaken: null,
+        operationActionTaken: 'ban',
+      }),
+    ]);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_outcome_uncertain')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
 });
 
 describe('case review interactions', () => {
@@ -611,7 +666,7 @@ describe('case review interactions', () => {
     database.sqlite.close();
   });
 
-  it('restores a failed punishment to a retryable state', async () => {
+  it('marks a failed dispatched punishment uncertain instead of retrying it', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       moderatorUsers: ['moderator-1'],
@@ -626,10 +681,9 @@ describe('case review interactions', () => {
       reason: 'known scam',
     });
     await recordAnalysis(store, caseRow.id);
-    const ban = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('Missing permissions'))
-      .mockResolvedValueOnce(undefined);
+    const ban = vi.fn(async () => {
+      throw new Error('Discord response lost');
+    });
     const guild = {
       id: 'guild',
       ownerId: 'owner',
@@ -643,34 +697,82 @@ describe('case review interactions', () => {
       moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
       storage: fakeStorage(),
     } as any;
-    const first = fakeCaseButtonInteraction(
-      guild,
-      `case:punish:${caseRow.id}`,
-      'moderator-1',
-    );
-    const retry = fakeCaseButtonInteraction(
+    const interaction = fakeCaseButtonInteraction(
       guild,
       `case:punish:${caseRow.id}`,
       'moderator-1',
     );
 
-    await expect(handleInteractionCreate(first as any, deps)).resolves.toBe(
-      undefined,
-    );
-    expect(await store.getCase(caseRow.id)).toMatchObject({
-      status: 'pending_review',
-    });
-    expect(first.reply).toHaveBeenCalledWith({
-      content: expect.stringContaining('failed'),
-      ephemeral: true,
-    });
+    await handleInteractionCreate(interaction as any, deps);
 
-    await handleInteractionCreate(retry as any, deps);
-    expect(ban).toHaveBeenCalledTimes(2);
+    expect(ban).toHaveBeenCalledOnce();
     expect(await store.getCase(caseRow.id)).toMatchObject({
-      status: 'punished',
+      status: 'punishment_uncertain',
+      actionTaken: null,
+      operationActionTaken: 'ban',
     });
-    expect(retry.update).toHaveBeenCalledOnce();
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(JSON.stringify(interaction.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
+    database.sqlite.close();
+  });
+
+  it('marks a failed dispatched punishment revert uncertain', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    await store.claimOperation(caseRow.id, 'punish', 'moderator-1', 'ban');
+    await store.completeOperation(
+      caseRow.id,
+      'punish',
+      'ban',
+      'moderator-1',
+      'punished',
+    );
+    const unban = vi.fn(async () => {
+      throw new Error('Discord response lost');
+    });
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => null), unban },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:revert:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(unban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punishment_revert_uncertain',
+      actionTaken: 'ban',
+      operationActionTaken: null,
+    });
+    expect(JSON.stringify(interaction.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
     database.sqlite.close();
   });
 

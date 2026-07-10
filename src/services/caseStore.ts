@@ -699,7 +699,7 @@ export class CaseStore {
               'operation_outcome_uncertain',
               actorId ? 'user' : 'bot',
               actorId,
-              `Case operation completed externally but could not be persisted: ${operation}`,
+              `Case operation may have completed externally and requires reconciliation: ${operation}`,
               {
                 operation,
                 error: message,

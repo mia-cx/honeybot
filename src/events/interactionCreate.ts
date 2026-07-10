@@ -1532,9 +1532,14 @@ async function handleCaseButton(
       caseId,
       operation: 'dismiss',
       actionTakenOnSuccess: null,
-      run: () =>
+      run: (onMutationStarted) =>
         deps.moderationQueue.enqueue(interaction.guildId, () =>
-          revertPrevention(interaction, caseRow, config),
+          revertPrevention(
+            interaction,
+            caseRow,
+            config,
+            onMutationStarted,
+          ),
         ),
       completion: (revertResult) => ({
         actionTaken: null,
@@ -1598,7 +1603,7 @@ async function handleCaseButton(
       caseId,
       operation: 'punish',
       actionTakenOnSuccess: policy.actionType,
-      run: () =>
+      run: (onMutationStarted) =>
         deps.moderationQueue
           .enqueue(interaction.guildId, () =>
             applyPolicyWithBestEffortDm({
@@ -1615,6 +1620,7 @@ async function handleCaseButton(
                     storage: deps.storage,
                   }
                 : null,
+              onMutationStarted,
             }),
           )
           .then(requireAppliedPolicy),
@@ -1650,13 +1656,14 @@ async function handleCaseButton(
         caseId,
         operation: 'revert_punishment',
         actionTakenOnSuccess: null,
-        run: () =>
+        run: (onMutationStarted) =>
           deps.moderationQueue.enqueue(interaction.guildId, () =>
             revertPolicyForUser(
               interaction.guild,
               caseRow.userId,
               config.policies.punishment,
               'Reverted Honeybot punishment action',
+              { onMutationStarted },
             ),
           ),
         completion: (revertResult) => ({
@@ -1693,7 +1700,7 @@ async function handleCaseButton(
         caseId,
         operation: 'revert_dismissal',
         actionTakenOnSuccess: prevention.actionType,
-        run: async () =>
+        run: async (onMutationStarted) =>
           requireAppliedPolicy(
             await deps.moderationQueue.enqueue(interaction.guildId, () =>
               applyPolicyForUser(
@@ -1707,6 +1714,7 @@ async function handleCaseButton(
                   confidence: caseConfidence(caseRow.evidenceSummaryJson),
                   actorId: interaction.user.id,
                 }),
+                { onMutationStarted },
               ),
             ),
           ),
@@ -1752,7 +1760,7 @@ async function runCaseOperation<T>(
     caseId: string;
     operation: CaseOperation;
     actionTakenOnSuccess: string | null;
-    run: () => Promise<T>;
+    run: (onMutationStarted: () => void) => Promise<T>;
     completion: (value: T) => { actionTaken: string | null; reason: string };
   },
 ): Promise<{ value: T } | null> {
@@ -1770,10 +1778,29 @@ async function runCaseOperation<T>(
     return null;
   }
 
+  let mutationStarted = false;
   let value: T;
   try {
-    value = await input.run();
+    value = await input.run(() => {
+      mutationStarted = true;
+    });
   } catch (error) {
+    if (mutationStarted) {
+      const uncertain = await deps.caseStore.markOperationUncertain(
+        input.caseId,
+        input.operation,
+        interaction.user.id,
+        error,
+      );
+      if (!uncertain) throw error;
+      await interaction.update(
+        caseReviewUncertainUpdate(interaction.message.components, {
+          caseId: input.caseId,
+        }),
+      );
+      return null;
+    }
+
     await deps.caseStore.failOperation(
       input.caseId,
       input.operation,
@@ -1820,6 +1847,7 @@ async function revertPrevention(
   interaction: ButtonInteraction<'cached'>,
   caseRow: NonNullable<Awaited<ReturnType<CaseStore['getCase']>>>,
   config: GuildConfig,
+  onMutationStarted: () => void,
 ) {
   const policy =
     caseRow.triggerType === 'honeypot'
@@ -1830,6 +1858,7 @@ async function revertPrevention(
     caseRow.userId,
     policy,
     'Reverted Honeybot prevention action',
+    { onMutationStarted },
   );
 }
 
