@@ -95,9 +95,9 @@ After publication, re-inspect both registries and mark the immutable image compl
 
 ## Target workflow architecture
 
-### `.github/workflows/publish-container.yml`
+### `scripts/containerPublication.ts`
 
-Create one reusable `workflow_call` workflow for the shared container build.
+Create one typed module/CLI for shared immutable container reconciliation. This is deliberately not a reusable `workflow_call`: GitHub can invoke reusable workflows only as jobs, which cannot be called inside the stable job's ordered candidate loop.
 
 Inputs:
 
@@ -108,15 +108,15 @@ Inputs:
 Responsibilities:
 
 1. Validate the channel/version contract.
-2. Check out the exact supplied SHA.
-3. For beta only, update `package.json` transiently to the supplied prerelease version.
+2. Create a temporary detached worktree at the exact supplied SHA when a build is required.
+3. For beta only, update `package.json` transiently inside that worktree.
 4. Generate immutable exact/SHA references and OCI version/revision/source labels for Docker Hub and GHCR.
 5. Inspect existing immutable references and classify publication state as absent, partial-valid, complete, or conflicting.
 6. Build once only when state is absent; when state is partial-valid, copy the canonical digest to missing references without rebuilding.
 7. Fail before writes on conflicting digests/identity labels, and verify all immutable references after writes.
-8. Expose the canonical digest and verified completion state in the job summary.
+8. Return the canonical digest and verified completion state as typed data and GitHub outputs.
 
-The reusable publisher is an immutable-state reconciler and never updates moving aliases. A separate promotion operation copies its verified canonical digest to channel aliases without rebuilding, so immutable publication and mutable channel movement have distinct failure and concurrency boundaries. The calling workflow supplies only the permissions and secrets it needs, and third-party actions use immutable commit SHAs.
+The beta workflow calls this CLI once; the stable reconciliation script imports the same module and calls it sequentially for each release candidate inside one job. Workflows remain responsible for pinned QEMU/Buildx setup, registry authentication, permissions, secrets, and job summaries. The module never updates moving aliases: separate state reconcilers copy only verified canonical digests to channel aliases, preserving distinct immutable-publication and mutable-promotion failure boundaries.
 
 ### `.github/workflows/container.yml`
 
@@ -132,12 +132,12 @@ Responsibilities:
 6. Resolve the stable baseline and calculate the first-parent beta ordinal.
 7. Produce `<next-version>-beta.<N>` and its immutable Git tag.
 8. Fetch that Git tag before any registry write: continue if absent, allow a rerun if it points to the current SHA, and fail closed if it points elsewhere.
-9. Invoke `publish-container.yml` to reconcile all immutable exact/SHA references for the current release identity, reusing a valid partial digest and rejecting conflicts.
+9. Invoke `scripts/containerPublication.ts` in a workflow step to reconcile all immutable exact/SHA references for the current release identity, reusing a valid partial digest and rejecting conflicts.
 10. After verified immutable publication, create/push the beta Git tag if absent and assert the complete publication invariant.
 
 Do not apply branch-wide cancellation to immutable publication. Distinct beta versions may reconcile concurrently because their references cannot collide; same-version reruns use a version-scoped, non-canceling concurrency group so a run cannot be interrupted between registry reconciliation and Git-tag creation.
 
-Run moving-alias promotion as a separate serialized reconciler. Each attempt ignores the triggering event SHA, resolves the live remote `main` tip, requires that commit's beta publication to be complete, and copies its canonical digest to `beta`, major-beta, and minor-beta aliases without rebuilding. Re-read the live tip after promotion: finish only when it still equals the promoted tip; otherwise repeat within a bounded attempt budget, then unconditionally dispatch a successor reconciliation before exiting. A failed successor dispatch fails the job loudly. GitHub may replace pending reconciler runs safely because every surviving run targets live repository state rather than its original event. Under eventual `main` quiescence, this guarantees convergence without claiming an unavailable registry compare-and-swap.
+Run moving-alias promotion as a separate serialized reconciler. Each attempt ignores the triggering event SHA, resolves the live remote `main` tip, then selects the newest complete beta publication whose tagged commit is reachable on that tip's first-parent history. If none exists, exit as an explicit no-op. Copy the selected canonical digest to `beta`, major-beta, and minor-beta aliases without rebuilding, then recompute the selection from a fresh `main` fetch. Finish when the selected release identity is unchanged; otherwise repeat within a bounded attempt budget and unconditionally dispatch a successor reconciliation before exiting. A failed successor dispatch fails the job loudly. No-Changeset pushes and stable release merges naturally retain the previous beta selection instead of retrying forever. Under eventual `main` quiescence, this guarantees convergence without claiming an unavailable registry compare-and-swap.
 
 ### `.github/workflows/release.yml`
 
@@ -148,19 +148,23 @@ Generate a short-lived installation token from a dedicated GitHub App with only 
 On each push to `main`:
 
 1. Continue running `changesets/action` with the GitHub App token so `changeset-release/main` is created or updated from pending fragments and receives normal CI.
-2. In the stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`.
-3. Find the latest complete stable release, then scan first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. Validate each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; do not infer the release solely from the current push's `before`/`sha` pair.
-4. Reconcile every candidate oldest-first. For each exact release SHA:
-   - require a valid increasing stable semantic version;
-   - fetch and preflight `vX.Y.Z`: fail if it points elsewhere, accept it if it already points to the release SHA, or continue only when absent;
-   - when absent, check out the release SHA before running `pnpm changeset tag`, then verify and push the resulting tag so a later batched commit cannot become the target;
-   - invoke `publish-container.yml` to reconcile both registries from absent, partial-valid, or complete state;
-   - require the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
-5. After all stable candidates are complete, promote stable major/minor/`latest` aliases from the newest canonical digest without rebuilding.
+2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`, set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`.
+3. The script finds the latest complete stable release, then scans first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. It validates each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; it does not infer the release solely from the current push's `before`/`sha` pair.
+4. The script reconciles every candidate oldest-first in-process. For each exact release SHA it:
+   - requires a valid increasing stable semantic version;
+   - fetches and preflights `vX.Y.Z`, failing if it points elsewhere and accepting it if it already points to the release SHA;
+   - when absent, creates a temporary detached worktree at the release SHA, runs `pnpm changeset tag` there, then verifies and pushes the resulting tag so a later batched commit cannot become the target;
+   - calls the shared `containerPublication` module to reconcile both registries from absent, partial-valid, or complete state;
+   - requires the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
+5. After every immutable candidate is complete, derive the desired stable alias map across all complete stable releases: each minor alias points to the newest release in that minor line, each major alias to the newest release in that major line, and `latest` to the newest release globally. Reconcile the entire map from canonical digests without rebuilding, repairing aliases for every recovered release line rather than only the newest release.
 
-Use a branch-wide, non-canceling stable-publication concurrency group. GitHub can replace pending concurrency runs, so correctness comes from the self-healing state scan: any surviving later run starts after the latest complete release and recovers skipped events, pre-existing tags, and partial registry publication. Do not rely on the `GITHUB_TOKEN`-created tag to trigger another workflow; the originating release run directly invokes the reusable publisher.
+Use a branch-wide, non-canceling stable-publication concurrency group. GitHub can replace pending concurrency runs, so correctness comes from the self-healing state scan and desired alias-map reconciliation. Any surviving later run recovers skipped events, pre-existing tags, partial registry publication, and missing major/minor aliases. Do not rely on the `GITHUB_TOKEN`-created tag to trigger another workflow; the originating release job performs the ordered transaction directly.
 
 A manual `workflow_dispatch` recovery path runs the same state reconciler for an existing stable tag after validating that the tag, commit, and package version agree. It must not create or move release tags.
+
+### `scripts/reconcileStableReleases.ts`
+
+Keep ordered stable-release side effects in one typed process rather than encoding a dynamic loop in workflow YAML. The script owns candidate discovery, Git-tag preflight/creation, sequential calls to `containerPublication`, completion checks, and desired stable alias-map reconciliation. External Git, registry, and Docker operations sit behind narrow adapters so policy and state transitions remain unit-testable; any failed candidate stops later candidates and alias promotion.
 
 ### `scripts/releaseMetadata.ts`
 
@@ -173,7 +177,9 @@ Suggested pure operations:
 - Validate stable tag/package-version agreement.
 - Generate beta and stable image aliases for both registries.
 - Classify observed Git/registry state as absent, partial-valid, complete, or conflicting and derive the required reconciliation actions.
+- Select the newest complete beta publication reachable from a live first-parent tip.
 - Select the latest complete stable release and every later version transition requiring reconciliation.
+- Derive the desired stable minor/major/`latest` alias map from all complete releases.
 - Produce GitHub output values and a human-readable summary.
 
 Keep Git operations at the script boundary and release-policy calculations pure.
@@ -196,8 +202,9 @@ Cover:
 - Partial matching registry state reuses its canonical digest and fills only missing references.
 - Conflicting digests or OCI identity labels fail closed before registry writes.
 - Stable transition scanning identifies the exact release commit inside a multi-commit range and includes tagged-but-incomplete releases.
-- Alias reconciliation derives its target from the live `main` tip rather than the triggering event SHA.
-- A tip change during the final promotion attempt requires a successor reconciliation.
+- Beta alias selection chooses the newest complete beta ancestor, remains unchanged across no-release tips, and returns an explicit no-op when none exists.
+- Stable alias maps preserve every recovered major/minor line while assigning `latest` only to the newest complete release.
+- A selected-beta change during the final promotion attempt requires a successor reconciliation.
 - Rerunning the same SHA produces identical metadata.
 
 ## Implementation sequence
@@ -218,12 +225,13 @@ pnpm typecheck
 pnpm test -- tests/releaseMetadata.test.ts
 ```
 
-### Commit 2: Extract the reusable container publisher
+### Commit 2: Extract the shared container publication module
 
 Files:
 
-- Add `.github/workflows/publish-container.yml`.
-- Remove duplicated build/tag generation from `.github/workflows/container.yml` only after callers are ready.
+- Add `scripts/containerPublication.ts`.
+- Add `tests/containerPublication.test.ts` with fake Git/registry/Docker adapters.
+- Remove duplicated build/tag policy from `.github/workflows/container.yml` only after callers are ready.
 
 Requirements:
 
@@ -231,7 +239,8 @@ Requirements:
 - Both registries' exact/SHA references resolve to the same verified digest and release identity.
 - Conflicting existing immutable state fails before any registry write.
 - Moving aliases are promoted from the immutable digest by a separate state-based reconciler.
-- Third-party actions use immutable SHAs.
+- The module is callable once by beta orchestration and repeatedly in-process by stable orchestration; it has no GitHub job/workflow dependency.
+- Third-party actions use immutable SHAs in each caller's environment-setup steps.
 - Permissions are least-privilege.
 
 Verification:
@@ -239,15 +248,15 @@ Verification:
 - Parse all workflow YAML.
 - Run `actionlint` in a pinned container or CI tool.
 - Exercise metadata generation for representative beta/stable inputs without registry login.
-- Seed absent, complete, one-registry-only, one-alias-only, and conflicting immutable states; confirm build/copy/skip/fail behavior and post-write digest equality.
-- Verify immutable publication and moving-alias promotion are separate jobs/steps with no second build.
+- Seed absent, complete, one-registry-only, one-alias-only, and conflicting immutable states through fake adapters; confirm build/copy/skip/fail behavior and post-write digest equality.
+- Confirm the CLI can run as a normal workflow step and the module can be called sequentially for multiple releases without `workflow_call`.
 
 ### Commit 3: Make `main` publish beta images only
 
 Files:
 
 - Rewrite `.github/workflows/container.yml` as the beta orchestrator.
-- Wire it to the reusable publisher.
+- Wire it to the shared `containerPublication` CLI.
 
 Requirements:
 
@@ -258,7 +267,7 @@ Requirements:
 - Existing beta Git and registry references are validated before any registry write.
 - Beta tag creation occurs only after successful immutable image reconciliation.
 - Immutable publication uses version-scoped, non-canceling concurrency; distinct versions may publish concurrently.
-- Moving aliases are handled by a separate serialized reconciler that ignores stale event SHAs, requires complete publication state, and converges on the live `main` tip.
+- Moving aliases are handled by a separate serialized reconciler that ignores stale event SHAs and converges on the newest complete beta publication reachable from the live `main` tip.
 
 Verification:
 
@@ -267,8 +276,9 @@ Verification:
 - Confirm mismatched existing Git tags, registry digests, or OCI identity labels fail before registry publication.
 - Confirm matching partial registry state is completed from its canonical digest without a rebuild.
 - Simulate cancellation requests after immutable publication begins and confirm the publication/tag transaction is non-canceling.
-- Simulate out-of-order events for two successive `main` SHAs and confirm every reconciler targets the live remote tip.
-- Force a tip change on the final in-process attempt and confirm the reconciler dispatches a successor; a dispatch failure must fail the job.
+- Simulate out-of-order events for two successive `main` SHAs and confirm every reconciler selects from the live remote tip's first-parent history.
+- Confirm no-Changeset tips and stable release merges retain the newest complete beta ancestor, while a history with no complete beta exits as a no-op.
+- Force the selected beta identity to change on the final in-process attempt and confirm the reconciler dispatches a successor; a dispatch failure must fail the job.
 - Confirm `latest` cannot appear in beta outputs.
 
 ### Commit 4: Tag and publish stable releases automatically
@@ -276,7 +286,8 @@ Verification:
 Files:
 
 - Extend `.github/workflows/release.yml`.
-- Wire stable release detection to the reusable publisher.
+- Add `scripts/reconcileStableReleases.ts` and focused tests.
+- Wire stable release detection to the shared `containerPublication` module inside one ordered job.
 
 Requirements:
 
@@ -284,10 +295,10 @@ Requirements:
 - Stable-version detection scans first-parent history from the latest complete stable release rather than trusting one push event boundary or Git tag presence.
 - Every stable package transition is tied to and published from its exact release-PR merge commit, even when a push contains later commits.
 - `changeset tag` creates `vX.Y.Z` for this single-package private repository from a checkout of that exact release SHA.
-- The release workflow directly calls the publisher after tagging.
+- One typed process performs the oldest-first tag/publication transactions; it does not attempt to call a reusable workflow from a dynamic loop.
 - Non-canceling serialization plus the self-healing scan recovers version bumps whose original workflow event never ran and tagged releases whose registry publication was interrupted.
 - Reruns reconcile partial registry state, are idempotent, and never move an existing tag.
-- Stable images update exact/minor/major/`latest` tags in both registries.
+- Stable alias-map reconciliation updates every complete minor and major line in both registries, with `latest` reserved for the newest complete release.
 
 Verification:
 
@@ -297,7 +308,8 @@ Verification:
 - Confirm multiple incomplete releases, whether tagged or untagged, are processed oldest-first.
 - Confirm an existing mismatched Git tag or immutable registry reference fails before image publication.
 - Confirm a Changesets release PR created or updated with the App token starts CI without `action_required`.
-- Confirm stable moving aliases finish on the newest successfully published stable digest.
+- Recover candidates across minor and major boundaries and confirm every minor/major alias is repaired while `latest` points only to the newest complete release.
+- Confirm a candidate failure stops later transactions and leaves moving aliases unchanged until a successful reconciliation.
 
 ### Commit 5: Document channels and rollout
 
@@ -331,7 +343,7 @@ Document:
 6. Confirm Changesets updates PR #10 with the GitHub App token, includes both release notes while retaining minor `1.1.0`, and starts required CI without an `action_required` run.
 7. Merge PR #10 as the first production exercise of the stable workflow only after that CI passes.
 8. Verify that the release scanner identifies PR #10's exact merge commit, creates `v1.1.0` there, establishes complete immutable registry state for that commit, and only then promotes `v1.1`, `v1`, and `latest` to its canonical digest.
-9. Verify that the subsequent no-changeset `main` state does not publish a beta image.
+9. Verify that the subsequent no-changeset `main` state does not publish a beta image and leaves beta moving aliases on the newest complete beta ancestor without retries.
 10. Protect `main`: require pull requests and CI, block force pushes/deletion, and limit direct pushes. Enable these requirements only after the App-authored PR #10 update proves the automated release-PR CI path works.
 
 ## Validation checklist
@@ -347,7 +359,7 @@ ruby -e 'require "yaml"; Dir[".github/workflows/*.{yml,yaml}"].each { |f| YAML.p
 git diff --check origin/main...HEAD
 ```
 
-Also validate workflow semantics with `actionlint`, then exercise the first beta and stable runs against both registries. Compare manifests with `docker buildx imagetools inspect`; confirm all immutable aliases resolve to the canonical digest, seed partial/conflicting states to exercise reconciliation, and confirm moving aliases end at the newest complete channel release.
+Also validate workflow semantics with `actionlint`, then exercise the first beta and stable runs against both registries. Compare manifests with `docker buildx imagetools inspect`; confirm all immutable aliases resolve to the canonical digest, seed partial/conflicting states to exercise reconciliation, confirm beta aliases select the newest reachable complete beta, and confirm every stable major/minor alias plus `latest` matches the derived desired map.
 
 ## Acceptance criteria
 
@@ -356,13 +368,13 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 - [ ] Beta versions are transient and are never committed to `main`.
 - [ ] Beta builds publish only beta/exact/SHA aliases and never update `latest` or stable major/minor aliases.
 - [ ] Existing immutable beta Git/registry references are validated before registry writes; partial state is completed from one canonical digest, conflicts fail closed, and publish/tag transactions are not canceled after writes begin.
-- [ ] A serialized state-based reconciler promotes moving beta aliases from the live `main` tip and guarantees convergence under eventual quiescence through bounded retries plus mandatory successor dispatch, without relying on registry compare-and-swap.
+- [ ] A serialized state-based reconciler promotes moving beta aliases from the newest complete beta publication reachable from the live `main` tip, treats no-release tips as stable selections/no-ops, and guarantees convergence under eventual quiescence through bounded retries plus mandatory successor dispatch without registry compare-and-swap.
 - [ ] Changesets aggregates all fragments and uses the largest semantic bump in its release PR.
 - [ ] Changesets-created or updated release PRs run required CI automatically through a least-privilege GitHub App token.
 - [ ] Merging the Changesets release PR automatically creates an immutable matching `vX.Y.Z` Git tag.
 - [ ] The same release run automatically publishes stable images to Docker Hub and GHCR.
 - [ ] Stable history scanning starts after the latest complete release and recovers every later transition from its exact release-PR merge SHA, including tagged releases with interrupted registry publication.
-- [ ] Stable builds publish exact/minor/major/`latest`/SHA aliases from the release merge SHA.
+- [ ] Stable reconciliation publishes exact/SHA aliases from each release merge SHA and repairs the desired alias map for every complete minor/major line, with `latest` on the newest complete release.
 - [ ] Automated tag creation does not depend on a suppressed follow-up `push` workflow.
 - [ ] Pull requests never publish images.
 - [ ] Workflow reruns reconcile valid partial registry state without rebuilding, fail closed on immutable conflicts, and never move an existing release tag.
@@ -371,7 +383,7 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 ## Rollback
 
 - Disable the beta job without touching stable tags or images.
-- Re-run the stable publisher against the last known-good immutable stable tag to restore moving Docker aliases.
+- Dispatch stable reconciliation against the last known-good complete stable history to restore the derived moving-alias map.
 - Never delete or move a published stable Git tag; release a new patch version for corrections.
 - Revert workflow code independently of application code. Pending Changesets remain intact until a release PR is merged.
 
