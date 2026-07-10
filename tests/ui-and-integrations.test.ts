@@ -1135,6 +1135,34 @@ describe('moderation actions', () => {
     );
   });
 
+  it('does not notify after a dispatched punishment fails', async () => {
+    const member = fakeMember();
+    member.guild.members.fetch.mockResolvedValueOnce(member);
+    member.guild.members.ban.mockRejectedValueOnce(
+      new Error('Discord response lost'),
+    );
+
+    await expect(
+      applyPolicyWithBestEffortDm({
+        guild: member.guild,
+        userId: member.id,
+        policy: policy('ban'),
+        reason: 'audit reason',
+        dm: {
+          caseId: 'case1',
+          reason: 'reason',
+          caseStore: {
+            listCaseMessages: vi.fn(),
+            listCaseAttachments: vi.fn(),
+            addEvent: vi.fn(),
+          } as any,
+          storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+        },
+      }),
+    ).rejects.toThrow('Discord response lost');
+    expect(member.send).not.toHaveBeenCalled();
+  });
+
   it('propagates transient member lookup failures before punishment', async () => {
     const member = fakeMember();
     member.guild.members.fetch.mockRejectedValueOnce(
@@ -1163,7 +1191,7 @@ describe('moderation actions', () => {
   });
 
   it.each(['case preparation', 'failure recording'] as const)(
-    'applies punishment after DM %s fails',
+    'keeps applied punishment successful when DM %s fails',
     async (failure) => {
       const member = fakeMember();
       const caseStore = {

@@ -257,34 +257,7 @@ export async function applyPolicyWithBestEffortDm(input: {
       ? await fetchCurrentMember(input.guild, input.userId)
       : null;
 
-  if (input.dm) {
-    if (member) {
-      await dmPunishedUser({
-        member,
-        caseId: input.dm.caseId,
-        action: input.policy.actionType,
-        reason: input.dm.reason,
-        ...(input.dm.auditReason === undefined
-          ? {}
-          : { auditReason: input.dm.auditReason }),
-        caseStore: input.dm.caseStore,
-        storage: input.dm.storage,
-      });
-    } else {
-      logger.info('Skipped punishment DM for user outside guild', {
-        guildId: input.guild.id,
-        userId: input.userId,
-        caseId: input.dm.caseId,
-      });
-      await recordDmFailure(
-        input.dm,
-        'Cannot DM user because they are no longer in the guild',
-        [],
-      );
-    }
-  }
-
-  return applyPolicyWithMember(
+  const result = await applyPolicyWithMember(
     input.guild,
     input.userId,
     member,
@@ -292,6 +265,34 @@ export async function applyPolicyWithBestEffortDm(input: {
     input.reason,
     input,
   );
+  if (!result.applied || !input.dm) return result;
+
+  if (member) {
+    await dmPunishedUser({
+      member,
+      caseId: input.dm.caseId,
+      action: input.policy.actionType,
+      reason: input.dm.reason,
+      ...(input.dm.auditReason === undefined
+        ? {}
+        : { auditReason: input.dm.auditReason }),
+      caseStore: input.dm.caseStore,
+      storage: input.dm.storage,
+    });
+  } else {
+    logger.info('Skipped punishment DM for user outside guild', {
+      guildId: input.guild.id,
+      userId: input.userId,
+      caseId: input.dm.caseId,
+    });
+    await recordDmFailure(
+      input.dm,
+      'Cannot DM user because they are no longer in the guild',
+      [],
+    );
+  }
+
+  return result;
 }
 
 type PunishmentDmInput = {
