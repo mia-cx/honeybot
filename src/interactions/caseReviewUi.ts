@@ -31,6 +31,7 @@ export type CaseReviewInput = {
   preventionOutcome: PolicyApplicationOutcome;
   triggerMessageDeleted: boolean;
   analysis: AnalysisResult | null;
+  punishmentReady: boolean;
 };
 
 type RawComponent = { type: number; [key: string]: unknown };
@@ -109,7 +110,11 @@ export function caseReviewResolutionUpdate(
 
 export function caseReviewRevertUpdate(
   existingComponents: readonly unknown[],
-  input: { caseId: string; punishment: Policy },
+  input: {
+    caseId: string;
+    punishment: Policy;
+    punishmentReady: boolean;
+  },
 ): InteractionUpdateOptions {
   return {
     components: [
@@ -118,6 +123,7 @@ export function caseReviewRevertUpdate(
         caseActionButtons({
           caseId: input.caseId,
           punishment: input.punishment,
+          punishmentReady: input.punishmentReady,
         }),
       ),
     ],
@@ -168,7 +174,14 @@ function caseReviewComponents(
       text(['## Prevention', preventionSummary(input)].join('\n')),
     ]),
     signalsContainer(input),
-    buttonRow(caseActionButtons(input)),
+    buttonRow(
+      caseActionButtons({
+        caseId: input.caseId,
+        punishment: input.punishment,
+        status: input.status,
+        punishmentReady: input.punishmentReady,
+      }),
+    ),
   ];
 }
 
@@ -209,6 +222,7 @@ function caseActionButtons(input: {
   caseId: string;
   punishment: Policy;
   status?: string;
+  punishmentReady: boolean;
 }) {
   if (input.status && isUncertainStatus(input.status))
     return reconciliationButtons(input.caseId);
@@ -226,6 +240,7 @@ function caseActionButtons(input: {
       `case:punish:${input.caseId}`,
       punishmentButtonLabel(input.punishment),
       4,
+      !input.punishmentReady,
     ),
     button(`case:dismiss:${input.caseId}`, 'Dismiss case', 2),
   ];

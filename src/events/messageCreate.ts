@@ -115,17 +115,6 @@ async function handleTriggeredMessage(
     actorId: null,
   });
 
-  if (guildConfig.punishmentDmNotify && policy.actionType !== 'log') {
-    await dmPunishedUser({
-      member,
-      caseId: caseRow.id,
-      action: policy.actionType,
-      reason: moderationReason,
-      auditReason: preventionAuditReason,
-      caseStore: dependencies.caseStore,
-      storage: dependencies.storage,
-    });
-  }
   const preventionResult = await dependencies.moderationQueue.enqueue(
     message.guildId,
     () => applyPolicy(member, policy, preventionAuditReason),
@@ -197,6 +186,7 @@ async function handleTriggeredMessage(
       triggerMessageDeleted,
       preventionOutcome,
       analysis: null,
+      punishmentReady: false,
     },
   );
 
@@ -217,6 +207,7 @@ async function handleTriggeredMessage(
         triggerMessageDeleted,
         preventionOutcome,
         analysis: null,
+        punishmentReady: false,
       },
     );
     return;
@@ -241,6 +232,7 @@ async function handleTriggeredMessage(
           triggerMessageDeleted,
           preventionOutcome,
           analysis: result,
+          punishmentReady: false,
         },
       ).catch((error: unknown) => {
         logger.warn('Failed to update analysis progress', {
@@ -295,6 +287,7 @@ async function handleTriggeredMessage(
       triggerMessageDeleted,
       preventionOutcome,
       analysis,
+      punishmentReady: true,
     },
   );
 
@@ -360,6 +353,7 @@ async function handleTriggeredMessage(
           triggerMessageDeleted,
           preventionOutcome,
           analysis,
+          punishmentReady: true,
         },
       );
       return;
@@ -400,6 +394,7 @@ async function handleTriggeredMessage(
           triggerMessageDeleted,
           preventionOutcome,
           analysis,
+          punishmentReady: true,
         },
       );
       return;
@@ -424,6 +419,7 @@ async function handleTriggeredMessage(
         triggerMessageDeleted,
         preventionOutcome,
         analysis,
+        punishmentReady: true,
       },
     );
   }
@@ -509,6 +505,7 @@ async function upsertReviewIfConfigured(
     triggerMessageDeleted: boolean;
     preventionOutcome: PolicyApplicationOutcome;
     analysis: AnalysisResult | null;
+    punishmentReady: boolean;
   },
 ) {
   if (!guildConfig.moderationChannelId) return;
@@ -546,6 +543,7 @@ async function upsertReviewIfConfigured(
     preventionOutcome: state.preventionOutcome,
     triggerMessageDeleted: state.triggerMessageDeleted,
     analysis: state.analysis,
+    punishmentReady: state.punishmentReady,
   };
   const caseRow = await dependencies.caseStore.getCase(caseId);
 

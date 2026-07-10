@@ -119,6 +119,42 @@ describe('case review UI', () => {
     ]);
   });
 
+  it('disables punishment until analysis completes', () => {
+    const pending = caseReviewMessage(caseInput({ analysis: null }))
+      .components as Array<any>;
+    expect(componentByCustomId(pending, 'case:punish:case1')).toMatchObject({
+      disabled: true,
+    });
+    expect(componentByCustomId(pending, 'case:dismiss:case1')).toMatchObject({
+      disabled: false,
+    });
+
+    const progressing = caseReviewEdit(
+      caseInput({ punishmentReady: false }),
+      pending,
+    ).components as Array<any>;
+    expect(componentByCustomId(progressing, 'case:punish:case1')).toMatchObject(
+      {
+        disabled: true,
+      },
+    );
+
+    const completed = caseReviewEdit(caseInput(), progressing)
+      .components as Array<any>;
+    expect(componentByCustomId(completed, 'case:punish:case1')).toMatchObject({
+      disabled: false,
+    });
+
+    const revertedWhilePending = caseReviewRevertUpdate(pending, {
+      caseId: 'case1',
+      punishment: policy('ban'),
+      punishmentReady: false,
+    }).components as Array<any>;
+    expect(
+      componentByCustomId(revertedWhilePending, 'case:punish:case1'),
+    ).toMatchObject({ disabled: true });
+  });
+
   it('shows waiting copy before classifier evidence arrives', () => {
     const content = textContent(
       caseReviewMessage(
@@ -292,6 +328,7 @@ describe('case review UI', () => {
     const reconciled = caseReviewRevertUpdate(uncertain, {
       caseId: 'case1',
       punishment: policy('ban'),
+      punishmentReady: true,
     }).components as Array<any>;
     expect(textContent(reconciled)).not.toContain('Reconciliation required');
     expect(customIds(reconciled)).toEqual([
@@ -321,6 +358,7 @@ describe('case review UI', () => {
     const reverted = caseReviewRevertUpdate(resolved, {
       caseId: 'case1',
       punishment: policy('ban'),
+      punishmentReady: true,
     }).components as Array<any>;
     expect(textContent(reverted)).not.toContain('Resolved by');
     expect(customIds(reverted)).toEqual([
@@ -1293,6 +1331,7 @@ function caseInput(overrides: Partial<CaseReviewInput> = {}): CaseReviewInput {
       appliedAtMs: 1_700_000_000_000,
     },
     triggerMessageDeleted: true,
+    punishmentReady: overrides.analysis !== null,
     analysis: {
       confidence: 0.88,
       reason: 'classifier',
@@ -1366,6 +1405,18 @@ function textContent(components: Array<any>): string {
   };
   for (const component of components) visit(component);
   return result.join('\n');
+}
+
+function componentByCustomId(
+  components: Array<any>,
+  customId: string,
+): any | undefined {
+  for (const component of components) {
+    if (component.custom_id === customId) return component;
+    const nested = componentByCustomId(component.components ?? [], customId);
+    if (nested) return nested;
+  }
+  return undefined;
 }
 
 function customIds(components: Array<any>): string[] {

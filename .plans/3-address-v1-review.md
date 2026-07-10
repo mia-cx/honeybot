@@ -25,8 +25,8 @@ fresh review.
       retaining metadata for skipped evidence, with regression tests.
 - [x] Harden image normalization against decompression-heavy or unsupported
       inputs, with regression tests.
-- [x] Make punishment DMs best-effort and non-blocking in prevention,
-      auto-punish, and moderator-review paths, with regression tests.
+- [x] Make punishment DMs best-effort and non-blocking in auto-punish and
+      moderator-review paths, without conflating prevention with punishment.
 - [x] Run the full typecheck, lint, and test suite and document the results.
 
 ## Notes
@@ -46,4 +46,4 @@ fresh review.
   (33 tests) passed, including concurrent moderator punishment and failed-DM
   paths.
 - Final validation: TypeScript typecheck passed; ESLint passed; Vitest passed all
-  89 tests across 9 files.
+  102 tests across 9 files.

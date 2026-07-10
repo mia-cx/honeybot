@@ -1496,6 +1496,8 @@ async function handleCaseButton(
         caseReviewRevertUpdate(interaction.message.components, {
           caseId,
           punishment: config.policies.punishment,
+          punishmentReady:
+            caseConfidence(reconciled.evidenceSummaryJson) !== null,
         }),
       );
       return;
@@ -1575,6 +1577,14 @@ async function handleCaseButton(
   const config = await deps.configStore.getGuildConfig(interaction.guildId);
 
   if (action === 'punish') {
+    if (caseConfidence(caseRow.evidenceSummaryJson) === null) {
+      await interaction.reply({
+        content: 'Analysis is still in progress. Try again when it completes.',
+        ephemeral: true,
+      });
+      return;
+    }
+
     const policy = config.policies.punishment;
     const reason = caseRow.reason ?? 'Punished by Honeybot moderator review';
     const auditReason = honeybotAuditReason({
@@ -1688,6 +1698,7 @@ async function handleCaseButton(
         caseReviewRevertUpdate(interaction.message.components, {
           caseId,
           punishment: config.policies.punishment,
+          punishmentReady: caseConfidence(caseRow.evidenceSummaryJson) !== null,
         }),
       );
       return;
@@ -1738,6 +1749,7 @@ async function handleCaseButton(
         caseReviewRevertUpdate(interaction.message.components, {
           caseId,
           punishment: config.policies.punishment,
+          punishmentReady: caseConfidence(caseRow.evidenceSummaryJson) !== null,
         }),
       );
       return;

@@ -536,7 +536,7 @@ If a prevention policy action is `kick` or `ban`, skip paid embeddings/classifie
 
 ### Punished user notifications
 
-If `punishment:dm_notify` is true, Honeybot attempts to DM the punished user before a local kick or ban removes them from the server. The DM includes:
+If `punishment:dm_notify` is true, Honeybot attempts to DM the user after evidence collection and an automatic or moderator punishment decision, but before applying that punishment. Prevention actions do not send punishment DMs. Moderator punishment controls stay disabled, with a server-side guard, until analysis is recorded. The DM includes:
 
 - the server name
 - the moderation decision/action

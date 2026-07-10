@@ -287,7 +287,7 @@ Notes:
 | `HONEYBOT_DEFAULT_KNOWN_TEXT_SIMILARITY_THRESHOLD` | `0.82` | Similarity threshold for known text evidence matches. |
 | `HONEYBOT_DEFAULT_EVIDENCE_CONFIDENCE_THRESHOLD` | `0.90` | Confidence threshold used by review-bypass auto-punishment. |
 | `HONEYBOT_DEFAULT_AUTO_PUNISH_ENABLED` | `false` | Enables review-bypass auto-punishment for newly initialized guilds. |
-| `HONEYBOT_DEFAULT_PUNISHMENT_DM_NOTIFY` | `true` | Requires a confirmed punishment DM before applying non-log actions. |
+| `HONEYBOT_DEFAULT_PUNISHMENT_DM_NOTIFY` | `true` | Enables a best-effort DM before applying an automatic or moderator punishment. |
 | `HONEYBOT_DEFAULT_RETENTION_CASE_DAYS` | `180` | Case/evidence retention duration in days. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_GUILD` | `10000` | Maximum cached cross-channel detector entries per guild. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_MAX_ENTRIES_PER_USER` | `200` | Maximum cached cross-channel detector entries per user. |
