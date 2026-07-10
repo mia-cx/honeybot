@@ -45,5 +45,6 @@ fresh review.
 - Notification/concurrency validation: typecheck and `tests/services.test.ts`
   (33 tests) passed, including concurrent moderator punishment and failed-DM
   paths.
-- Final validation: TypeScript typecheck passed; ESLint passed; Vitest passed all
-  102 tests across 9 files.
+- Final validation after integrating merged PRs #7, #9, and #11: frozen
+  install, TypeScript typecheck, ESLint, and build passed; Vitest passed all 112
+  tests across 9 files.

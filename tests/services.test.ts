@@ -143,6 +143,31 @@ describe('DuplicateDetector', () => {
     });
   });
 
+  it('uses a 2-second minimum window for text-only duplicates', () => {
+    const now = vi.spyOn(Date, 'now');
+
+    expect(matchesDuplicateAfter(2_000, now)).toBe(true);
+    expect(matchesDuplicateAfter(2_001, now)).toBe(false);
+  });
+
+  it('retains the configured minimum window for attachment-bearing duplicates', () => {
+    const now = vi.spyOn(Date, 'now');
+    const attachments: [unknown[], unknown[]] = [
+      [attachment()],
+      [attachment()],
+    ];
+
+    expect(matchesDuplicateAfter(5_000, now, attachments)).toBe(true);
+    expect(matchesDuplicateAfter(5_001, now, attachments)).toBe(false);
+  });
+
+  it('uses the attachment window when either duplicate has attachments', () => {
+    const now = vi.spyOn(Date, 'now');
+
+    expect(matchesDuplicateAfter(4_000, now, [[attachment()], []])).toBe(true);
+    expect(matchesDuplicateAfter(4_000, now, [[], [attachment()]])).toBe(true);
+  });
+
   it('ignores disabled or empty cross-channel signals and sweeps expired entries', () => {
     const detector = new DuplicateDetector();
     const disabled = defaultGuildConfig({ crosschannelEnabled: false });
@@ -225,47 +250,60 @@ describe('handleMessageCreate', () => {
     database.sqlite.close();
   });
 
-  it('does not send punishment DMs for prevention actions', async () => {
-    const database = testDatabase();
-    const config = defaultGuildConfig({
-      honeypotChannelIds: ['honey'],
-      moderationChannelId: null,
-      punishmentDmNotify: true,
-    });
-    config.policies.honeypot_prevention.actionType = 'ban';
-    config.policies.honeypot_prevention.deleteMessages = false;
+  it.each(['timeout', 'kick', 'ban'] as const)(
+    'does not send punishment DMs for %s prevention actions',
+    async (action) => {
+      const database = testDatabase();
+      const config = defaultGuildConfig({
+        honeypotChannelIds: ['honey'],
+        moderationChannelId: null,
+        punishmentDmNotify: true,
+      });
+      config.policies.honeypot_prevention.actionType = action;
+      config.policies.honeypot_prevention.deleteMessages = false;
 
-    const actions: string[] = [];
-    const guild = fakeDiscordGuild([], actions);
-    const message = fakeDiscordMessage({
-      id: 'm1',
-      channelId: 'honey',
-      content: 'free nitro',
-      guild,
-    });
-    guild.register(message);
+      const actions: string[] = [];
+      const guild = fakeDiscordGuild([], actions);
+      const message = fakeDiscordMessage({
+        id: 'm1',
+        channelId: 'honey',
+        content: 'free nitro',
+        guild,
+      });
+      guild.register(message);
 
-    const dependencies = {
-      configStore: { getGuildConfig: vi.fn(async () => config) },
-      messageCache: new MessageCache(),
-      duplicateDetector: new DuplicateDetector(),
-      caseStore: new CaseStore(database.db, fakeStorage()),
-      analyzer: { analyze: vi.fn() },
-      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
-      storage: fakeStorage(),
-    } as any;
+      const dependencies = {
+        configStore: { getGuildConfig: vi.fn(async () => config) },
+        messageCache: new MessageCache(),
+        duplicateDetector: new DuplicateDetector(),
+        caseStore: new CaseStore(database.db, fakeStorage()),
+        analyzer: {
+          analyze: vi.fn(async () => ({
+            confidence: 0,
+            shouldPunish: false,
+            reason: 'not a scam',
+            evidence: [],
+          })),
+        },
+        moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+        storage: fakeStorage(),
+      } as any;
 
-    await handleMessageCreate(message, dependencies);
+      await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual(['ban']);
-    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
-    const notificationEvents = await database.db
-      .select()
-      .from(caseEvents)
-      .where(inArray(caseEvents.eventType, ['dm_notified', 'failed']));
-    expect(notificationEvents).toHaveLength(0);
-    database.sqlite.close();
-  });
+      expect(actions).toEqual([action]);
+      expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(
+        action === 'timeout' ? 1 : 0,
+      );
+      expect(
+        await database.db
+          .select()
+          .from(caseEvents)
+          .where(inArray(caseEvents.eventType, ['dm_notified', 'failed'])),
+      ).toHaveLength(0);
+      database.sqlite.close();
+    },
+  );
 
   it('does not record or display unapplied prevention as successful', async () => {
     const database = testDatabase();
@@ -636,11 +674,82 @@ describe('case review interactions', () => {
     database.sqlite.close();
   });
 
+  it('retries punishment after a transient member lookup failure', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    const ban = vi.fn(async () => undefined);
+    const punishedMember = {
+      id: 'user',
+      guild: null as any,
+      send: vi.fn(async () => undefined),
+    };
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Discord unavailable'))
+      .mockResolvedValueOnce(punishedMember);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch, ban },
+    } as any;
+    punishedMember.guild = guild;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const first = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+    const retry = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(first as any, deps);
+
+    expect(ban).not.toHaveBeenCalled();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'pending_review',
+    });
+    expect(first.reply).toHaveBeenCalledWith({
+      content: expect.stringContaining('Discord unavailable'),
+      ephemeral: true,
+    });
+
+    await handleInteractionCreate(retry as any, deps);
+
+    expect(punishedMember.send).toHaveBeenCalledOnce();
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+    });
+    database.sqlite.close();
+  });
+
   it('makes post-side-effect persistence failures explicitly reconcilable', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       moderatorUsers: ['moderator-1'],
-      punishmentDmNotify: false,
+      punishmentDmNotify: true,
     });
     config.policies.punishment.actionType = 'ban';
     const store = new CaseStore(database.db, fakeStorage());
@@ -655,11 +764,17 @@ describe('case review interactions', () => {
       new Error('database unavailable'),
     );
     const ban = vi.fn(async () => undefined);
+    const punishedMember = {
+      id: 'user',
+      guild: null as any,
+      send: vi.fn(async () => undefined),
+    };
     const guild = {
       id: 'guild',
       ownerId: 'owner',
-      members: { fetch: vi.fn(async () => null), ban },
+      members: { fetch: vi.fn(async () => punishedMember), ban },
     } as any;
+    punishedMember.guild = guild;
     const deps = {
       configStore: { getGuildConfig: vi.fn(async () => config) },
       modelStore: {},
@@ -676,6 +791,7 @@ describe('case review interactions', () => {
 
     await handleInteractionCreate(punish as any, deps);
 
+    expect(punishedMember.send).toHaveBeenCalledOnce();
     expect(ban).toHaveBeenCalledOnce();
     expect(await store.getCase(caseRow.id)).toMatchObject({
       status: 'punishment_uncertain',
@@ -693,6 +809,7 @@ describe('case review interactions', () => {
     );
     await handleInteractionCreate(reconcile as any, deps);
 
+    expect(punishedMember.send).toHaveBeenCalledOnce();
     expect(ban).toHaveBeenCalledOnce();
     expect(await store.getCase(caseRow.id)).toMatchObject({
       status: 'punished',
@@ -2315,6 +2432,7 @@ function fakeDiscordMessage(
     deletable: true,
     inGuild: () => true,
     attachments: {
+      size: attachments.length,
       map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
       values: () => attachments[Symbol.iterator](),
     },
@@ -2348,6 +2466,37 @@ function fakeCaseButtonInteraction(
   };
 }
 
+function matchesDuplicateAfter(
+  delayMs: number,
+  now: ReturnType<typeof vi.spyOn>,
+  attachments: [unknown[], unknown[]] = [[], []],
+) {
+  const detector = new DuplicateDetector();
+  const config = defaultGuildConfig({
+    crosschannelChannelThreshold: 2,
+    crosschannelWindowSeconds: 60,
+  });
+
+  now.mockReturnValue(0);
+  detector.record(
+    fakeMessage({
+      channelId: 'c1',
+      content: 'same',
+      attachments: attachments[0],
+    }),
+    config,
+  );
+  now.mockReturnValue(delayMs);
+  return detector.record(
+    fakeMessage({
+      channelId: 'c2',
+      content: 'same',
+      attachments: attachments[1],
+    }),
+    config,
+  ).matched;
+}
+
 function fakeMessage(
   input: Partial<{
     id: string;
@@ -2367,6 +2516,7 @@ function fakeMessage(
     content: input.content ?? 'hello',
     createdAt: new Date('2026-01-01T00:00:00Z'),
     attachments: {
+      size: attachments.length,
       map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
       values: () => attachments[Symbol.iterator](),
     },

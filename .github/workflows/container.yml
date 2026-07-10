@@ -1,9 +1,6 @@
 name: Container
 
 on:
-  pull_request:
-    branches:
-      - main
   push:
     branches:
       - main
@@ -91,7 +88,6 @@ jobs:
           printf '  %s\n' "${tags[@]}"
 
       - name: Login GHCR
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -99,7 +95,6 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login Docker Hub
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
@@ -111,7 +106,7 @@ jobs:
           context: .
           file: docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true
           tags: ${{ steps.image.outputs.tags }}
           labels: ${{ steps.image.outputs.labels }}
           cache-from: type=gha

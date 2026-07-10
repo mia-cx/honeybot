@@ -1,6 +1,7 @@
 import {
   AttachmentBuilder,
   PermissionFlagsBits,
+  RESTJSONErrorCodes,
   type Guild,
   type GuildMember,
   type Message,
@@ -49,11 +50,23 @@ export async function applyPolicyForUser(
   policy: Policy,
   reason: string,
 ) {
+  const member = policyRequiresMember(policy)
+    ? await fetchCurrentMember(guild, userId)
+    : null;
+  return applyPolicyWithMember(guild, userId, member, policy, reason);
+}
+
+async function applyPolicyWithMember(
+  guild: Guild,
+  userId: string,
+  member: GuildMember | null,
+  policy: Policy,
+  reason: string,
+) {
   switch (policy.actionType) {
     case 'log':
       return { applied: true, detail: 'log action applied' } as const;
     case 'timeout': {
-      const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) {
         return {
           applied: false,
@@ -70,7 +83,6 @@ export async function applyPolicyForUser(
     }
     case 'role': {
       if (!policy.roleId) throw new Error('Role policy missing role_id');
-      const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) {
         return {
           applied: false,
@@ -82,7 +94,6 @@ export async function applyPolicyForUser(
       return { applied: true, detail: 'role applied' } as const;
     }
     case 'kick': {
-      const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) {
         return {
           applied: false,
@@ -99,6 +110,23 @@ export async function applyPolicyForUser(
         deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
       });
       return { applied: true, detail: 'user banned' } as const;
+  }
+}
+
+function policyRequiresMember(policy: Policy) {
+  return (
+    policy.actionType === 'timeout' ||
+    policy.actionType === 'role' ||
+    policy.actionType === 'kick'
+  );
+}
+
+async function fetchCurrentMember(guild: Guild, userId: string) {
+  try {
+    return await guild.members.fetch({ user: userId, force: true });
+  } catch (error) {
+    if (isUnknownMemberError(error)) return null;
+    throw error;
   }
 }
 
@@ -143,7 +171,7 @@ export async function revertPolicyForUser(
 ) {
   switch (policy.actionType) {
     case 'timeout': {
-      const member = await guild.members.fetch(userId).catch(() => null);
+      const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'timeout could not be removed because the member is no longer in the guild';
       await member.timeout(null, reason);
@@ -151,7 +179,7 @@ export async function revertPolicyForUser(
     }
     case 'role': {
       if (!policy.roleId) return 'role policy had no role';
-      const member = await guild.members.fetch(userId).catch(() => null);
+      const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'role could not be removed because the member is no longer in the guild';
       await member.roles.remove(policy.roleId, reason);
@@ -171,6 +199,62 @@ export async function deleteMessage(message: Message<true>) {
   if (!message.deletable) return false;
   await message.delete();
   return true;
+}
+
+type PunishmentDmContext = {
+  caseId: string;
+  reason: string;
+  auditReason?: string;
+  caseStore: CaseStore;
+  storage: FileStorage;
+};
+
+export async function applyPolicyWithBestEffortDm(input: {
+  guild: Guild;
+  userId: string;
+  policy: Policy;
+  reason: string;
+  dm: PunishmentDmContext | null;
+}) {
+  const member =
+    input.dm || policyRequiresMember(input.policy)
+      ? await fetchCurrentMember(input.guild, input.userId)
+      : null;
+
+  if (input.dm) {
+    if (member) {
+      await dmPunishedUser({
+        member,
+        caseId: input.dm.caseId,
+        action: input.policy.actionType,
+        reason: input.dm.reason,
+        ...(input.dm.auditReason === undefined
+          ? {}
+          : { auditReason: input.dm.auditReason }),
+        caseStore: input.dm.caseStore,
+        storage: input.dm.storage,
+      });
+    } else {
+      logger.info('Skipped punishment DM for user outside guild', {
+        guildId: input.guild.id,
+        userId: input.userId,
+        caseId: input.dm.caseId,
+      });
+      await recordDmFailure(
+        input.dm,
+        'Cannot DM user because they are no longer in the guild',
+        [],
+      );
+    }
+  }
+
+  return applyPolicyWithMember(
+    input.guild,
+    input.userId,
+    member,
+    input.policy,
+    input.reason,
+  );
 }
 
 type PunishmentDmInput = {
@@ -231,25 +315,11 @@ export async function dmPunishedUser(input: PunishmentDmInput) {
       userId: input.member.id,
       error: error instanceof Error ? error.message : String(error),
     });
-    try {
-      await input.caseStore.addEvent(
-        input.caseId,
-        'failed',
-        'bot',
-        null,
-        'Punishment DM failed',
-        {
-          error: error instanceof Error ? error.message : String(error),
-          omitted,
-        },
-      );
-    } catch (eventError) {
-      logger.warn('Failed to record punishment DM failure', {
-        caseId: input.caseId,
-        error:
-          eventError instanceof Error ? eventError.message : String(eventError),
-      });
-    }
+    await recordDmFailure(
+      input,
+      error instanceof Error ? error.message : String(error),
+      omitted,
+    );
     return false;
   }
 
@@ -269,6 +339,38 @@ export async function dmPunishedUser(input: PunishmentDmInput) {
     });
   }
   return true;
+}
+
+function isUnknownMemberError(error: unknown) {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === RESTJSONErrorCodes.UnknownMember
+  );
+}
+
+async function recordDmFailure(
+  input: Pick<PunishmentDmContext, 'caseId' | 'caseStore'>,
+  error: string,
+  omitted: string[],
+) {
+  try {
+    await input.caseStore.addEvent(
+      input.caseId,
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      { error, omitted },
+    );
+  } catch (eventError) {
+    logger.warn('Failed to record punishment DM failure', {
+      caseId: input.caseId,
+      error:
+        eventError instanceof Error ? eventError.message : String(eventError),
+    });
+  }
 }
 
 function punishmentDmComponents(

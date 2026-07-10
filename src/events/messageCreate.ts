@@ -9,7 +9,7 @@ import type { MessageCache } from '../services/messageCache.js';
 import {
   deleteMessage,
   applyPolicy,
-  dmPunishedUser,
+  applyPolicyWithBestEffortDm,
   hasBypass,
   honeybotAuditReason,
   requireAppliedPolicy,
@@ -312,20 +312,23 @@ async function handleTriggeredMessage(
     if (!claimed) return;
     let applyResult;
     try {
-      if (guildConfig.punishmentDmNotify) {
-        await dmPunishedUser({
-          member,
-          caseId: caseRow.id,
-          action: punishment.actionType,
-          reason: analysis.reason,
-          auditReason,
-          caseStore: dependencies.caseStore,
-          storage: dependencies.storage,
-        });
-      }
       applyResult = requireAppliedPolicy(
         await dependencies.moderationQueue.enqueue(message.guildId, () =>
-          applyPolicy(member, punishment, auditReason),
+          applyPolicyWithBestEffortDm({
+            guild: message.guild,
+            userId: message.author.id,
+            policy: punishment,
+            reason: auditReason,
+            dm: guildConfig.punishmentDmNotify
+              ? {
+                  caseId: caseRow.id,
+                  reason: analysis.reason,
+                  auditReason,
+                  caseStore: dependencies.caseStore,
+                  storage: dependencies.storage,
+                }
+              : null,
+          }),
         ),
       );
     } catch (error) {

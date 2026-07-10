@@ -35,7 +35,7 @@ import type {
 import type { Db } from '../db/database.js';
 import {
   applyPolicyForUser,
-  dmPunishedUser,
+  applyPolicyWithBestEffortDm,
   honeybotAuditReason,
   moderationAuditReason,
   requireAppliedPolicy,
@@ -1598,50 +1598,30 @@ async function handleCaseButton(
       caseId,
       operation: 'punish',
       actionTakenOnSuccess: policy.actionType,
-      run: async () => {
-        const member = await interaction.guild.members
-          .fetch(caseRow.userId)
-          .catch(() => null);
-        if (config.punishmentDmNotify && member) {
-          await dmPunishedUser({
-            member,
-            caseId,
-            action: policy.actionType,
-            reason,
-            auditReason,
-            caseStore: deps.caseStore,
-            storage: deps.storage,
-          });
-        }
-        const applyResult = requireAppliedPolicy(
-          await deps.moderationQueue.enqueue(interaction.guildId, () =>
-            applyPolicyForUser(
-              interaction.guild,
-              caseRow.userId,
+      run: () =>
+        deps.moderationQueue
+          .enqueue(interaction.guildId, () =>
+            applyPolicyWithBestEffortDm({
+              guild: interaction.guild,
+              userId: caseRow.userId,
               policy,
-              auditReason,
-            ),
-          ),
-        );
-        return { applyResult, member };
-      },
+              reason: auditReason,
+              dm: config.punishmentDmNotify
+                ? {
+                    caseId,
+                    reason,
+                    auditReason,
+                    caseStore: deps.caseStore,
+                    storage: deps.storage,
+                  }
+                : null,
+            }),
+          )
+          .then(requireAppliedPolicy),
       completion: () => ({ actionTaken: policy.actionType, reason }),
     });
     if (!operation) return;
-    const { applyResult, member } = operation.value;
-    if (config.punishmentDmNotify && !member) {
-      await deps.caseStore.addEvent(
-        caseId,
-        'failed',
-        'bot',
-        null,
-        'Punishment DM failed',
-        {
-          error: 'Cannot DM user because they are no longer in the guild',
-          omitted: [],
-        },
-      );
-    }
+    const applyResult = operation.value;
     await deps.caseStore.addEvent(
       caseId,
       'punishment_applied',
