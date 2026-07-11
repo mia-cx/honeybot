@@ -37,7 +37,7 @@ export function hasBypass(member: GuildMember, config: GuildConfig) {
 }
 
 type DiscordMutationLifecycle = {
-  onMutationStarted?: () => void;
+  onMutationStarted?: () => Promise<void>;
 };
 
 export async function applyPolicyForUser(
@@ -83,7 +83,7 @@ async function applyPolicyWithMember(
         policy.durationSeconds ?? 1_800,
         DISCORD_MAX_TIMEOUT_SECONDS,
       );
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await member.timeout(seconds * 1000, reason);
       return { applied: true, detail: 'timeout applied' } as const;
     }
@@ -96,7 +96,7 @@ async function applyPolicyWithMember(
             'role could not be applied because the member is no longer in the guild',
         } as const;
       }
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await member.roles.add(policy.roleId, reason);
       return { applied: true, detail: 'role applied' } as const;
     }
@@ -108,12 +108,12 @@ async function applyPolicyWithMember(
             'kick could not be applied because the member is no longer in the guild',
         } as const;
       }
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await member.kick(moderationAuditReason(policy, reason));
       return { applied: true, detail: 'user kicked' } as const;
     }
     case 'ban':
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await guild.members.ban(userId, {
         reason: moderationAuditReason(policy, reason),
         deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
@@ -191,7 +191,7 @@ export async function revertPolicyForUser(
       const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'timeout could not be removed because the member is no longer in the guild';
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await member.timeout(null, reason);
       return 'timeout removed';
     }
@@ -200,12 +200,12 @@ export async function revertPolicyForUser(
       const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'role could not be removed because the member is no longer in the guild';
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await member.roles.remove(policy.roleId, reason);
       return 'role removed';
     }
     case 'ban':
-      lifecycle.onMutationStarted?.();
+      await lifecycle.onMutationStarted?.();
       await guild.members.unban(userId, reason);
       return 'user unbanned';
     case 'kick':
@@ -235,7 +235,7 @@ export async function applyPolicyWithBestEffortDm(input: {
   policy: Policy;
   reason: string;
   dm: PunishmentDmContext | null;
-  onMutationStarted?: () => void;
+  onMutationStarted?: () => Promise<void>;
 }) {
   const member =
     input.dm || policyRequiresMember(input.policy)

@@ -220,6 +220,7 @@ cases
   status              # stable review state, claimed operation state, or operation-specific uncertain state
   action_taken        # last confirmed applied action; nullable for review/dismiss/revert
   operation_action_taken # action a claimed/uncertain operation may have applied
+  operation_dispatched_at # durable Discord mutation boundary for restart recovery
   reason              # latest templated bot reason
   evidence_summary_json
   review_channel_id

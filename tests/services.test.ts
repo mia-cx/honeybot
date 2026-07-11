@@ -1812,6 +1812,7 @@ describe('CaseStore', () => {
           created_at TEXT NOT NULL
         );
         INSERT INTO cases VALUES
+          ('claimed', 'guild', 'user', 'honeypot', 'punishment_pending', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
           ('punish', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
           ('dismiss', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
           ('revert-punishment', 'guild', 'user', 'honeypot', 'operation_uncertain', 'ban', NULL, '{}', NULL, NULL, 'now', 'now'),
@@ -1829,6 +1830,7 @@ describe('CaseStore', () => {
     expect(
       database.sqlite.prepare('SELECT id, status FROM cases ORDER BY id').all(),
     ).toEqual([
+      { id: 'claimed', status: 'punishment_pending' },
       { id: 'dismiss', status: 'dismissal_uncertain' },
       { id: 'punish', status: 'punishment_uncertain' },
       {
@@ -1842,10 +1844,22 @@ describe('CaseStore', () => {
     ]);
     expect(
       database.sqlite
+        .prepare(
+          "SELECT operation_dispatched_at AS operationDispatchedAt FROM cases WHERE id = 'claimed'",
+        )
+        .get(),
+    ).toEqual({ operationDispatchedAt: 'now' });
+    expect(
+      database.sqlite
         .prepare('PRAGMA table_info(cases)')
         .all()
         .map((column) => (column as { name: string }).name),
-    ).toContain('operation_action_taken');
+    ).toEqual(
+      expect.arrayContaining([
+        'operation_action_taken',
+        'operation_dispatched_at',
+      ]),
+    );
 
     database.sqlite.close();
   });
@@ -2347,7 +2361,7 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
-  it('marks interrupted operations uncertain instead of retrying side effects', async () => {
+  it('recovers only dispatched interrupted operations as uncertain', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
     const pendingCase = await store.getOrCreateCase({
@@ -2379,13 +2393,28 @@ describe('CaseStore', () => {
       'moderator',
       null,
     );
+    await expect(
+      store.markOperationDispatched(
+        punishedCase.id,
+        'revert_punishment',
+        'moderator',
+      ),
+    ).resolves.toMatchObject({ operationDispatchedAt: expect.any(String) });
+    await expect(
+      store.markOperationDispatched(
+        punishedCase.id,
+        'revert_punishment',
+        'moderator',
+      ),
+    ).resolves.toBeNull();
 
     await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
     await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
     expect(await store.getCase(pendingCase.id)).toMatchObject({
-      status: 'punishment_uncertain',
+      status: 'pending_review',
       actionTaken: null,
-      operationActionTaken: 'ban',
+      operationActionTaken: null,
+      operationDispatchedAt: null,
     });
     expect(await store.getCase(punishedCase.id)).toMatchObject({
       status: 'punishment_revert_uncertain',
@@ -2394,10 +2423,10 @@ describe('CaseStore', () => {
     });
     await expect(
       store.claimOperation(pendingCase.id, 'punish', 'moderator'),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({ status: 'punishment_pending' });
     await expect(
       store.reconcileOperation(pendingCase.id, true, 'moderator'),
-    ).resolves.toMatchObject({ status: 'punished', actionTaken: 'ban' });
+    ).resolves.toBeNull();
     await expect(
       store.reconcileOperation(punishedCase.id, false, 'moderator'),
     ).resolves.toMatchObject({ status: 'punished', actionTaken: 'ban' });
@@ -2406,7 +2435,13 @@ describe('CaseStore', () => {
         .select()
         .from(caseEvents)
         .where(eq(caseEvents.eventType, 'operation_outcome_uncertain')),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_recovered')),
+    ).toHaveLength(1);
 
     database.sqlite.close();
   });

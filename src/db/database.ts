@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS cases (
   status TEXT NOT NULL,
   action_taken TEXT,
   operation_action_taken TEXT,
+  operation_dispatched_at TEXT,
   reason TEXT,
   evidence_summary_json TEXT NOT NULL,
   review_channel_id TEXT,
@@ -219,6 +220,19 @@ CREATE INDEX IF NOT EXISTS global_bans_user_idx ON global_bans (user_id, status)
   const caseColumns = db.pragma('table_info(cases)') as Array<{ name: string }>;
   if (!caseColumns.some((column) => column.name === 'operation_action_taken')) {
     db.exec('ALTER TABLE cases ADD COLUMN operation_action_taken TEXT');
+  }
+  if (!caseColumns.some((column) => column.name === 'operation_dispatched_at')) {
+    db.exec(`
+      ALTER TABLE cases ADD COLUMN operation_dispatched_at TEXT;
+      UPDATE cases
+      SET operation_dispatched_at = updated_at
+      WHERE status IN (
+        'punishment_pending',
+        'dismissal_pending',
+        'punishment_revert_pending',
+        'dismissal_revert_pending'
+      );
+    `);
   }
   migrateLegacyUncertainCases(db);
 

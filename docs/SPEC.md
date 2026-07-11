@@ -55,8 +55,8 @@ Fresh guild defaults:
 
 Case statuses:
 
-- stable review states: `pending_review`, `punished`, `dismissed`, `reverted`
-- claimed operation states: `punishing`, `dismissing`, `reverting_punishment`, `reverting_dismissal`
+- stable review states: `pending_review`, `punished`, `dismissed`
+- claimed operation states: `punishment_pending`, `dismissal_pending`, `punishment_revert_pending`, `dismissal_revert_pending`
 - reconciliation states: `punishment_uncertain`, `dismissal_uncertain`, `punishment_revert_uncertain`, `dismissal_revert_uncertain`
 
 When a case is dismissed or reverted, Honeybot deletes the case row, case messages, case attachments, temporary files, case evidence rows, and pending corpus rows copied from that case. Append-only audit events remain.
@@ -67,7 +67,7 @@ If `punishment:dm_notify` is true, Honeybot DMs users only after case evidence h
 
 `reverted` means best-effort undo: remove active timeouts, remove punishment roles, and unban banned users. Kicks and deleted Discord messages cannot be undone, so Honeybot records them as irreversible in the audit trail. Revert applies to both prevention and punishment actions.
 
-Case operations are retryable only while failure is known to precede a Discord mutation. Once a mutation has been dispatched, either a failed Discord response or a local persistence failure moves the case to its operation-specific reconciliation state. Moderators must verify Discord's actual user state and explicitly reconcile the case; Honeybot never automatically replays an ambiguous side effect.
+Case operations are retryable only while failure is known to precede a Discord mutation. Honeybot durably records the dispatch boundary immediately before calling Discord: startup restores interrupted, undispatched claims to their prior stable state, while interrupted dispatched operations enter their operation-specific reconciliation state. A failed Discord response or post-dispatch local persistence failure also requires reconciliation. Moderators must verify Discord's actual user state and explicitly reconcile the case; Honeybot never automatically replays an ambiguous side effect.
 
 If a prevention policy action is `kick` or `ban`, Honeybot skips paid embeddings/classifier analysis by default. It preserves available evidence, posts/updates the moderation-channel case, and lets moderators audit/revert if needed.
 

@@ -1760,7 +1760,7 @@ async function runCaseOperation<T>(
     caseId: string;
     operation: CaseOperation;
     actionTakenOnSuccess: string | null;
-    run: (onMutationStarted: () => void) => Promise<T>;
+    run: (onMutationStarted: () => Promise<void>) => Promise<T>;
     completion: (value: T) => { actionTaken: string | null; reason: string };
   },
 ): Promise<{ value: T } | null> {
@@ -1781,7 +1781,15 @@ async function runCaseOperation<T>(
   let mutationStarted = false;
   let value: T;
   try {
-    value = await input.run(() => {
+    value = await input.run(async () => {
+      const dispatched = await deps.caseStore.markOperationDispatched(
+        input.caseId,
+        input.operation,
+        interaction.user.id,
+      );
+      if (!dispatched) {
+        throw new Error('Case operation state changed before Discord dispatch');
+      }
       mutationStarted = true;
     });
   } catch (error) {
@@ -1847,7 +1855,7 @@ async function revertPrevention(
   interaction: ButtonInteraction<'cached'>,
   caseRow: NonNullable<Awaited<ReturnType<CaseStore['getCase']>>>,
   config: GuildConfig,
-  onMutationStarted: () => void,
+  onMutationStarted: () => Promise<void>,
 ) {
   const policy =
     caseRow.triggerType === 'honeypot'

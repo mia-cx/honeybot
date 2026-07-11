@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
-import { and, eq, inArray, isNotNull } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../db/database.js';
 import {
   caseAttachments,
@@ -473,6 +473,7 @@ export class CaseStore {
         status,
         actionTaken,
         operationActionTaken: null,
+        operationDispatchedAt: null,
         reason,
         updatedAt: now,
       })
@@ -511,10 +512,17 @@ export class CaseStore {
             );
           }
           const [operation, transition] = entry;
+          const dispatched = caseRow.operationDispatchedAt !== null;
           const updated = tx
             .update(cases)
             .set({
-              status: transition.uncertain,
+              status: dispatched ? transition.uncertain : transition.from,
+              operationActionTaken: dispatched
+                ? caseRow.operationActionTaken
+                : null,
+              operationDispatchedAt: dispatched
+                ? caseRow.operationDispatchedAt
+                : null,
               updatedAt: new Date().toISOString(),
             })
             .where(
@@ -531,14 +539,19 @@ export class CaseStore {
             .values(
               caseEventValues(
                 caseRow.id,
-                'operation_outcome_uncertain',
+                dispatched
+                  ? 'operation_outcome_uncertain'
+                  : 'operation_recovered',
                 'bot',
                 null,
-                `Interrupted case operation requires manual review: ${operation}`,
+                dispatched
+                  ? `Interrupted dispatched operation requires manual review: ${operation}`
+                  : `Interrupted operation restored before Discord dispatch: ${operation}`,
                 {
                   operation,
                   previousStatus: transition.from,
                   possibleStatus: transition.to,
+                  dispatched,
                 },
               ),
             )
@@ -566,6 +579,7 @@ export class CaseStore {
           .set({
             status: transition.claimed,
             operationActionTaken,
+            operationDispatchedAt: null,
             updatedAt: new Date().toISOString(),
           })
           .where(and(eq(cases.id, caseId), eq(cases.status, transition.from)))
@@ -581,6 +595,46 @@ export class CaseStore {
               actorId,
               `Claimed case operation: ${operation}`,
               { operation, operationActionTaken, ...transition },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async markOperationDispatched(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const dispatchedAt = new Date().toISOString();
+        const updated = tx
+          .update(cases)
+          .set({ operationDispatchedAt: dispatchedAt, updatedAt: dispatchedAt })
+          .where(
+            and(
+              eq(cases.id, caseId),
+              eq(cases.status, transition.claimed),
+              isNull(cases.operationDispatchedAt),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_dispatched',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Dispatching Discord mutation for case operation: ${operation}`,
+              { operation },
             ),
           )
           .run();
@@ -606,6 +660,7 @@ export class CaseStore {
             status: transition.to,
             actionTaken,
             operationActionTaken: null,
+            operationDispatchedAt: null,
             reason,
             updatedAt: new Date().toISOString(),
           })
@@ -648,6 +703,7 @@ export class CaseStore {
           .set({
             status: transition.from,
             operationActionTaken: null,
+            operationDispatchedAt: null,
             updatedAt: new Date().toISOString(),
           })
           .where(
@@ -747,6 +803,7 @@ export class CaseStore {
             status,
             actionTaken,
             operationActionTaken: null,
+            operationDispatchedAt: null,
             reason,
             updatedAt: new Date().toISOString(),
           })

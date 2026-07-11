@@ -334,7 +334,18 @@ async function handleTriggeredMessage(
                   storage: dependencies.storage,
                 }
               : null,
-            onMutationStarted: () => {
+            onMutationStarted: async () => {
+              const dispatched =
+                await dependencies.caseStore.markOperationDispatched(
+                  caseRow.id,
+                  'punish',
+                  null,
+                );
+              if (!dispatched) {
+                throw new Error(
+                  'Auto-punishment state changed before Discord dispatch',
+                );
+              }
               mutationStarted = true;
             },
           }),
