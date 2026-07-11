@@ -49,13 +49,13 @@ const duplicateDetector = new DuplicateDetector();
 const modelQueue = new FairQueue({
   name: 'models',
   globalLimit: env.MODEL_CALL_LIMIT,
-  perGuildLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
+  perGroupLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
   windowMs: env.MODEL_CALL_WINDOW_SECONDS * 1000,
 });
 const moderationQueue = new FairQueue({
   name: 'moderation',
   globalLimit: env.MODERATION_ACTION_LIMIT,
-  perGuildLimit: env.MODERATION_ACTION_LIMIT_PER_GUILD,
+  perGroupLimit: env.MODERATION_ACTION_LIMIT_PER_GUILD,
   windowMs: env.MODERATION_ACTION_WINDOW_SECONDS * 1000,
 });
 const embedder = new OpenRouterEmbeddings(

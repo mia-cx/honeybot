@@ -57,7 +57,7 @@ const modelStore = new ModelStore(database.db, {
 const queue = new FairQueue({
   name: 'fixture-seed-embeddings',
   globalLimit: env.MODEL_CALL_LIMIT,
-  perGuildLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
+  perGroupLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
   windowMs: env.MODEL_CALL_WINDOW_SECONDS * 1000,
   logFailures: false,
 });

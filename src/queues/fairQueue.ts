@@ -1,7 +1,7 @@
 import { logger } from '../logger.js';
 
 type Job<T> = {
-  guildId: string;
+  groupKey: string;
   run: () => Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
@@ -10,21 +10,21 @@ type Job<T> = {
 type FairQueueOptions = {
   name: string;
   globalLimit: number;
-  perGuildLimit: number;
+  perGroupLimit: number;
   windowMs: number;
   logFailures?: boolean;
   maxPendingGlobal?: number;
-  maxPendingPerGuild?: number;
+  maxPendingPerGroup?: number;
 };
 
 export class QueueCapacityError extends Error {}
 
 export class FairQueue {
-  private readonly guildQueues = new Map<string, Job<unknown>[]>();
-  private readonly guildOrder: string[] = [];
+  private readonly groupQueues = new Map<string, Job<unknown>[]>();
+  private readonly groupOrder: string[] = [];
   private readonly globalLimiter: RollingLimiter;
-  private readonly guildLimiters = new Map<string, RollingLimiter>();
-  private readonly guildOutstanding = new Map<string, number>();
+  private readonly groupLimiters = new Map<string, RollingLimiter>();
+  private readonly groupOutstanding = new Map<string, number>();
   private globalOutstanding = 0;
   private running = false;
 
@@ -35,26 +35,26 @@ export class FairQueue {
     );
   }
 
-  enqueue<T>(guildId: string, run: () => Promise<T>): Promise<T> {
-    if (!this.hasCapacity(guildId)) {
+  enqueue<T>(groupKey: string, run: () => Promise<T>): Promise<T> {
+    if (!this.hasCapacity(groupKey)) {
       return Promise.reject(
         new QueueCapacityError(
-          `${this.options.name} queue capacity exceeded for guild ${guildId}`,
+          `${this.options.name} queue capacity exceeded for group ${groupKey}`,
         ),
       );
     }
-    this.reserveCapacity(guildId);
+    this.reserveCapacity(groupKey);
     return new Promise<T>((resolve, reject) => {
-      const queue = this.guildQueues.get(guildId) ?? [];
-      if (queue.length === 0 && !this.guildQueues.has(guildId))
-        this.guildOrder.push(guildId);
+      const queue = this.groupQueues.get(groupKey) ?? [];
+      if (queue.length === 0 && !this.groupQueues.has(groupKey))
+        this.groupOrder.push(groupKey);
       queue.push({
-        guildId,
+        groupKey,
         run,
         resolve: resolve as (value: unknown) => void,
         reject,
       });
-      this.guildQueues.set(guildId, queue as Job<unknown>[]);
+      this.groupQueues.set(groupKey, queue as Job<unknown>[]);
       void this.drain();
     });
   }
@@ -64,29 +64,29 @@ export class FairQueue {
     this.running = true;
 
     try {
-      while (this.guildOrder.length > 0) {
-        const guildId = this.guildOrder.shift();
-        if (!guildId) continue;
+      while (this.groupOrder.length > 0) {
+        const groupKey = this.groupOrder.shift();
+        if (!groupKey) continue;
 
-        const queue = this.guildQueues.get(guildId);
+        const queue = this.groupQueues.get(groupKey);
         const job = queue?.shift();
         if (!queue || !job) {
-          this.guildQueues.delete(guildId);
+          this.groupQueues.delete(groupKey);
           continue;
         }
 
-        if (queue.length > 0) this.guildOrder.push(guildId);
-        else this.guildQueues.delete(guildId);
+        if (queue.length > 0) this.groupOrder.push(groupKey);
+        else this.groupQueues.delete(groupKey);
 
-        const guildLimiter = this.limiterForGuild(guildId);
+        const groupLimiter = this.limiterForGroup(groupKey);
         const waitMs = Math.max(
           this.globalLimiter.waitMs(),
-          guildLimiter.waitMs(),
+          groupLimiter.waitMs(),
         );
         if (waitMs > 0) await sleep(waitMs);
 
         this.globalLimiter.take();
-        guildLimiter.take();
+        groupLimiter.take();
 
         try {
           job.resolve(await job.run());
@@ -94,55 +94,55 @@ export class FairQueue {
           if (this.options.logFailures !== false) {
             logger.warn('Queued job failed', {
               queue: this.options.name,
-              guildId,
+              groupKey,
               error: error instanceof Error ? error.message : String(error),
             });
           }
           job.reject(error);
         } finally {
-          this.releaseCapacity(guildId);
+          this.releaseCapacity(groupKey);
         }
       }
     } finally {
       this.running = false;
-      if (this.guildOrder.length > 0) void this.drain();
+      if (this.groupOrder.length > 0) void this.drain();
     }
   }
 
-  private limiterForGuild(guildId: string) {
-    const existing = this.guildLimiters.get(guildId);
+  private limiterForGroup(groupKey: string) {
+    const existing = this.groupLimiters.get(groupKey);
     if (existing) return existing;
 
     const limiter = new RollingLimiter(
-      this.options.perGuildLimit,
+      this.options.perGroupLimit,
       this.options.windowMs,
     );
-    this.guildLimiters.set(guildId, limiter);
+    this.groupLimiters.set(groupKey, limiter);
     return limiter;
   }
 
-  private hasCapacity(guildId: string) {
+  private hasCapacity(groupKey: string) {
     return (
       this.globalOutstanding <
         (this.options.maxPendingGlobal ?? Number.POSITIVE_INFINITY) &&
-      (this.guildOutstanding.get(guildId) ?? 0) <
-        (this.options.maxPendingPerGuild ?? Number.POSITIVE_INFINITY)
+      (this.groupOutstanding.get(groupKey) ?? 0) <
+        (this.options.maxPendingPerGroup ?? Number.POSITIVE_INFINITY)
     );
   }
 
-  private reserveCapacity(guildId: string) {
+  private reserveCapacity(groupKey: string) {
     this.globalOutstanding += 1;
-    this.guildOutstanding.set(
-      guildId,
-      (this.guildOutstanding.get(guildId) ?? 0) + 1,
+    this.groupOutstanding.set(
+      groupKey,
+      (this.groupOutstanding.get(groupKey) ?? 0) + 1,
     );
   }
 
-  private releaseCapacity(guildId: string) {
+  private releaseCapacity(groupKey: string) {
     this.globalOutstanding -= 1;
-    const remaining = (this.guildOutstanding.get(guildId) ?? 1) - 1;
-    if (remaining > 0) this.guildOutstanding.set(guildId, remaining);
-    else this.guildOutstanding.delete(guildId);
+    const remaining = (this.groupOutstanding.get(groupKey) ?? 1) - 1;
+    if (remaining > 0) this.groupOutstanding.set(groupKey, remaining);
+    else this.groupOutstanding.delete(groupKey);
   }
 }
 

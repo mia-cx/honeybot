@@ -45,10 +45,10 @@ const caseId = customAlphabet(
 const attachmentQueueDefaults = {
   name: 'attachments',
   globalLimit: Number.MAX_SAFE_INTEGER,
-  perGuildLimit: Number.MAX_SAFE_INTEGER,
+  perGroupLimit: Number.MAX_SAFE_INTEGER,
   windowMs: 1_000,
-  maxPendingGlobal: 64,
-  maxPendingPerGuild: MAX_ATTACHMENTS_PER_CASE,
+  maxPendingGlobal: MAX_ATTACHMENTS_PER_CASE * 2,
+  maxPendingPerGroup: MAX_ATTACHMENTS_PER_CASE,
   logFailures: false,
 } as const;
 
@@ -299,7 +299,7 @@ export class CaseStore {
     if (existing) return existing;
 
     const storageTask = this.attachmentQueue
-      .enqueue(guildId, () =>
+      .enqueue(row.caseId, () =>
         this.storage.saveFromUrl(
           row.originalUrl,
           [guildId, row.caseId],

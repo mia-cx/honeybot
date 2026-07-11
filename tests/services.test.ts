@@ -1127,7 +1127,7 @@ describe('FairQueue', () => {
     const queue = new FairQueue({
       name: 'test',
       globalLimit: 10,
-      perGuildLimit: 10,
+      perGroupLimit: 10,
       windowMs: 1_000,
     });
 
@@ -1143,10 +1143,10 @@ describe('FairQueue', () => {
     const queue = new FairQueue({
       name: 'bounded',
       globalLimit: 10,
-      perGuildLimit: 10,
+      perGroupLimit: 10,
       windowMs: 1_000,
       maxPendingGlobal: 1,
-      maxPendingPerGuild: 1,
+      maxPendingPerGroup: 1,
     });
     let release!: () => void;
     const blocked = queue.enqueue(
@@ -1847,6 +1847,82 @@ describe('CaseStore', () => {
         .map((column) => (column as { name: string }).name),
     ).toContain('operation_action_taken');
 
+    database.sqlite.close();
+  });
+
+  it('queues each case independently within the global attachment bound', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const firstCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'first-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const secondCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'second-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+
+    const messages = await Promise.all(
+      [firstCase, secondCase].flatMap((caseRow) =>
+        Array.from({ length: 4 }, (_, messageIndex) =>
+          store.attachMessage(
+            caseRow.id,
+            fakeMessage({
+              id: `${caseRow.id}-${messageIndex}`,
+              attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+                attachment({
+                  id: `${caseRow.id}-${messageIndex}-${attachmentIndex}`,
+                }),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+
+    releaseStorage();
+    await Promise.all(messages.map((message) => message.processedAttachments));
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_CASE * 2,
+    );
+    const rows = await database.db.select().from(caseAttachments);
+    expect(
+      rows.filter(
+        (row) =>
+          row.caseId === firstCase.id && row.processingState === 'stored',
+      ),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE);
+    expect(
+      rows.filter(
+        (row) =>
+          row.caseId === secondCase.id && row.processingState === 'stored',
+      ),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE);
     database.sqlite.close();
   });
 
