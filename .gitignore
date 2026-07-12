@@ -37,6 +37,11 @@ yarn.lock
 .tsbuildinfo
 .turbo/
 .vite/
+.pnpm-store/
+
+# local tooling
+.pi-subagents/artifacts/
+.worktrees/
 
 # OS / editor
 .DS_Store
