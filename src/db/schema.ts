@@ -1,4 +1,10 @@
-import { integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import {
+  integer,
+  primaryKey,
+  real,
+  sqliteTable,
+  text,
+} from 'drizzle-orm/sqlite-core';
 
 export const settings = sqliteTable(
   'settings',
@@ -34,7 +40,9 @@ export const moderators = sqliteTable(
     id: text('id').notNull(),
     createdAt: text('created_at').notNull(),
   },
-  (table) => ({ pk: primaryKey({ columns: [table.guildId, table.type, table.id] }) }),
+  (table) => ({
+    pk: primaryKey({ columns: [table.guildId, table.type, table.id] }),
+  }),
 );
 
 export const honeypots = sqliteTable(
@@ -44,7 +52,9 @@ export const honeypots = sqliteTable(
     channelId: text('channel_id').notNull(),
     createdAt: text('created_at').notNull(),
   },
-  (table) => ({ pk: primaryKey({ columns: [table.guildId, table.channelId] }) }),
+  (table) => ({
+    pk: primaryKey({ columns: [table.guildId, table.channelId] }),
+  }),
 );
 
 export const models = sqliteTable(
@@ -64,23 +74,20 @@ export const models = sqliteTable(
   (table) => ({ pk: primaryKey({ columns: [table.guildId, table.purpose] }) }),
 );
 
-export const cases = sqliteTable(
-  'cases',
-  {
-    id: text('id').primaryKey(),
-    guildId: text('guild_id').notNull(),
-    userId: text('user_id').notNull(),
-    triggerType: text('trigger_type').notNull(),
-    status: text('status').notNull(),
-    actionTaken: text('action_taken'),
-    reason: text('reason'),
-    evidenceSummaryJson: text('evidence_summary_json').notNull(),
-    reviewChannelId: text('review_channel_id'),
-    reviewMessageId: text('review_message_id'),
-    createdAt: text('created_at').notNull(),
-    updatedAt: text('updated_at').notNull(),
-  },
-);
+export const cases = sqliteTable('cases', {
+  id: text('id').primaryKey(),
+  guildId: text('guild_id').notNull(),
+  userId: text('user_id').notNull(),
+  triggerType: text('trigger_type').notNull(),
+  status: text('status').notNull(),
+  actionTaken: text('action_taken'),
+  reason: text('reason'),
+  evidenceSummaryJson: text('evidence_summary_json').notNull(),
+  reviewChannelId: text('review_channel_id'),
+  reviewMessageId: text('review_message_id'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
 
 export const caseMessages = sqliteTable('case_messages', {
   id: integer('id').primaryKey({ autoIncrement: true }),

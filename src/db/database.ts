@@ -14,7 +14,9 @@ export type DatabaseHandle = {
 };
 
 export function openDatabase(databaseUrl: string): DatabaseHandle {
-  const path = databaseUrl.startsWith('file:') ? databaseUrl.slice('file:'.length) : databaseUrl;
+  const path = databaseUrl.startsWith('file:')
+    ? databaseUrl.slice('file:'.length)
+    : databaseUrl;
   mkdirSync(dirname(path), { recursive: true });
 
   const sqlite = new Database(path);
