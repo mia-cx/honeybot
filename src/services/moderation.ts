@@ -26,9 +26,17 @@ export function requireAppliedPolicy(result: PolicyApplicationResult) {
   return result.detail;
 }
 
-export function hasBypass(member: GuildMember, config: GuildConfig) {
-  if (member.id === member.guild.ownerId) return true;
-  if (config.moderatorUsers.includes(member.id)) return true;
+export async function hasModerationBypass(
+  guild: Guild,
+  userId: string,
+  cachedMember: GuildMember | null,
+  config: GuildConfig,
+) {
+  if (userId === guild.ownerId || config.moderatorUsers.includes(userId))
+    return true;
+
+  const member = cachedMember ?? (await fetchCurrentMember(guild, userId));
+  if (!member) return false;
   if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
   return member.roles.cache.some((role) =>
@@ -58,6 +66,31 @@ export async function applyPolicyForUser(
     reason,
     lifecycle,
   );
+}
+
+export async function applyPreventionPolicyForUser(
+  guild: Guild,
+  userId: string,
+  policy: Policy,
+  reason: string,
+) {
+  let member: GuildMember | null = null;
+  if (policyRequiresMember(policy)) {
+    try {
+      member = await fetchCurrentMember(guild, userId);
+    } catch (error) {
+      const detail = `${policy.actionType} could not be applied because member lookup failed: ${errorMessage(error)}`;
+      logger.warn('Failed to look up member for prevention policy', {
+        guildId: guild.id,
+        userId,
+        action: policy.actionType,
+        error: errorMessage(error),
+      });
+      return { applied: false, detail } as const;
+    }
+  }
+
+  return applyPolicyWithMember(guild, userId, member, policy, reason, {});
 }
 
 async function applyPolicyWithMember(
@@ -237,10 +270,14 @@ export async function applyPolicyWithBestEffortDm(input: {
   dm: PunishmentDmContext | null;
   onMutationStarted?: () => Promise<void>;
 }) {
-  const member =
-    input.dm || policyRequiresMember(input.policy)
-      ? await fetchCurrentMember(input.guild, input.userId)
+  const memberRequired = policyRequiresMember(input.policy);
+  const optionalDmLookup =
+    input.dm && !memberRequired
+      ? await fetchOptionalDmMember(input.guild, input.userId)
       : null;
+  const member = memberRequired
+    ? await fetchCurrentMember(input.guild, input.userId)
+    : (optionalDmLookup?.member ?? null);
 
   const result = await applyPolicyWithMember(
     input.guild,
@@ -265,19 +302,36 @@ export async function applyPolicyWithBestEffortDm(input: {
       storage: input.dm.storage,
     });
   } else {
-    logger.info('Skipped punishment DM for user outside guild', {
+    const failure =
+      optionalDmLookup?.failure ??
+      'Cannot DM user because they are no longer in the guild';
+    logger.info('Skipped punishment DM because member lookup failed', {
       guildId: input.guild.id,
       userId: input.userId,
       caseId: input.dm.caseId,
+      failure,
     });
-    await recordDmFailure(
-      input.dm,
-      'Cannot DM user because they are no longer in the guild',
-      [],
-    );
+    await recordDmFailure(input.dm, failure, []);
   }
 
   return result;
+}
+
+async function fetchOptionalDmMember(guild: Guild, userId: string) {
+  try {
+    const member = await fetchCurrentMember(guild, userId);
+    return {
+      member,
+      failure: member
+        ? null
+        : 'Cannot DM user because they are no longer in the guild',
+    };
+  } catch (error) {
+    return {
+      member: null,
+      failure: `Cannot look up member for punishment DM: ${errorMessage(error)}`,
+    };
+  }
 }
 
 type PunishmentDmInput = {
@@ -371,6 +425,10 @@ function isUnknownMemberError(error: unknown) {
     'code' in error &&
     error.code === RESTJSONErrorCodes.UnknownMember
   );
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 async function recordDmFailure(

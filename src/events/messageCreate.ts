@@ -8,9 +8,9 @@ import type {
 import type { MessageCache } from '../services/messageCache.js';
 import {
   deleteMessage,
-  applyPolicyForUser,
+  applyPreventionPolicyForUser,
   applyPolicyWithBestEffortDm,
-  hasBypass,
+  hasModerationBypass,
   honeybotAuditReason,
   requireAppliedPolicy,
 } from '../services/moderation.js';
@@ -50,9 +50,15 @@ export async function handleMessageCreate(
   const guildConfig = await dependencies.configStore.getGuildConfig(
     message.guildId,
   );
-  const member =
-    message.member ?? (await message.guild.members.fetch(message.author.id));
-  if (hasBypass(member, guildConfig)) return;
+  if (
+    await hasModerationBypass(
+      message.guild,
+      message.author.id,
+      message.member,
+      guildConfig,
+    )
+  )
+    return;
 
   if (guildConfig.honeypotChannelIds.includes(message.channelId)) {
     await handleTriggeredMessage(
@@ -117,7 +123,7 @@ async function handleTriggeredMessage(
   const preventionResult = await dependencies.moderationQueue.enqueue(
     message.guildId,
     () =>
-      applyPolicyForUser(
+      applyPreventionPolicyForUser(
         message.guild,
         message.author.id,
         policy,

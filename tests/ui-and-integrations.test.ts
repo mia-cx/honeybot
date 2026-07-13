@@ -1163,11 +1163,16 @@ describe('moderation actions', () => {
     expect(member.send).not.toHaveBeenCalled();
   });
 
-  it('propagates transient member lookup failures before punishment', async () => {
+  it('records a transient DM lookup failure without blocking punishment', async () => {
     const member = fakeMember();
     member.guild.members.fetch.mockRejectedValueOnce(
       new Error('Discord unavailable'),
     );
+    const caseStore = {
+      listCaseMessages: vi.fn(),
+      listCaseAttachments: vi.fn(),
+      addEvent: vi.fn(async () => undefined),
+    };
 
     await expect(
       applyPolicyWithBestEffortDm({
@@ -1178,16 +1183,22 @@ describe('moderation actions', () => {
         dm: {
           caseId: 'case1',
           reason: 'reason',
-          caseStore: {
-            listCaseMessages: vi.fn(),
-            listCaseAttachments: vi.fn(),
-            addEvent: vi.fn(),
-          } as any,
+          caseStore: caseStore as any,
           storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
         },
       }),
-    ).rejects.toThrow('Discord unavailable');
-    expect(member.guild.members.ban).not.toHaveBeenCalled();
+    ).resolves.toEqual({ applied: true, detail: 'user banned' });
+    expect(member.guild.members.ban).toHaveBeenCalledOnce();
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      expect.objectContaining({
+        error: expect.stringContaining('Discord unavailable'),
+      }),
+    );
   });
 
   it.each(['case preparation', 'failure recording'] as const)(
