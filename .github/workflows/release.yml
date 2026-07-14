@@ -240,7 +240,7 @@ jobs:
           --expected-legacy-digest "$EXPECTED_LEGACY_DIGEST"
           --expected-legacy-revision "$EXPECTED_LEGACY_REVISION"
 
-      - name: Dispatch beta reconciliation
+      - name: Dispatch stable reconciliation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run container.yml --ref main -f mode=reconcile-beta
+        run: gh workflow run release.yml --ref main -f mode=reconcile-stable

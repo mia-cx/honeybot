@@ -3,7 +3,6 @@ import { fileURLToPath } from 'node:url';
 import {
   DockerBuildxAdapter,
   materializeReference,
-  promoteMovingAliases,
   publicationComplete,
   type ImageObservation,
   type PublicationAdapter,
@@ -89,15 +88,6 @@ export function adoptLegacyStableRelease(
         `Tag ${tag} already exists but target registry state is incomplete`,
       );
     }
-    promoteMovingAliases(
-      {
-        identity,
-        repositories: input.repositories,
-        repository: input.repository,
-      },
-      complete,
-      adapter,
-    );
     return {
       version: input.version,
       ref: input.ref,
@@ -194,16 +184,6 @@ export function adoptLegacyStableRelease(
   pushTag(tag, remote, cwd);
   if (resolveTagCommit(tag, cwd) !== input.ref)
     throw new Error(`Tag ${tag} failed final verification`);
-  promoteMovingAliases(
-    {
-      identity,
-      repositories: input.repositories,
-      repository: input.repository,
-    },
-    publication,
-    adapter,
-  );
-
   return {
     version: input.version,
     ref: input.ref,

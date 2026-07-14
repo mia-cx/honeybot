@@ -10,7 +10,10 @@ import type {
   ImageObservation,
   PublicationAdapter,
 } from '../scripts/containerPublication.js';
-import { releaseLabels } from '../scripts/releaseMetadata.js';
+import {
+  imageReferences,
+  releaseLabels,
+} from '../scripts/releaseMetadata.js';
 import { resolveTagCommit, runGit } from '../scripts/releaseGit.js';
 
 const temporaryDirectories: string[] = [];
@@ -58,7 +61,7 @@ describe('guarded legacy stable adoption', () => {
     ).toBe(targetDigest);
     expect(
       adapter.copies.some((copy) => copy.destination.endsWith(':latest')),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it('fails before writes when the legacy digest is not explicitly authorized', () => {
@@ -135,6 +138,30 @@ describe('guarded legacy stable adoption', () => {
     adapter.addLegacy('docker.io/miacx/honeybot:v1.0.1');
 
     expect(() => adopt(fixture, adapter)).toThrow();
+    expect(adapter.builds).toHaveLength(0);
+    expect(adapter.copies).toHaveLength(0);
+  });
+
+  it('verifies an existing adopted baseline without moving aliases', () => {
+    const fixture = createRepository();
+    runGit(['tag', 'v1.0.1', fixture.ref], fixture.repository);
+    runGit(['push', 'origin', 'refs/tags/v1.0.1'], fixture.repository);
+    const adapter = new LegacyAdapter();
+    const identity = {
+      channel: 'stable' as const,
+      version: '1.0.1',
+      ref: fixture.ref,
+    };
+    const labels = releaseLabels(identity, 'mia-cx/honeybot');
+    for (const reference of imageReferences(identity, repositories).immutable) {
+      adapter.images.set(reference, {
+        reference,
+        digest: targetDigest,
+        labels,
+      });
+    }
+
+    expect(adopt(fixture, adapter).digest).toBe(targetDigest);
     expect(adapter.builds).toHaveLength(0);
     expect(adapter.copies).toHaveLength(0);
   });
