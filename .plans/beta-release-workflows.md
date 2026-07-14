@@ -65,7 +65,7 @@ For `1.2.0-beta.3`:
 - `v1.2-beta`
 - `v1-beta`
 - `beta`
-- `sha-<short-sha>`
+- `sha-<full-commit-sha>`
 
 Beta builds must never update `latest`, `v1`, or `v1.2`.
 
@@ -77,13 +77,13 @@ For `1.2.0`:
 - `v1.2`
 - `v1`
 - `latest`
-- `sha-<short-sha>`
+- `sha-<full-commit-sha>`
 
 Before publishing, verify that the package version has no prerelease suffix and that the Git tag is exactly `v${package.json.version}`.
 
 ### Immutable publication invariant
 
-Treat a release as an explicit identity tuple: channel, complete version, and commit SHA. Its immutable registry references are the exact version and SHA aliases in both registries; its canonical digest is the one digest to which all four references resolve.
+Treat a release as an explicit identity tuple: channel, complete version, and commit SHA. Its immutable registry references are the exact version and SHA aliases in both registries; its canonical digest is the one digest to which all four references resolve. The SHA alias is `sha-${ref}`, where `ref` is the full, unabbreviated 40-character lowercase hexadecimal commit SHA; shortened SHAs are never valid immutable identifiers.
 
 Before any registry write, inspect every immutable reference that already exists:
 
@@ -107,10 +107,10 @@ Inputs:
 
 Responsibilities:
 
-1. Validate the channel/version contract.
+1. Validate the channel/version contract and require `ref` to be a full 40-character lowercase hexadecimal commit SHA.
 2. Create a temporary detached worktree at the exact supplied SHA when a build is required.
 3. For beta only, update `package.json` transiently inside that worktree.
-4. Generate immutable exact/SHA references and OCI version/revision/source labels for Docker Hub and GHCR.
+4. Generate the immutable `sha-${ref}` alias, exact-version references, and OCI version/revision/source labels for Docker Hub and GHCR.
 5. Inspect existing immutable references and classify publication state as absent, partial-valid, complete, or conflicting.
 6. Build once only when state is absent; when state is partial-valid, copy the canonical digest to missing references without rebuilding.
 7. Fail before writes on conflicting digests/identity labels, and verify all immutable references after writes.
@@ -196,6 +196,7 @@ Cover:
 - Target escalation preserves the integration ordinal.
 - Beta aliases never contain stable aliases.
 - Stable aliases include `latest`, major, minor, exact, and SHA tags.
+- Short or malformed commit SHAs are rejected, and SHA aliases embed the full 40-character `ref`.
 - Prerelease versions are rejected for stable publishing.
 - Stable Git tag/package mismatches are rejected.
 - Fully absent immutable references request one build.
