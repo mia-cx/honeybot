@@ -93,6 +93,14 @@ Before any registry write, inspect every immutable reference that already exists
 
 After publication, re-inspect both registries and mark the immutable image complete only when every exact/SHA reference resolves to the canonical digest with matching identity labels. A release is complete only when that registry invariant holds and its immutable Git tag points to the same commit. Git tags therefore identify releases but are not publication-completion markers.
 
+### Guarded legacy baseline adoption
+
+The existing `v1.0.1` registry references predate this invariant and have been moved by later `main` builds, so normal reconciliation must continue to classify them as conflicts rather than gaining a general overwrite switch. Add a separate typed administrative command, `scripts/adoptLegacyStableRelease.ts`, for this one migration class.
+
+Require explicit `version`, full `ref`, `expectedLegacyDigest`, and `expectedLegacyRevision` inputs. Before writes, verify the package version at `ref`; require `v${version}` to be absent, or to point to `ref` only when the target registry identity is already complete; require every existing exact reference in both registries to be either the explicitly expected untagged legacy identity or the target identity; and require full-SHA references to be absent or match the target. Any unlisted digest, label, or Git-tag state fails closed.
+
+Build the exact target ref once only when no target canonical digest exists. Preserve that digest across partial retries, replace only the explicitly authorized untagged legacy exact references, create the full-SHA references in both registries, and verify all target digests and OCI identity labels. Create and push the immutable Git tag only after registry verification; a rerun may complete valid partial target state without rebuilding. After the tag exists, ordinary stable reconciliation repairs moving aliases. This migration path must not weaken the normal publisher's rule that immutable conflicts are never overwritten.
+
 ## Target workflow architecture
 
 ### `scripts/containerPublication.ts`
@@ -233,7 +241,8 @@ pnpm test -- tests/releaseMetadata.test.ts
 Files:
 
 - Add `scripts/containerPublication.ts`.
-- Add `tests/containerPublication.test.ts` with fake Git/registry/Docker adapters.
+- Add `scripts/adoptLegacyStableRelease.ts` as the separately guarded administrative path for untagged legacy exact references.
+- Add `tests/containerPublication.test.ts` with fake Git/registry/Docker adapters, including legacy-adoption cases.
 - Remove duplicated build/tag policy from `.github/workflows/container.yml` only after callers are ready.
 
 Requirements:
@@ -241,6 +250,7 @@ Requirements:
 - One multi-architecture build when no immutable state exists; valid partial state is completed by copying its canonical digest without rebuilding.
 - Both registries' exact/SHA references resolve to the same verified digest and release identity.
 - Conflicting existing immutable state fails before any registry write.
+- The legacy-adoption command requires the exact expected legacy digest and revision, refuses any existing conflicting Git tag or unlisted registry identity, writes and verifies the target exact/full-SHA references before creating the Git tag, and cannot be enabled through the normal publisher.
 - Moving aliases are promoted from the immutable digest by a separate state-based reconciler.
 - The module is callable once by beta orchestration and repeatedly in-process by stable orchestration; it has no GitHub job/workflow dependency.
 - Third-party actions use immutable SHAs in each caller's environment-setup steps.
@@ -252,6 +262,7 @@ Verification:
 - Run `actionlint` in a pinned container or CI tool.
 - Exercise metadata generation for representative beta/stable inputs without registry login.
 - Seed absent, complete, one-registry-only, one-alias-only, and conflicting immutable states through fake adapters; confirm build/copy/skip/fail behavior and post-write digest equality.
+- Seed matching, drifted, and partially adopted legacy state; confirm only the explicitly expected untagged legacy identity can be replaced, partial target state reuses one canonical digest, and the Git tag is created only after both registries verify.
 - Confirm the CLI can run as a normal workflow step and the module can be called sequentially for multiple releases without `workflow_call`.
 
 ### Commit 3: Make `main` publish beta images only
@@ -333,7 +344,11 @@ Document:
 ## Migration and rollout
 
 1. Keep PR #10 (`changeset-release/main`) open until this workflow change is merged.
-2. Restore the missing release invariant for the current package version by creating `v1.0.1` at merge commit `67813a8`, after verifying that commit contains `package.json` version `1.0.1`. Do not move `v1.0.0`.
+2. Adopt `v1.0.1` as a guarded legacy baseline before enabling either reconciler:
+   - verify full commit `67813a8ec9ef2cfc4ae6d66cec88345f567243ed` contains `package.json` version `1.0.1` and that Git tag `v1.0.1` is absent;
+   - re-inspect `v1.0.1` in Docker Hub and GHCR immediately before migration and record its digest and OCI labels. At planning time both registries resolve to legacy digest `sha256:184efc2e80eeb9419da903f79c1e21978ddbe4a622524e0c0611aa33696c56f0` with revision `0e23803e5555277df2ed966b222a10fd6622ed09`; any drift requires a fresh explicit review rather than broadening the overwrite rule;
+   - run `scripts/adoptLegacyStableRelease.ts` with that expected legacy identity and the full target ref. It builds the target once, replaces only the authorized untagged legacy exact references, creates full-SHA references in both registries, verifies one canonical digest plus target version/revision labels, and only then creates `v1.0.1` at the target commit;
+   - run stable alias reconciliation and verify `v1.0`, `v1`, and `latest` resolve to the adopted canonical digest. Do not move `v1.0.0`, and do not treat pre-invariant short-SHA aliases as immutable release identities.
 3. Create and install a dedicated release-automation GitHub App with only repository contents and pull-request write permissions; configure its App ID and private key as repository Actions secrets before merging workflow code.
 4. Merge the workflow implementation into `main` with its minor Changeset.
 5. Verify that the first beta run:
@@ -392,7 +407,7 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 
 ## Known risks
 
-- The current repository lacks `v1.0.1`; beta numbering should not go live until that baseline is restored or an explicit alternate baseline is chosen.
+- The current repository lacks Git tag `v1.0.1`, while both registries' legacy `v1.0.1` references currently identify a later `main` commit. Beta numbering must not go live until the guarded adoption procedure verifies and replaces that explicitly expected untagged legacy state, establishes exact/full-SHA references for commit `67813a8ec9ef2cfc4ae6d66cec88345f567243ed`, creates the matching Git tag, and repairs stable aliases—or an explicit alternate baseline is chosen.
 - `main` is currently unprotected, so direct/force pushes can undermine deterministic integration numbering.
 - Release automation depends on a dedicated GitHub App; missing, expired, or overprivileged App credentials must fail closed and block release-PR updates rather than falling back to `GITHUB_TOKEN`.
 - Docker Hub and GHCR publication can partially succeed. The immutable-state reconciler must preserve one verified canonical digest, safely fill missing references without rebuilding, fail closed on conflicts, and promote moving aliases only from complete publication state.
