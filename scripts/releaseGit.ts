@@ -154,7 +154,25 @@ export function pushTag(
   cwd = process.cwd(),
 ): void {
   validateTagName(tag, cwd);
-  runGit(['push', remote, `refs/tags/${tag}:refs/tags/${tag}`], cwd);
+  const args = ['push', remote, `refs/tags/${tag}:refs/tags/${tag}`];
+  const token = process.env.RELEASE_GITHUB_TOKEN;
+  if (!token) {
+    runGit(args, cwd);
+    return;
+  }
+
+  const authorization = Buffer.from(`x-access-token:${token}`).toString(
+    'base64',
+  );
+  runCommand('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${authorization}`,
+    },
+  });
 }
 
 export function packageVersionAt(ref: string, cwd = process.cwd()): string {

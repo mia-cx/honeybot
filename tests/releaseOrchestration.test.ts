@@ -19,7 +19,7 @@ import {
   releaseLabels,
   type ReleaseIdentity,
 } from '../scripts/releaseMetadata.js';
-import { runGit } from '../scripts/releaseGit.js';
+import { resolveTagCommit, runGit } from '../scripts/releaseGit.js';
 
 const repositories: string[] = [];
 
@@ -102,6 +102,26 @@ describe('stable release discovery', () => {
       sharedAliasWrites.every((copy) => copy.source.includes(':v1.2.0')),
     ).toBe(true);
   });
+
+  it('creates a missing stable tag without installing historical dependencies', () => {
+    const fixture = createStableGapRepository();
+    runGit(['tag', '--delete', 'v1.1.0'], fixture.repository);
+    runGit(
+      ['push', 'origin', '--delete', 'v1.1.0'],
+      fixture.repository,
+    );
+    const adapter = new StableGapAdapter(fixture);
+
+    reconcileStableReleases({
+      adapter,
+      repositories: fixture.repositories,
+      repository: 'mia-cx/honeybot',
+      allowTagCreation: true,
+      cwd: fixture.repository,
+    });
+
+    expect(resolveTagCommit('v1.1.0', fixture.repository)).toBe(fixture.middle);
+  });
 });
 
 describe('beta alias convergence', () => {
@@ -157,7 +177,19 @@ class StableGapAdapter implements PublicationAdapter {
     return digest;
   }
 
-  copy(source: string, digest: string, destination: string): void {
+  retag(source: string, digest: string, destination: string): void {
+    this.materialize(source, digest, destination);
+  }
+
+  transfer(source: string, digest: string, destination: string): void {
+    this.materialize(source, digest, destination);
+  }
+
+  private materialize(
+    source: string,
+    digest: string,
+    destination: string,
+  ): void {
     this.copies.push({ source, destination });
     const image = this.images.get(source);
     if (!image) throw new Error(`Missing source ${source}`);
@@ -222,9 +254,13 @@ class PromotionAdapter implements PublicationAdapter {
     throw new Error('promotion test must not build');
   }
 
-  copy(source: string): void {
+  retag(source: string): void {
     this.promotedSources.push(source);
     this.newerComplete = true;
+  }
+
+  transfer(): void {
+    throw new Error('complete publication aliases must use registry-local retags');
   }
 
   private observationFor(

@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DockerBuildxAdapter,
+  materializeReference,
   promoteMovingAliases,
   publicationComplete,
   type ImageObservation,
@@ -166,7 +167,12 @@ export function adoptLegacyStableRelease(
         !hasIdentity(observation, expectedLabels) ||
         observation.digest !== target.digest
       ) {
-        adapter.copy(target.reference, target.digest, reference);
+        materializeReference(
+          adapter,
+          target.reference,
+          target.digest,
+          reference,
+        );
       }
     }
   }

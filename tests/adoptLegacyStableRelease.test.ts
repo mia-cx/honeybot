@@ -176,7 +176,19 @@ class LegacyAdapter implements PublicationAdapter {
     return targetDigest;
   }
 
-  copy(source: string, digest: string, destination: string): void {
+  retag(source: string, digest: string, destination: string): void {
+    this.materialize(source, digest, destination);
+  }
+
+  transfer(source: string, digest: string, destination: string): void {
+    this.materialize(source, digest, destination);
+  }
+
+  private materialize(
+    source: string,
+    digest: string,
+    destination: string,
+  ): void {
     this.copies.push({ source, digest, destination });
     const sourceImage = this.images.get(source);
     if (!sourceImage) throw new Error(`Missing source ${source}`);

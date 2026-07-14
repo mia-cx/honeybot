@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   DockerBuildxAdapter,
+  materializePublicationReference,
   publicationComplete,
   reconcilePublication,
   type PublicationAdapter,
@@ -17,7 +18,7 @@ import {
   type ReleaseIdentity,
 } from './releaseMetadata.js';
 import {
-  configureAutomationIdentity,
+  createAnnotatedTag,
   fetchMainAndTags,
   fetchTag,
   firstParentCommits,
@@ -29,7 +30,6 @@ import {
   resolveTagCommit,
   runCommand,
   runGit,
-  withDetachedWorktree,
 } from './releaseGit.js';
 
 export interface StableRelease {
@@ -85,7 +85,7 @@ export function reconcileStableReleases(
           `Stable tag ${tag} is absent and this recovery run cannot create tags`,
         );
       }
-      createChangesetsTag(tag, candidate.ref, cwd);
+      createAnnotatedTag(tag, candidate.ref, cwd);
       pushTag(tag, remote, cwd);
     }
     if (resolveTagCommit(tag, cwd) !== candidate.ref) {
@@ -140,10 +140,10 @@ export function reconcileStableAliases(
   for (const [alias, release] of desired) {
     if (runtime.adapter.inspect(alias)?.digest === release.publication.digest)
       continue;
-    runtime.adapter.copy(
-      release.publication.canonicalReference,
-      release.publication.digest,
+    materializePublicationReference(
+      release.publication,
       alias,
+      runtime.adapter,
     );
     updated.push(alias);
   }
@@ -249,35 +249,6 @@ function validateChangesetsReleaseCommit(
     throw new Error(
       `Stable transition ${version} at ${commit} consumed no Changeset fragments`,
     );
-  }
-}
-
-function createChangesetsTag(
-  expectedTag: string,
-  ref: string,
-  cwd: string,
-): void {
-  const before = new Set(listTags('*', cwd));
-  withDetachedWorktree(
-    ref,
-    (worktree) => {
-      configureAutomationIdentity(worktree);
-      runCommand('pnpm', ['install', '--frozen-lockfile'], { cwd: worktree });
-      runCommand('pnpm', ['changeset', 'tag'], { cwd: worktree });
-    },
-    cwd,
-  );
-  const after = listTags('*', cwd);
-  const created = after.filter((tag) => !before.has(tag));
-  const unexpected = created.filter((tag) => tag !== expectedTag);
-  if (unexpected.length > 0) {
-    for (const tag of unexpected) runGit(['tag', '--delete', tag], cwd);
-    throw new Error(
-      `Changesets created unexpected tag(s): ${unexpected.join(', ')}`,
-    );
-  }
-  if (resolveTagCommit(expectedTag, cwd) !== ref) {
-    throw new Error(`Changesets did not create ${expectedTag} at ${ref}`);
   }
 }
 

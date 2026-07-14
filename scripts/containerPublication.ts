@@ -30,10 +30,17 @@ export interface BuildRequest {
   labels: Record<string, string>;
 }
 
+export type CommandRunner = typeof runCommand;
+
 export interface PublicationAdapter {
   inspect(reference: string): ImageObservation | null;
   build(request: BuildRequest): string;
-  copy(
+  retag(
+    sourceReference: string,
+    digest: string,
+    destinationReference: string,
+  ): void;
+  transfer(
     sourceReference: string,
     digest: string,
     destinationReference: string,
@@ -54,10 +61,12 @@ export interface ReconcilePublicationInput {
 }
 
 export class DockerBuildxAdapter implements PublicationAdapter {
+  constructor(private readonly command: CommandRunner = runCommand) {}
+
   inspect(reference: string): ImageObservation | null {
     let output: string;
     try {
-      output = runCommand('docker', [
+      output = this.command('docker', [
         'buildx',
         'imagetools',
         'inspect',
@@ -150,7 +159,7 @@ export class DockerBuildxAdapter implements PublicationAdapter {
             'type=gha,mode=max',
           );
         }
-        runCommand('docker', args);
+        this.command('docker', args);
 
         const metadata: unknown = JSON.parse(
           readFileSync(metadataFile, 'utf8'),
@@ -171,19 +180,38 @@ export class DockerBuildxAdapter implements PublicationAdapter {
     });
   }
 
-  copy(
+  retag(
     sourceReference: string,
     digest: string,
     destinationReference: string,
   ): void {
+    assertRegistryRelationship(sourceReference, destinationReference, 'same');
     const sourceRepository = referenceRepository(sourceReference);
-    runCommand('docker', [
+    this.command('docker', [
       'buildx',
       'imagetools',
       'create',
       '--tag',
       destinationReference,
       `${sourceRepository}@${digest}`,
+    ]);
+  }
+
+  transfer(
+    sourceReference: string,
+    digest: string,
+    destinationReference: string,
+  ): void {
+    assertRegistryRelationship(
+      sourceReference,
+      destinationReference,
+      'different',
+    );
+    const sourceRepository = referenceRepository(sourceReference);
+    this.command('crane', [
+      'copy',
+      `${sourceRepository}@${digest}`,
+      destinationReference,
     ]);
   }
 }
@@ -226,8 +254,15 @@ export function reconcilePublication(
         (reference): reference is string =>
           reference !== null && reference !== undefined,
       );
+    const availableReferences = present.map(
+      (observation) => observation.reference,
+    );
     for (const reference of missing) {
-      adapter.copy(canonicalReference, digest, reference);
+      const sourceReference =
+        sourceInDestinationRegistry(availableReferences, reference) ??
+        canonicalReference;
+      materializeReference(adapter, sourceReference, digest, reference);
+      availableReferences.push(reference);
     }
     state = missing.length === 0 ? 'complete' : 'repaired';
   }
@@ -283,9 +318,39 @@ export function promoteMovingAliases(
 ): string[] {
   const moving = imageReferences(input.identity, input.repositories).moving;
   for (const reference of moving) {
-    adapter.copy(publication.canonicalReference, publication.digest, reference);
+    materializePublicationReference(publication, reference, adapter);
   }
   return moving;
+}
+
+export function materializePublicationReference(
+  publication: PublicationResult,
+  destinationReference: string,
+  adapter: PublicationAdapter,
+): void {
+  const sourceReference = sourceInDestinationRegistry(
+    publication.references,
+    destinationReference,
+  );
+  if (!sourceReference) {
+    throw new Error(
+      `Complete publication has no immutable source in the registry for ${destinationReference}`,
+    );
+  }
+  adapter.retag(sourceReference, publication.digest, destinationReference);
+}
+
+export function materializeReference(
+  adapter: PublicationAdapter,
+  sourceReference: string,
+  digest: string,
+  destinationReference: string,
+): void {
+  if (referenceRegistry(sourceReference) === referenceRegistry(destinationReference)) {
+    adapter.retag(sourceReference, digest, destinationReference);
+  } else {
+    adapter.transfer(sourceReference, digest, destinationReference);
+  }
 }
 
 function assertObservationsMatch(
@@ -332,6 +397,36 @@ function sortedRecord(value: Record<string, string>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(value).sort(([left], [right]) => left.localeCompare(right)),
   );
+}
+
+function sourceInDestinationRegistry(
+  references: string[],
+  destinationReference: string,
+): string | undefined {
+  const destinationRegistry = referenceRegistry(destinationReference);
+  return references.find(
+    (reference) => referenceRegistry(reference) === destinationRegistry,
+  );
+}
+
+function assertRegistryRelationship(
+  sourceReference: string,
+  destinationReference: string,
+  expected: 'same' | 'different',
+): void {
+  const sameRegistry =
+    referenceRegistry(sourceReference) === referenceRegistry(destinationReference);
+  if ((expected === 'same') !== sameRegistry) {
+    throw new Error(
+      `Registry ${expected}-registry operation rejected for ${sourceReference} -> ${destinationReference}`,
+    );
+  }
+}
+
+function referenceRegistry(reference: string): string {
+  const slash = reference.indexOf('/');
+  if (slash <= 0) throw new Error(`Reference has no registry: ${reference}`);
+  return reference.slice(0, slash);
 }
 
 function referenceRepository(reference: string): string {

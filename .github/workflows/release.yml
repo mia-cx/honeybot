@@ -108,6 +108,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Configure release tagger identity
         run: |
@@ -134,6 +135,9 @@ jobs:
       - name: Create Docker builder
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
       - name: Login GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
@@ -150,6 +154,7 @@ jobs:
       - name: Reconcile stable history
         env:
           MANUAL_RECOVERY: ${{ github.event_name == 'workflow_dispatch' }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           args=()
           if [[ "$MANUAL_RECOVERY" == 'true' ]]; then
@@ -179,6 +184,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up pnpm
         uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
@@ -197,6 +203,9 @@ jobs:
 
       - name: Create Docker builder
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
 
       - name: Login GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -223,6 +232,7 @@ jobs:
         env:
           EXPECTED_LEGACY_DIGEST: ${{ inputs['expected-legacy-digest'] }}
           EXPECTED_LEGACY_REVISION: ${{ inputs['expected-legacy-revision'] }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: >-
           pnpm tsx scripts/adoptLegacyStableRelease.ts
           --version 1.0.1
