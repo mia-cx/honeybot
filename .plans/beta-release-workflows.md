@@ -132,7 +132,7 @@ The beta reconciliation script imports this module and calls it sequentially for
 
 Convert the existing workflow into the state-based beta orchestrator for pushes to `main`, and add a typed `workflow_dispatch` input with two internal modes: `reconcile-beta` and `promote-aliases`. A `push` run performs immutable beta reconciliation followed by moving-alias reconciliation; `reconcile-beta` performs the same live-history reconciliation after a stable-baseline handoff; `promote-aliases` runs only moving-alias reconciliation.
 
-Keep workflow-level permissions read-only. Grant the immutable-publication job only `contents: write` and `packages: write`, and grant the promotion job `contents: read`, `packages: write`, and `actions: write`. The promotion job uses `actions: write` solely to dispatch a required `reconcile-beta` or `promote-aliases` successor with its `GITHUB_TOKEN`; no other container job receives that permission.
+Keep workflow-level permissions read-only. Grant the immutable-publication job only `contents: write` and `packages: write`, and grant the promotion job `contents: read`, `packages: write`, and `actions: write`. The promotion job uses `actions: write` solely to dispatch a required `reconcile-beta` or `promote-aliases` successor with its `GITHUB_TOKEN`; no other container job receives that permission. Every `gh workflow run` step sets `GH_REPO` from `github.repository` explicitly, so dispatch routing never depends on whether that job has a checkout.
 
 Immutable beta reconciliation (`push` or `reconcile-beta` mode):
 

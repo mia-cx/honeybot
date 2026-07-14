@@ -1,4 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -27,6 +33,24 @@ afterEach(() => {
   for (const repository of repositories.splice(0)) {
     rmSync(repository, { recursive: true, force: true });
   }
+});
+
+describe('workflow dispatch routing', () => {
+  it('routes every checkout-independent workflow dispatch explicitly', () => {
+    for (const workflowPath of [
+      '.github/workflows/container.yml',
+      '.github/workflows/release.yml',
+    ]) {
+      const workflow = readFileSync(join(process.cwd(), workflowPath), 'utf8');
+      const dispatchSteps = workflow
+        .split(/\n(?= {6}- name: )/)
+        .filter((step) => step.includes('run: gh workflow run'));
+      expect(dispatchSteps.length).toBeGreaterThan(0);
+      for (const step of dispatchSteps) {
+        expect(step).toContain('GH_REPO: ${{ github.repository }}');
+      }
+    }
+  });
 });
 
 describe('stable release discovery', () => {
@@ -106,10 +130,7 @@ describe('stable release discovery', () => {
   it('creates a missing stable tag without installing historical dependencies', () => {
     const fixture = createStableGapRepository();
     runGit(['tag', '--delete', 'v1.1.0'], fixture.repository);
-    runGit(
-      ['push', 'origin', '--delete', 'v1.1.0'],
-      fixture.repository,
-    );
+    runGit(['push', 'origin', '--delete', 'v1.1.0'], fixture.repository);
     const adapter = new StableGapAdapter(fixture);
 
     reconcileStableReleases({
@@ -260,7 +281,9 @@ class PromotionAdapter implements PublicationAdapter {
   }
 
   transfer(): void {
-    throw new Error('complete publication aliases must use registry-local retags');
+    throw new Error(
+      'complete publication aliases must use registry-local retags',
+    );
   }
 
   private observationFor(

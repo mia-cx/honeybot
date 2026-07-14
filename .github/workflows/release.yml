@@ -41,6 +41,7 @@ jobs:
     steps:
       - name: Dispatch version PR update from the current main tip
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run release.yml --ref main -f mode=update-version-pr
 
@@ -164,6 +165,7 @@ jobs:
 
       - name: Dispatch deferred beta reconciliation
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run container.yml --ref main -f mode=reconcile-beta
 
@@ -242,5 +244,6 @@ jobs:
 
       - name: Dispatch stable reconciliation
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh workflow run release.yml --ref main -f mode=reconcile-stable

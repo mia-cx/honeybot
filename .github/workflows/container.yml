@@ -147,6 +147,7 @@ jobs:
           needs.reconcile.outputs.successor-needed == 'true' ||
           steps.promote.outputs.successor-mode != 'none'
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NEXT_MODE: ${{ needs.reconcile.outputs.successor-needed == 'true' && 'reconcile-beta' || steps.promote.outputs.successor-mode }}
         run: gh workflow run container.yml --ref main -f mode="$NEXT_MODE"
