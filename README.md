@@ -318,23 +318,21 @@ Actions:
 
 ## Image tags
 
-Images are versioned from `package.json`.
+`main` is the integration and beta channel. A `main` commit with pending Changesets release intent publishes a transient version such as `1.2.3-beta.4` without committing that prerelease version. Merging the Changesets release PR creates the immutable stable `vX.Y.Z` Git tag and publishes the matching production image.
 
 Stable version `1.2.3` publishes:
 
-- `v1.2.3`
-- `v1.2`
-- `v1`
-- `latest`
-- `sha-...`
+- Immutable: `v1.2.3`, `sha-<full-commit-sha>`
+- Moving: `v1.2`, `v1`, `latest`
 
-Beta version `1.2.3-beta` publishes:
+Beta version `1.2.3-beta.4` publishes:
 
-- `v1.2.3-beta`
-- `v1.2-beta`
-- `v1-beta`
-- `beta`
-- `sha-...`
+- Immutable: `v1.2.3-beta.4`, `sha-<full-commit-sha>`
+- Moving: `v1.2-beta`, `v1-beta`, `beta`
+
+Every immutable reference resolves to the same verified digest in Docker Hub and GHCR. Reruns repair valid partial publication from that digest without rebuilding and fail closed on conflicting tags, digests, or OCI identity labels. Stable Git tags are never moved; release a new patch version for corrections.
+
+Beta images may include database migrations that make downgrades unsafe. Back up persistent data before deploying the beta channel.
 
 Build locally:
 
@@ -355,7 +353,9 @@ pnpm eval:fixtures  # run classifier fixture evals
 pnpm seed:fixtures  # seed fixture evidence corpus
 ```
 
-GitHub Actions runs CI on PRs and pushes to `main`. Container builds publish multi-arch `linux/amd64` and `linux/arm64` images to GHCR and Docker Hub on `main` pushes.
+GitHub Actions runs CI on PRs and pushes to `main`. Eligible `main` integrations publish multi-arch beta images; merging the Changesets release PR publishes stable images from that exact merge commit.
+
+Release automation requires `DOCKERHUB_TOKEN`, `RELEASE_APP_ID`, and `RELEASE_APP_PRIVATE_KEY` repository secrets. The GitHub App should be installed only on this repository with contents and pull-request write permissions so Changesets-authored release PR updates trigger normal required CI. Configure the `stable-release` GitHub environment with required reviewers. The `Release` workflow exposes guarded manual recovery modes for stable reconciliation and the one-time `v1.0.1` baseline adoption; adoption requires freshly inspected, reviewer-approved legacy digest and revision inputs rather than checked-in registry state.
 
 ## Docs
 

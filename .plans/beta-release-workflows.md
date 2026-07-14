@@ -2,11 +2,9 @@
 
 ## Status
 
-Proposed implementation plan. No workflow changes have been made yet.
+Implemented on this branch. The executable source of truth is now `.github/workflows/{container,release}.yml` plus the typed release scripts and tests under `scripts/` and `tests/`; this document remains the design and rollout record.
 
-- Worktree: `/Users/mia/Development/mia-cx/honeybot/.worktrees/plan-beta-release-workflows`
-- Branch: `plan/beta-release-workflows`
-- Base: `origin/main` at `502c44e`
+Production rollout still requires the repository secrets documented in `README.md` and the guarded one-time `v1.0.1` adoption through the `Release` workflow before automatic reconciliation can proceed.
 
 ## Goal
 
@@ -160,9 +158,9 @@ Generate a short-lived installation token from a dedicated GitHub App with only 
 
 On each push to `main`:
 
-1. Continue running `changesets/action` with the GitHub App token so `changeset-release/main` is created or updated from pending fragments and receives normal CI.
+1. Dispatch a serialized `update-version-pr` run against the live `main` ref. That run creates a least-privilege GitHub App token, checks out the dispatch SHA with the App credential persisted for Git pushes, and runs `changesets/action` so `changeset-release/main` updates trigger normal CI. Push-triggered jobs do not call Changesets directly from a stale event SHA.
 2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`; configure repository-local Git identity as `github-actions[bot]` / `41898282+github-actions[bot]@users.noreply.github.com`; verify both values; set up the pinned pnpm and Node versions; run `pnpm install --frozen-lockfile`; then set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`. Jobs share no filesystem, dependency, or Git-identity state, so this setup is required independently of the version-PR job and must complete before any tag command.
-3. The script finds the latest complete stable release, then scans first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. It validates each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; it does not infer the release solely from the current push's `before`/`sha` pair.
+3. The script anchors at the earliest trusted complete stable baseline, then scans every first-parent commit through the current remote `main` tip for stable `package.json` version transitions, including transitions that already have complete or partial Git/registry state. A later complete release cannot hide an earlier incomplete transition. Each candidate is validated against its first parent, consumed Changesets, and `CHANGELOG.md`; detection never trusts only the current push's `before`/`sha` pair.
 4. The script reconciles every candidate oldest-first in-process. For each exact release SHA it:
    - requires a valid increasing stable semantic version;
    - fetches and preflights `vX.Y.Z` through the shared Git adapter, failing if its peeled `^{commit}` target differs and accepting annotated or lightweight tags that peel to the release SHA;
@@ -367,8 +365,8 @@ Document:
 1. Keep PR #10 (`changeset-release/main`) open until this workflow change is merged.
 2. Adopt `v1.0.1` as a guarded legacy baseline before enabling either reconciler:
    - verify full commit `67813a8ec9ef2cfc4ae6d66cec88345f567243ed` contains `package.json` version `1.0.1` and that Git tag `v1.0.1` is absent;
-   - re-inspect `v1.0.1` in Docker Hub and GHCR immediately before migration and record its digest and OCI labels. At planning time both registries resolve to legacy digest `sha256:184efc2e80eeb9419da903f79c1e21978ddbe4a622524e0c0611aa33696c56f0` with revision `0e23803e5555277df2ed966b222a10fd6622ed09`; any drift requires a fresh explicit review rather than broadening the overwrite rule;
-   - run `scripts/adoptLegacyStableRelease.ts` with that expected legacy identity and the full target ref. It builds the target once, replaces only the authorized untagged legacy exact references, creates full-SHA references in both registries, verifies one canonical digest plus target version/revision labels, and only then creates `v1.0.1` at the target commit;
+   - re-inspect `v1.0.1` in Docker Hub and GHCR immediately before migration, require both references to share one digest plus version/revision labels, and obtain explicit reviewer approval for that observed identity. Registry state is intentionally not hard-coded because the legacy workflow still moves these references;
+   - dispatch the `Release` workflow in `adopt-v1.0.1` mode with the reviewed digest and revision inputs. `scripts/adoptLegacyStableRelease.ts` builds the target once, replaces only that authorized untagged legacy exact identity, creates full-SHA references in both registries, verifies one canonical digest plus target version/revision labels, and only then creates `v1.0.1` at the target commit;
    - run stable alias reconciliation and verify `v1.0`, `v1`, and `latest` resolve to the adopted canonical digest. Do not move `v1.0.0`, and do not treat pre-invariant short-SHA aliases as immutable release identities.
 3. Create and install a dedicated release-automation GitHub App with only repository contents and pull-request write permissions; configure its App ID and private key as repository Actions secrets before merging workflow code.
 4. Merge the workflow implementation into `main` with its minor Changeset.
