@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { openDatabase, type DatabaseHandle } from '../src/db/database.js';
 import type { ModelDefaults } from '../src/services/modelStore.js';
 
@@ -10,6 +11,18 @@ export function testDatabase(prefix = 'honeybot-test-'): DatabaseHandle {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   tempDirs.push(dir);
   return openDatabase(`file:${join(dir, 'test.sqlite')}`);
+}
+
+export function testDatabaseWithSetup(
+  setup: (sqlite: Database.Database) => void,
+): DatabaseHandle {
+  const dir = mkdtempSync(join(tmpdir(), 'honeybot-migration-test-'));
+  tempDirs.push(dir);
+  const path = join(dir, 'test.sqlite');
+  const sqlite = new Database(path);
+  setup(sqlite);
+  sqlite.close();
+  return openDatabase(`file:${path}`);
 }
 
 export function cleanupTempDirs() {

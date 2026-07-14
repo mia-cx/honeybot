@@ -7,6 +7,7 @@ import { handleMessageCreate } from './events/messageCreate.js';
 import { logger } from './logger.js';
 import { FairQueue } from './queues/fairQueue.js';
 import { CaseStore } from './services/caseStore.js';
+import { refreshRecoveredCaseReviews } from './services/caseReviewRecovery.js';
 import { OpenRouterScamClassifier } from './services/classifier.js';
 import { ConfigStore } from './services/configStore.js';
 import { DuplicateDetector } from './services/duplicateDetector.js';
@@ -49,13 +50,13 @@ const duplicateDetector = new DuplicateDetector();
 const modelQueue = new FairQueue({
   name: 'models',
   globalLimit: env.MODEL_CALL_LIMIT,
-  perGuildLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
+  perGroupLimit: env.MODEL_CALL_LIMIT_PER_GUILD,
   windowMs: env.MODEL_CALL_WINDOW_SECONDS * 1000,
 });
 const moderationQueue = new FairQueue({
   name: 'moderation',
   globalLimit: env.MODERATION_ACTION_LIMIT,
-  perGuildLimit: env.MODERATION_ACTION_LIMIT_PER_GUILD,
+  perGroupLimit: env.MODERATION_ACTION_LIMIT_PER_GUILD,
   windowMs: env.MODERATION_ACTION_WINDOW_SECONDS * 1000,
 });
 const embedder = new OpenRouterEmbeddings(
@@ -64,6 +65,29 @@ const embedder = new OpenRouterEmbeddings(
   env.DEFAULT_EMBEDDINGS_DIMENSIONS,
 );
 const caseStore = new CaseStore(database.db, storage, embedder);
+void caseStore
+  .recoverInterruptedAttachments()
+  .then((recoveredAttachments) => {
+    if (recoveredAttachments > 0) {
+      logger.warn('Recovered interrupted attachment downloads', {
+        recoveredAttachments,
+      });
+    }
+  })
+  .catch((error: unknown) => {
+    logger.error('Failed to recover interrupted attachment downloads', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+const recoveredCaseOperations =
+  await caseStore.recoverInterruptedOperations();
+const uncertainCaseReviews = await caseStore.listUncertainCaseReviews();
+if (recoveredCaseOperations > 0) {
+  logger.warn('Recovered interrupted case operations', {
+    recoveredCaseOperations,
+    uncertainCaseOperations: uncertainCaseReviews.length,
+  });
+}
 const classifier = new OpenRouterScamClassifier(modelStore, modelQueue, {
   text: {
     provider: env.ADDITIONAL_TEXT_SIGNAL_PROVIDER,
@@ -113,6 +137,22 @@ client.once(Events.ClientReady, (readyClient) => {
         logger.info('Purged expired removed-guild settings', {
           purgedGuildCount,
         });
+    })
+    .then(() =>
+      refreshRecoveredCaseReviews(
+        readyClient,
+        caseStore,
+        uncertainCaseReviews,
+      ),
+    )
+    .then((recoverySummary) => {
+      if (
+        recoverySummary.updated > 0 ||
+        recoverySummary.reposted > 0 ||
+        recoverySummary.failed > 0
+      ) {
+        logger.info('Refreshed recovered case reviews', recoverySummary);
+      }
     })
     .then(() => registerCommands(readyClient))
     .then(() => {

@@ -81,6 +81,8 @@ export const cases = sqliteTable('cases', {
   triggerType: text('trigger_type').notNull(),
   status: text('status').notNull(),
   actionTaken: text('action_taken'),
+  operationActionTaken: text('operation_action_taken'),
+  operationDispatchedAt: text('operation_dispatched_at'),
   reason: text('reason'),
   evidenceSummaryJson: text('evidence_summary_json').notNull(),
   reviewChannelId: text('review_channel_id'),
@@ -115,6 +117,8 @@ export const caseAttachments = sqliteTable('case_attachments', {
   sha256: text('sha256'),
   perceptualHash: text('perceptual_hash'),
   storageKey: text('storage_key'),
+  processingSlot: integer('processing_slot'),
+  processingState: text('processing_state'),
   createdAt: text('created_at').notNull(),
 });
 

@@ -7,11 +7,12 @@ import type {
 } from '../services/duplicateDetector.js';
 import type { MessageCache } from '../services/messageCache.js';
 import {
-  applyPolicyForUser,
-  applyPolicyWithBestEffortDm,
   deleteMessage,
-  hasBypass,
+  applyPreventionPolicyForUser,
+  applyPolicyWithBestEffortDm,
+  hasModerationBypass,
   honeybotAuditReason,
+  requireAppliedPolicy,
 } from '../services/moderation.js';
 import type { CaseStore } from '../services/caseStore.js';
 import type { EvidenceAnalyzer } from '../services/evidenceAnalyzer.js';
@@ -20,6 +21,7 @@ import type { FileStorage } from '../storage/fileStorage.js';
 import type {
   AnalysisResult,
   GuildConfig,
+  PolicyApplicationOutcome,
   TriggerType,
 } from '../domain/types.js';
 import type { CachedAttachment } from '../types.js';
@@ -48,9 +50,15 @@ export async function handleMessageCreate(
   const guildConfig = await dependencies.configStore.getGuildConfig(
     message.guildId,
   );
-  const member =
-    message.member ?? (await message.guild.members.fetch(message.author.id));
-  if (hasBypass(member, guildConfig)) return;
+  if (
+    await hasModerationBypass(
+      message.guild,
+      message.author.id,
+      message.member,
+      guildConfig,
+    )
+  )
+    return;
 
   if (guildConfig.honeypotChannelIds.includes(message.channelId)) {
     await handleTriggeredMessage(
@@ -103,26 +111,6 @@ async function handleTriggeredMessage(
     caseRow.id,
     message,
   );
-  const cachedAttachments = await Promise.all(
-    persisted.attachments.map(
-      async (attachment): Promise<CachedAttachment> => ({
-        id: attachment.discordAttachmentId,
-        name: attachment.name,
-        contentType: attachment.contentType,
-        size: attachment.sizeBytes,
-        url: attachment.originalUrl,
-        proxyUrl: attachment.reviewAttachmentUrl ?? attachment.originalUrl,
-        dataUrl: await attachmentDataUrl(attachment, dependencies.storage),
-        sha256: attachment.sha256,
-        storageKey: attachment.storageKey,
-      }),
-    ),
-  );
-  const cached = dependencies.messageCache.cache(
-    message,
-    triggerType === 'honeypot' ? 'honeypot' : 'crosschannel',
-    cachedAttachments,
-  );
 
   const preventionAuditReason = honeybotAuditReason({
     caseId: caseRow.id,
@@ -132,24 +120,27 @@ async function handleTriggeredMessage(
     actorId: null,
   });
 
-  await dependencies.moderationQueue.enqueue(message.guildId, () =>
-    applyPolicyForUser(
-      message.guild,
-      message.author.id,
-      policy,
-      preventionAuditReason,
-    ),
+  const preventionResult = await dependencies.moderationQueue.enqueue(
+    message.guildId,
+    () =>
+      applyPreventionPolicyForUser(
+        message.guild,
+        message.author.id,
+        policy,
+        preventionAuditReason,
+      ),
   );
-
   await dependencies.caseStore.addEvent(
     caseRow.id,
-    'prevention_applied',
+    preventionResult.applied ? 'prevention_applied' : 'prevention_not_applied',
     'bot',
     null,
-    moderationReason,
+    preventionResult.applied ? moderationReason : preventionResult.detail,
     { policy },
   );
-  const preventionAppliedAtMs = Date.now();
+  const preventionOutcome: PolicyApplicationOutcome = preventionResult.applied
+    ? { ...preventionResult, appliedAtMs: Date.now() }
+    : { ...preventionResult, attemptedAtMs: Date.now() };
 
   let triggerMessageDeleted = false;
   if (policy.deleteMessages) {
@@ -170,22 +161,50 @@ async function handleTriggeredMessage(
       });
     }
   }
+
+  const processedAttachments = await persisted.processedAttachments;
+  const cachedAttachments = await Promise.all(
+    processedAttachments.map(async (attachment): Promise<CachedAttachment> => ({
+      id: attachment.discordAttachmentId,
+      name: attachment.name,
+      contentType: attachment.contentType,
+      size: attachment.sizeBytes,
+      url: attachment.originalUrl,
+      proxyUrl: attachment.reviewAttachmentUrl ?? attachment.originalUrl,
+      dataUrl:
+        (await attachmentDataUrl(attachment, dependencies.storage)) ?? null,
+      sha256: attachment.sha256,
+      storageKey: attachment.storageKey,
+    })),
+  );
+  const cached = dependencies.messageCache.cache(
+    message,
+    triggerType === 'honeypot' ? 'honeypot' : 'crosschannel',
+    cachedAttachments,
+  );
+
   await upsertReviewIfConfigured(
     message,
     caseRow.id,
     guildConfig,
     dependencies,
     {
-      status: 'Prevention applied; analysis starting.',
+      status: preventionOutcome.applied
+        ? 'Prevention applied; analysis starting.'
+        : 'Prevention was not applied; analysis starting.',
       reason: moderationReason,
       duplicateChannelIds,
       triggerMessageDeleted,
-      preventionAppliedAtMs,
+      preventionOutcome,
       analysis: null,
+      punishmentReady: false,
     },
   );
 
-  if (policy.actionType === 'kick' || policy.actionType === 'ban') {
+  if (
+    preventionOutcome.applied &&
+    (policy.actionType === 'kick' || policy.actionType === 'ban')
+  ) {
     await upsertReviewIfConfigured(
       message,
       caseRow.id,
@@ -197,8 +216,9 @@ async function handleTriggeredMessage(
           'Prevention already kicked/banned the user; expensive analysis skipped.',
         duplicateChannelIds,
         triggerMessageDeleted,
-        preventionAppliedAtMs,
+        preventionOutcome,
         analysis: null,
+        punishmentReady: false,
       },
     );
     return;
@@ -221,8 +241,9 @@ async function handleTriggeredMessage(
           reason: result.reason,
           duplicateChannelIds,
           triggerMessageDeleted,
-          preventionAppliedAtMs,
+          preventionOutcome,
           analysis: result,
+          punishmentReady: false,
         },
       ).catch((error: unknown) => {
         logger.warn('Failed to update analysis progress', {
@@ -275,8 +296,9 @@ async function handleTriggeredMessage(
       reason: analysis.reason,
       duplicateChannelIds,
       triggerMessageDeleted,
-      preventionAppliedAtMs,
+      preventionOutcome,
       analysis,
+      punishmentReady: true,
     },
   );
 
@@ -292,29 +314,159 @@ async function handleTriggeredMessage(
       confidence: analysis.confidence,
       actorId: null,
     });
-    await dependencies.moderationQueue.enqueue(message.guildId, () =>
-      applyPolicyWithBestEffortDm({
-        guild: message.guild,
-        userId: message.author.id,
-        policy: punishment,
-        reason: auditReason,
-        dm: guildConfig.punishmentDmNotify
-          ? {
-              caseId: caseRow.id,
-              reason: analysis.reason,
-              auditReason,
-              caseStore: dependencies.caseStore,
-              storage: dependencies.storage,
-            }
-          : null,
-      }),
-    );
-    await dependencies.caseStore.resolve(
+    const claimed = await dependencies.caseStore.claimOperation(
       caseRow.id,
-      'punished',
+      'punish',
+      null,
       punishment.actionType,
+    );
+    if (!claimed) return;
+    let mutationStarted = false;
+    let applyResult;
+    try {
+      applyResult = requireAppliedPolicy(
+        await dependencies.moderationQueue.enqueue(message.guildId, () =>
+          applyPolicyWithBestEffortDm({
+            guild: message.guild,
+            userId: message.author.id,
+            policy: punishment,
+            reason: auditReason,
+            dm: guildConfig.punishmentDmNotify
+              ? {
+                  caseId: caseRow.id,
+                  reason: analysis.reason,
+                  auditReason,
+                  caseStore: dependencies.caseStore,
+                  storage: dependencies.storage,
+                }
+              : null,
+            onMutationStarted: async () => {
+              const dispatched =
+                await dependencies.caseStore.markOperationDispatched(
+                  caseRow.id,
+                  'punish',
+                  null,
+                );
+              if (!dispatched) {
+                throw new Error(
+                  'Auto-punishment state changed before Discord dispatch',
+                );
+              }
+              mutationStarted = true;
+            },
+          }),
+        ),
+      );
+    } catch (error) {
+      if (mutationStarted) {
+        const uncertain = await dependencies.caseStore.markOperationUncertain(
+          caseRow.id,
+          'punish',
+          null,
+          error,
+        );
+        if (!uncertain) throw error;
+        logger.error('Auto-punishment outcome requires reconciliation', {
+          caseId: caseRow.id,
+          guildId: message.guildId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await upsertReviewIfConfigured(
+          message,
+          caseRow.id,
+          guildConfig,
+          dependencies,
+          {
+            status: 'punishment_uncertain',
+            reason:
+              'Discord may have applied the automatic punishment before reporting a failure. Verify the user state and reconcile the case.',
+            duplicateChannelIds,
+            triggerMessageDeleted,
+            preventionOutcome,
+            analysis,
+            punishmentReady: true,
+          },
+        );
+        return;
+      }
+
+      await dependencies.caseStore.failOperation(
+        caseRow.id,
+        'punish',
+        null,
+        error,
+      );
+      logger.warn('Honeybot auto-punishment failed', {
+        caseId: caseRow.id,
+        guildId: message.guildId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await upsertReviewIfConfigured(
+        message,
+        caseRow.id,
+        guildConfig,
+        dependencies,
+        {
+          status: 'Auto-punishment failed; awaiting moderator review.',
+          reason:
+            error instanceof Error ? error.message : 'Auto-punishment failed',
+          duplicateChannelIds,
+          triggerMessageDeleted,
+          preventionOutcome,
+          analysis,
+          punishmentReady: true,
+        },
+      );
+      return;
+    }
+    try {
+      const completed = await dependencies.caseStore.completeOperation(
+        caseRow.id,
+        'punish',
+        punishment.actionType,
+        null,
+        analysis.reason,
+      );
+      if (!completed)
+        throw new Error('Auto-punishment operation state changed unexpectedly');
+    } catch (error) {
+      const uncertain = await dependencies.caseStore.markOperationUncertain(
+        caseRow.id,
+        'punish',
+        null,
+        error,
+      );
+      if (!uncertain) throw error;
+      logger.error('Auto-punishment outcome requires reconciliation', {
+        caseId: caseRow.id,
+        guildId: message.guildId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await upsertReviewIfConfigured(
+        message,
+        caseRow.id,
+        guildConfig,
+        dependencies,
+        {
+          status: 'punishment_uncertain',
+          reason:
+            'Auto-punishment reached Discord but its result could not be persisted. Verify the user state and reconcile the case.',
+          duplicateChannelIds,
+          triggerMessageDeleted,
+          preventionOutcome,
+          analysis,
+          punishmentReady: true,
+        },
+      );
+      return;
+    }
+    await dependencies.caseStore.addEvent(
+      caseRow.id,
+      'punishment_applied',
+      'bot',
       null,
       analysis.reason,
+      { applyResult },
     );
     await upsertReviewIfConfigured(
       message,
@@ -326,8 +478,9 @@ async function handleTriggeredMessage(
         reason: analysis.reason,
         duplicateChannelIds,
         triggerMessageDeleted,
-        preventionAppliedAtMs,
+        preventionOutcome,
         analysis,
+        punishmentReady: true,
       },
     );
   }
@@ -411,8 +564,9 @@ async function upsertReviewIfConfigured(
     reason: string;
     duplicateChannelIds: string[];
     triggerMessageDeleted: boolean;
-    preventionAppliedAtMs: number;
+    preventionOutcome: PolicyApplicationOutcome;
     analysis: AnalysisResult | null;
+    punishmentReady: boolean;
   },
 ) {
   if (!guildConfig.moderationChannelId) return;
@@ -447,10 +601,10 @@ async function upsertReviewIfConfigured(
           : 'crosschannel_prevention'
       ],
     punishment: guildConfig.policies.punishment,
-    preventionApplied: true,
-    preventionAppliedAtMs: state.preventionAppliedAtMs,
+    preventionOutcome: state.preventionOutcome,
     triggerMessageDeleted: state.triggerMessageDeleted,
     analysis: state.analysis,
+    punishmentReady: state.punishmentReady,
   };
   const caseRow = await dependencies.caseStore.getCase(caseId);
 

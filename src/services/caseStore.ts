@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
-import { and, eq, inArray } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notInArray,
+} from 'drizzle-orm';
 import type { Db } from '../db/database.js';
 import {
   caseAttachments,
@@ -26,19 +34,132 @@ import {
   shingles,
   textHash,
 } from '../utils/fingerprints.js';
-import type { FileStorage, StoredFile } from '../storage/fileStorage.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_CASE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  type FileStorage,
+  type StoredFile,
+} from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
+import { FairQueue } from '../queues/fairQueue.js';
+import { resolveImageContentType } from '../storage/imageNormalization.js';
+import { logger } from '../logger.js';
 
 const caseId = customAlphabet(
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz-',
   16,
 );
 
+const MAX_QUEUED_ATTACHMENTS_GLOBAL = MAX_ATTACHMENTS_PER_CASE * 2;
+const ATTACHMENT_RETRY_DELAY_MS = 1_000;
+
+const attachmentQueueDefaults = {
+  name: 'attachments',
+  globalLimit: Number.MAX_SAFE_INTEGER,
+  perGroupLimit: Number.MAX_SAFE_INTEGER,
+  windowMs: 1_000,
+  maxPendingGlobal: MAX_QUEUED_ATTACHMENTS_GLOBAL,
+  maxPendingPerGroup: MAX_ATTACHMENTS_PER_CASE,
+  logFailures: false,
+} as const;
+
+const caseOperationTransitions = {
+  punish: {
+    from: 'pending_review',
+    claimed: 'punishment_pending',
+    uncertain: 'punishment_uncertain',
+    to: 'punished',
+  },
+  dismiss: {
+    from: 'pending_review',
+    claimed: 'dismissal_pending',
+    uncertain: 'dismissal_uncertain',
+    to: 'dismissed',
+  },
+  revert_punishment: {
+    from: 'punished',
+    claimed: 'punishment_revert_pending',
+    uncertain: 'punishment_revert_uncertain',
+    to: 'pending_review',
+  },
+  revert_dismissal: {
+    from: 'dismissed',
+    claimed: 'dismissal_revert_pending',
+    uncertain: 'dismissal_revert_uncertain',
+    to: 'pending_review',
+  },
+} as const satisfies Record<
+  string,
+  {
+    from: CaseStatus;
+    claimed: CaseStatus;
+    uncertain: CaseStatus;
+    to: CaseStatus;
+  }
+>;
+
+export type CaseOperation = keyof typeof caseOperationTransitions;
+
+type CaseOperationTransition = (typeof caseOperationTransitions)[CaseOperation];
+
+function operationTransitions() {
+  return Object.entries(caseOperationTransitions) as Array<
+    [CaseOperation, CaseOperationTransition]
+  >;
+}
+
+const claimedCaseStatuses = operationTransitions().map(
+  ([, transition]) => transition.claimed,
+);
+const uncertainCaseStatuses = operationTransitions().map(
+  ([, transition]) => transition.uncertain,
+);
+const activeCaseStatuses = [
+  'pending_review',
+  ...claimedCaseStatuses,
+  ...uncertainCaseStatuses,
+] satisfies CaseStatus[];
+
+export type RecoveredUncertainCase = {
+  caseId: string;
+  guildId: string;
+  reviewChannelId: string | null;
+  reviewMessageId: string | null;
+};
+
+function operationTransitionForStatus(
+  status: string,
+  state: 'claimed' | 'uncertain',
+) {
+  return operationTransitions().find(
+    ([, transition]) => transition[state] === status,
+  );
+}
+
+type CaseAttachmentRow = typeof caseAttachments.$inferSelect;
+
+class AttachmentProcessingCancelledError extends Error {}
+
 export class CaseStore {
+  private readonly attachmentJobs = new Map<number, Promise<void>>();
+  private readonly attachmentWaiters = new Map<
+    number,
+    {
+      promise: Promise<CaseAttachmentRow>;
+      resolve: (row: CaseAttachmentRow) => void;
+      reject: (error: unknown) => void;
+    }
+  >();
+  private retryingPendingAttachments = false;
+  private pendingAttachmentRetryRequested = false;
+  private pendingAttachmentRetryTimer: NodeJS.Timeout | null = null;
+
   constructor(
     private readonly db: Db,
     private readonly storage: FileStorage,
     private readonly embedder?: ScamEmbedder,
+    private readonly attachmentQueue = new FairQueue(attachmentQueueDefaults),
   ) {}
 
   async getOrCreateCase(
@@ -50,49 +171,62 @@ export class CaseStore {
     },
     options: { reusePending?: boolean } = {},
   ) {
-    if (options.reusePending ?? true) {
-      const existing = await this.db
-        .select()
-        .from(cases)
-        .where(
-          and(
-            eq(cases.guildId, input.guildId),
-            eq(cases.userId, input.userId),
-            eq(cases.triggerType, input.triggerType),
-            eq(cases.status, 'pending_review'),
-          ),
-        )
-        .get();
+    return this.db.transaction(
+      (tx) => {
+        if (options.reusePending ?? true) {
+          const existing = tx
+            .select()
+            .from(cases)
+            .where(
+              and(
+                eq(cases.guildId, input.guildId),
+                eq(cases.userId, input.userId),
+                eq(cases.triggerType, input.triggerType),
+                inArray(cases.status, activeCaseStatuses),
+              ),
+            )
+            .orderBy(desc(cases.updatedAt))
+            .get();
 
-      if (existing) return existing;
-    }
+          if (existing) return existing;
+        }
 
-    const now = new Date().toISOString();
-    const created = {
-      id: caseId(),
-      guildId: input.guildId,
-      userId: input.userId,
-      triggerType: input.triggerType,
-      status: 'pending_review' as CaseStatus,
-      actionTaken: null,
-      reason: input.reason,
-      evidenceSummaryJson: '{}',
-      reviewChannelId: null,
-      reviewMessageId: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+        const now = new Date().toISOString();
+        const created = tx
+          .insert(cases)
+          .values({
+            id: caseId(),
+            guildId: input.guildId,
+            userId: input.userId,
+            triggerType: input.triggerType,
+            status: 'pending_review' as CaseStatus,
+            actionTaken: null,
+            reason: input.reason,
+            evidenceSummaryJson: '{}',
+            reviewChannelId: null,
+            reviewMessageId: null,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning()
+          .get();
 
-    await this.db.insert(cases).values(created);
-    await this.addEvent(
-      created.id,
-      'triggered',
-      'bot',
-      null,
-      input.reason,
-      input,
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              created.id,
+              'triggered',
+              'bot',
+              null,
+              input.reason,
+              input,
+            ),
+          )
+          .run();
+        return created;
+      },
+      { behavior: 'immediate' },
     );
-    return created;
   }
 
   async attachMessage(caseId: string, message: Message<true>) {
@@ -123,41 +257,324 @@ export class CaseStore {
         .get());
     if (!caseMessage) throw new Error('Failed to persist case message');
 
-    const storedAttachments = [] as Array<typeof caseAttachments.$inferSelect>;
+    const attachmentMetadata: CaseAttachmentRow[] = [];
+    const attachmentStorage: Array<Promise<CaseAttachmentRow>> = [];
+    let admittedAttachments = 0;
     for (const attachment of message.attachments.values()) {
-      let stored: StoredFile | null = null;
-      try {
-        stored = await this.storage.saveFromUrl(
-          attachment.url,
-          [message.guildId, caseId],
-          attachment.name ?? `${attachment.id}.bin`,
-          { contentType: attachment.contentType ?? null },
-        );
-      } catch {
-        // Keep metadata even if Discord CDN download fails.
-      }
+      const attachmentName = attachment.name ?? `${attachment.id}.bin`;
+      const eligibleForProcessing =
+        resolveImageContentType(attachment.contentType, attachmentName) !==
+          null &&
+        admittedAttachments < MAX_ATTACHMENTS_PER_MESSAGE &&
+        attachment.size <= MAX_ATTACHMENT_BYTES;
+      const row = this.db.transaction(
+        (tx) => {
+          const occupiedSlots = eligibleForProcessing
+            ? tx
+                .select({ processingSlot: caseAttachments.processingSlot })
+                .from(caseAttachments)
+                .where(
+                  and(
+                    eq(caseAttachments.caseId, caseId),
+                    isNotNull(caseAttachments.processingSlot),
+                  ),
+                )
+                .all()
+            : [];
+          const processingSlot =
+            eligibleForProcessing &&
+            occupiedSlots.length < MAX_ATTACHMENTS_PER_CASE
+              ? Math.max(
+                  0,
+                  ...occupiedSlots.map((item) => item.processingSlot ?? 0),
+                ) + 1
+              : null;
 
-      const [row] = await this.db
-        .insert(caseAttachments)
-        .values({
-          caseId,
-          caseMessageId: caseMessage.id,
-          discordAttachmentId: attachment.id,
-          name: stored?.fileName ?? attachment.name ?? null,
-          originalUrl: attachment.url,
-          reviewAttachmentUrl: null,
-          contentType: stored?.contentType ?? attachment.contentType ?? null,
-          sizeBytes: stored?.sizeBytes ?? attachment.size,
-          sha256: stored?.sha256 ?? null,
-          perceptualHash: null,
-          storageKey: stored?.storageKey ?? null,
-          createdAt: now,
-        })
-        .returning();
-      if (row) storedAttachments.push(row);
+          return tx
+            .insert(caseAttachments)
+            .values({
+              caseId,
+              caseMessageId: caseMessage.id,
+              discordAttachmentId: attachment.id,
+              name: attachment.name ?? null,
+              originalUrl: attachment.url,
+              reviewAttachmentUrl: null,
+              contentType: attachment.contentType ?? null,
+              sizeBytes: attachment.size,
+              sha256: null,
+              perceptualHash: null,
+              storageKey: null,
+              processingSlot,
+              processingState: processingSlot === null ? null : 'pending',
+              createdAt: now,
+            })
+            .returning()
+            .get();
+        },
+        { behavior: 'immediate' },
+      );
+
+      const storageTask =
+        row.processingSlot === null
+          ? Promise.resolve(row)
+          : this.queueAttachmentStorage(message.guildId, row);
+
+      attachmentMetadata.push(row);
+      attachmentStorage.push(storageTask);
+      if (row.processingSlot !== null) admittedAttachments += 1;
     }
 
-    return { caseMessage, attachments: storedAttachments };
+    return {
+      caseMessage,
+      attachments: attachmentMetadata,
+      processedAttachments: Promise.all(attachmentStorage),
+    };
+  }
+
+  async recoverInterruptedAttachments() {
+    const interrupted = await this.db
+      .select({ attachment: caseAttachments, guildId: cases.guildId })
+      .from(caseAttachments)
+      .innerJoin(cases, eq(caseAttachments.caseId, cases.id))
+      .where(eq(caseAttachments.processingState, 'pending'));
+
+    for (const { attachment, guildId } of interrupted) {
+      await this.queueAttachmentStorage(guildId, attachment);
+    }
+    return interrupted.length;
+  }
+
+  private queueAttachmentStorage(
+    guildId: string,
+    row: CaseAttachmentRow,
+  ): Promise<CaseAttachmentRow> {
+    const waiting = this.attachmentWaiterFor(row.id);
+    if (!this.attachmentJobs.has(row.id))
+      this.startAttachmentStorage(guildId, row);
+    return waiting.promise;
+  }
+
+  private attachmentWaiterFor(rowId: number) {
+    const existing = this.attachmentWaiters.get(rowId);
+    if (existing) return existing;
+
+    let resolve!: (row: CaseAttachmentRow) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<CaseAttachmentRow>(
+      (resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      },
+    );
+    const waiting = { promise, resolve, reject };
+    this.attachmentWaiters.set(rowId, waiting);
+    return waiting;
+  }
+
+  private startAttachmentStorage(guildId: string, row: CaseAttachmentRow) {
+    if (this.attachmentJobs.has(row.id)) return true;
+
+    const queued = this.attachmentQueue.tryEnqueue(row.caseId, async () => {
+      let stored: StoredFile;
+      try {
+        stored = await this.storage.saveFromUrl(
+          row.originalUrl,
+          [guildId, row.caseId],
+          row.name ?? `${row.discordAttachmentId}.bin`,
+          {
+            contentType: row.contentType,
+            expectedSizeBytes: row.sizeBytes,
+          },
+        );
+      } catch (error) {
+        return this.persistAttachmentFailure(row, error);
+      }
+      return this.persistStoredAttachment(row, stored);
+    });
+    if (!queued) return false;
+
+    const waiting = this.attachmentWaiterFor(row.id);
+    const storageTask = queued
+      .then(waiting.resolve, waiting.reject)
+      .finally(() => {
+        this.attachmentJobs.delete(row.id);
+        this.attachmentWaiters.delete(row.id);
+        if (this.attachmentWaiters.size > 0)
+          this.requestPendingAttachmentRetry();
+      });
+
+    this.attachmentJobs.set(row.id, storageTask);
+    return true;
+  }
+
+  private async persistStoredAttachment(
+    row: CaseAttachmentRow,
+    stored: StoredFile,
+  ): Promise<CaseAttachmentRow> {
+    while (true) {
+      try {
+        const [updated] = await this.db
+          .update(caseAttachments)
+          .set({
+            name: stored.fileName,
+            contentType: stored.contentType,
+            sizeBytes: stored.sizeBytes,
+            sha256: stored.sha256,
+            storageKey: stored.storageKey,
+            processingState: 'stored',
+          })
+          .where(eq(caseAttachments.id, row.id))
+          .returning();
+        if (updated) return updated;
+
+        await this.removeUncommittedAttachment(row, stored.storageKey);
+        throw new AttachmentProcessingCancelledError(
+          'Attachment was removed before storage completed',
+        );
+      } catch (error) {
+        if (error instanceof AttachmentProcessingCancelledError) throw error;
+        logger.warn('Failed to persist stored attachment', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
+
+  private async removeUncommittedAttachment(
+    row: CaseAttachmentRow,
+    storageKey: string,
+  ) {
+    while (true) {
+      try {
+        await this.storage.remove(storageKey);
+        return;
+      } catch (error) {
+        logger.warn('Failed to remove uncommitted attachment file', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
+
+  private async persistAttachmentFailure(
+    row: CaseAttachmentRow,
+    error: unknown,
+  ): Promise<CaseAttachmentRow> {
+    while (true) {
+      try {
+        const failed = this.db.transaction(
+          (tx) => {
+            const updated = tx
+              .update(caseAttachments)
+              .set({ processingState: 'failed' })
+              .where(eq(caseAttachments.id, row.id))
+              .returning()
+              .get();
+            if (!updated) return null;
+
+            tx.insert(caseEvents)
+              .values(
+                caseEventValues(
+                  row.caseId,
+                  'attachment_storage_failed',
+                  'bot',
+                  null,
+                  'Attachment retained as metadata only',
+                  {
+                    discordAttachmentId: row.discordAttachmentId,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  },
+                ),
+              )
+              .run();
+            return updated;
+          },
+          { behavior: 'immediate' },
+        );
+        if (failed) return failed;
+        throw new AttachmentProcessingCancelledError(
+          'Attachment was removed before failure could be recorded',
+        );
+      } catch (updateError) {
+        if (updateError instanceof AttachmentProcessingCancelledError)
+          throw updateError;
+        logger.warn('Failed to persist attachment storage failure', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error:
+            updateError instanceof Error
+              ? updateError.message
+              : String(updateError),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
+
+  private waitForAttachmentRetry() {
+    return new Promise<void>((resolve) => {
+      setTimeout(resolve, ATTACHMENT_RETRY_DELAY_MS);
+    });
+  }
+
+  private requestPendingAttachmentRetry() {
+    this.pendingAttachmentRetryRequested = true;
+    if (!this.retryingPendingAttachments)
+      void this.retryPendingAttachmentStorage();
+  }
+
+  private schedulePendingAttachmentRetry() {
+    if (this.pendingAttachmentRetryTimer) return;
+    this.pendingAttachmentRetryTimer = setTimeout(() => {
+      this.pendingAttachmentRetryTimer = null;
+      this.requestPendingAttachmentRetry();
+    }, ATTACHMENT_RETRY_DELAY_MS);
+  }
+
+  private async retryPendingAttachmentStorage() {
+    if (this.retryingPendingAttachments) return;
+    this.retryingPendingAttachments = true;
+
+    try {
+      while (this.pendingAttachmentRetryRequested) {
+        this.pendingAttachmentRetryRequested = false;
+        const activeIds = [...this.attachmentJobs.keys()];
+        const pending = await this.db
+          .select({ attachment: caseAttachments, guildId: cases.guildId })
+          .from(caseAttachments)
+          .innerJoin(cases, eq(caseAttachments.caseId, cases.id))
+          .where(
+            activeIds.length > 0
+              ? and(
+                  eq(caseAttachments.processingState, 'pending'),
+                  notInArray(caseAttachments.id, activeIds),
+                )
+              : eq(caseAttachments.processingState, 'pending'),
+          )
+          .orderBy(caseAttachments.id)
+          .limit(MAX_QUEUED_ATTACHMENTS_GLOBAL);
+
+        for (const { attachment, guildId } of pending) {
+          void this.startAttachmentStorage(guildId, attachment);
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to retry pending attachment storage', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.schedulePendingAttachmentRetry();
+    } finally {
+      this.retryingPendingAttachments = false;
+      if (this.pendingAttachmentRetryRequested)
+        void this.retryPendingAttachmentStorage();
+    }
   }
 
   async markMessageDeleted(messageId: string) {
@@ -249,7 +666,14 @@ export class CaseStore {
     const now = new Date().toISOString();
     await this.db
       .update(cases)
-      .set({ status, actionTaken, reason, updatedAt: now })
+      .set({
+        status,
+        actionTaken,
+        operationActionTaken: null,
+        operationDispatchedAt: null,
+        reason,
+        updatedAt: now,
+      })
       .where(eq(cases.id, caseId));
     await this.addEvent(
       caseId,
@@ -258,6 +682,363 @@ export class CaseStore {
       actorId,
       reason,
       { actionTaken },
+    );
+  }
+
+  async recoverInterruptedOperations() {
+    return this.db.transaction(
+      (tx) => {
+        const interruptedCases = tx
+          .select()
+          .from(cases)
+          .where(inArray(cases.status, claimedCaseStatuses))
+          .all();
+        let recoveredCount = 0;
+
+        for (const caseRow of interruptedCases) {
+          const entry = operationTransitionForStatus(caseRow.status, 'claimed');
+          if (!entry) {
+            throw new Error(
+              `Missing recovery transition for case status: ${caseRow.status}`,
+            );
+          }
+          const [operation, transition] = entry;
+          const dispatched = caseRow.operationDispatchedAt !== null;
+          const updated = tx
+            .update(cases)
+            .set({
+              status: dispatched ? transition.uncertain : transition.from,
+              operationActionTaken: dispatched
+                ? caseRow.operationActionTaken
+                : null,
+              operationDispatchedAt: dispatched
+                ? caseRow.operationDispatchedAt
+                : null,
+              updatedAt: new Date().toISOString(),
+            })
+            .where(
+              and(
+                eq(cases.id, caseRow.id),
+                eq(cases.status, transition.claimed),
+              ),
+            )
+            .returning()
+            .get();
+          if (!updated) continue;
+
+          tx.insert(caseEvents)
+            .values(
+              caseEventValues(
+                caseRow.id,
+                dispatched
+                  ? 'operation_outcome_uncertain'
+                  : 'operation_recovered',
+                'bot',
+                null,
+                dispatched
+                  ? `Interrupted dispatched operation requires manual review: ${operation}`
+                  : `Interrupted operation restored before Discord dispatch: ${operation}`,
+                {
+                  operation,
+                  previousStatus: transition.from,
+                  possibleStatus: transition.to,
+                  dispatched,
+                },
+              ),
+            )
+            .run();
+          recoveredCount += 1;
+        }
+
+        return recoveredCount;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async listUncertainCaseReviews(): Promise<RecoveredUncertainCase[]> {
+    return this.db
+      .select({
+        caseId: cases.id,
+        guildId: cases.guildId,
+        reviewChannelId: cases.reviewChannelId,
+        reviewMessageId: cases.reviewMessageId,
+      })
+      .from(cases)
+      .where(inArray(cases.status, uncertainCaseStatuses))
+      .all();
+  }
+
+  async claimOperation(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+    operationActionTaken: string | null = null,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.claimed,
+            operationActionTaken,
+            operationDispatchedAt: null,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(and(eq(cases.id, caseId), eq(cases.status, transition.from)))
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_claimed',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Claimed case operation: ${operation}`,
+              { operation, operationActionTaken, ...transition },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async markOperationDispatched(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const dispatchedAt = new Date().toISOString();
+        const updated = tx
+          .update(cases)
+          .set({ operationDispatchedAt: dispatchedAt, updatedAt: dispatchedAt })
+          .where(
+            and(
+              eq(cases.id, caseId),
+              eq(cases.status, transition.claimed),
+              isNull(cases.operationDispatchedAt),
+            ),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_dispatched',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Dispatching Discord mutation for case operation: ${operation}`,
+              { operation },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async completeOperation(
+    caseId: string,
+    operation: CaseOperation,
+    actionTaken: string | null,
+    actorId: string | null,
+    reason: string,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.to,
+            actionTaken,
+            operationActionTaken: null,
+            operationDispatchedAt: null,
+            reason,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              transition.to,
+              actorId ? 'user' : 'bot',
+              actorId,
+              reason,
+              { actionTaken, operation, previousStatus: transition.from },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async failOperation(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+    error: unknown,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    const message = error instanceof Error ? error.message : String(error);
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.from,
+            operationActionTaken: null,
+            operationDispatchedAt: null,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_failed',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Case operation failed: ${operation}`,
+              { operation, error: message, restoredStatus: transition.from },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async markOperationUncertain(
+    caseId: string,
+    operation: CaseOperation,
+    actorId: string | null,
+    error: unknown,
+  ) {
+    const transition = caseOperationTransitions[operation];
+    const message = error instanceof Error ? error.message : String(error);
+    return this.db.transaction(
+      (tx) => {
+        const updated = tx
+          .update(cases)
+          .set({
+            status: transition.uncertain,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.claimed)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_outcome_uncertain',
+              actorId ? 'user' : 'bot',
+              actorId,
+              `Case operation may have completed externally and requires reconciliation: ${operation}`,
+              {
+                operation,
+                error: message,
+                previousStatus: transition.from,
+                possibleStatus: transition.to,
+              },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
+    );
+  }
+
+  async reconcileOperation(
+    caseId: string,
+    sideEffectApplied: boolean,
+    actorId: string,
+  ) {
+    return this.db.transaction(
+      (tx) => {
+        const caseRow = tx
+          .select()
+          .from(cases)
+          .where(eq(cases.id, caseId))
+          .get();
+        if (!caseRow) return null;
+        const entry = operationTransitionForStatus(caseRow.status, 'uncertain');
+        if (!entry) return null;
+
+        const [operation, transition] = entry;
+        const status = sideEffectApplied ? transition.to : transition.from;
+        const actionTaken = sideEffectApplied
+          ? caseRow.operationActionTaken
+          : caseRow.actionTaken;
+        const reason = `Interrupted ${operation} operation manually reconciled as ${sideEffectApplied ? 'applied' : 'not applied'}`;
+        const updated = tx
+          .update(cases)
+          .set({
+            status,
+            actionTaken,
+            operationActionTaken: null,
+            operationDispatchedAt: null,
+            reason,
+            updatedAt: new Date().toISOString(),
+          })
+          .where(
+            and(eq(cases.id, caseId), eq(cases.status, transition.uncertain)),
+          )
+          .returning()
+          .get();
+        if (!updated) return null;
+
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              caseId,
+              'operation_reconciled',
+              'user',
+              actorId,
+              reason,
+              {
+                operation,
+                sideEffectApplied,
+                previousStatus: transition.from,
+                completedStatus: transition.to,
+                reconciledStatus: status,
+              },
+            ),
+          )
+          .run();
+        return updated;
+      },
+      { behavior: 'immediate' },
     );
   }
 
@@ -451,15 +1232,18 @@ export class CaseStore {
     reason: string | null,
     metadata: unknown,
   ) {
-    await this.db.insert(caseEvents).values({
-      caseId,
-      eventType,
-      actorType,
-      actorId,
-      reason,
-      metadataJson: JSON.stringify(metadata ?? {}),
-      createdAt: new Date().toISOString(),
-    });
+    await this.db
+      .insert(caseEvents)
+      .values(
+        caseEventValues(
+          caseId,
+          eventType,
+          actorType,
+          actorId,
+          reason,
+          metadata,
+        ),
+      );
   }
 
   async findKnownTextByHash(guildId: string, hash: string) {
@@ -783,6 +1567,25 @@ export class CaseStore {
     const bytes = await this.storage.read(storageKey);
     return `data:${contentType};base64,${bytes.toString('base64')}`;
   }
+}
+
+function caseEventValues(
+  caseId: string,
+  eventType: string,
+  actorType: 'bot' | 'user',
+  actorId: string | null,
+  reason: string | null,
+  metadata: unknown,
+) {
+  return {
+    caseId,
+    eventType,
+    actorType,
+    actorId,
+    reason,
+    metadataJson: JSON.stringify(metadata ?? {}),
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export type KnownCorpusItem = {

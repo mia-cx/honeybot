@@ -217,10 +217,14 @@ cases
   guild_id
   user_id
   trigger_type        # honeypot | crosschannel
-  status              # pending_review | punished | dismissed | reverted
-  action_taken        # actual punishment: timeout | role | kick | ban; nullable for review/dismiss/revert
+  status              # stable review state, claimed operation state, or operation-specific uncertain state
+  action_taken        # last confirmed applied action; nullable for review/dismiss/revert
+  operation_action_taken # action a claimed/uncertain operation may have applied
+  operation_dispatched_at # durable Discord mutation boundary for restart recovery
   reason              # latest templated bot reason
   evidence_summary_json
+  review_channel_id
+  review_message_id
   created_at
   updated_at
 ```
@@ -254,6 +258,8 @@ case_attachments
   sha256
   perceptual_hash
   storage_key
+  processing_slot     # bounded image-processing admission slot; null for metadata-only attachments
+  processing_state    # pending | stored | failed | skipped
   created_at
 ```
 
@@ -273,7 +279,7 @@ case_evidence
 case_events
   id
   case_id             # stored as audit reference; no hard FK if cases may be deleted
-  event_type          # triggered | prevention_applied | evidence_recorded | classified | reviewed | punished | dismissed | reverted | failed
+  event_type          # lifecycle, moderation outcome, notification, operation failure/uncertainty/reconciliation, or retention event
   actor_type          # bot | user
   actor_id
   reason
@@ -536,7 +542,7 @@ If a prevention policy action is `kick` or `ban`, skip paid embeddings/classifie
 
 ### Punished user notifications
 
-If `punishment:dm_notify` is true, Honeybot DMs the punished user after applying a local punishment. The DM includes:
+If `punishment:dm_notify` is true, Honeybot attempts to DM the user after evidence collection and an automatic or moderator punishment decision, but before applying that punishment. Prevention actions do not send punishment DMs. Moderator punishment controls stay disabled, with a server-side guard, until analysis is recorded. The DM includes:
 
 - the server name
 - the moderation decision/action

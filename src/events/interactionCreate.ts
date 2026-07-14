@@ -17,7 +17,7 @@ import {
 import type { ConfigStore } from '../services/configStore.js';
 import { formatPolicy } from '../services/configStore.js';
 import type { ModelStore } from '../services/modelStore.js';
-import type { CaseStore } from '../services/caseStore.js';
+import type { CaseOperation, CaseStore } from '../services/caseStore.js';
 import {
   canActOnCases,
   canConfigureHoneybot,
@@ -38,6 +38,7 @@ import {
   applyPolicyWithBestEffortDm,
   honeybotAuditReason,
   moderationAuditReason,
+  requireAppliedPolicy,
   revertPolicyForUser,
 } from '../services/moderation.js';
 import type { FairQueue } from '../queues/fairQueue.js';
@@ -67,6 +68,7 @@ import {
 import {
   caseReviewResolutionUpdate,
   caseReviewRevertUpdate,
+  caseReviewUncertainUpdate,
 } from '../interactions/caseReviewUi.js';
 import type { GuildSettings } from '../domain/types.js';
 
@@ -1474,9 +1476,78 @@ async function handleCaseButton(
     return;
   }
 
+  if (action === 'reconcile-applied' || action === 'reconcile-not-applied') {
+    const config = await deps.configStore.getGuildConfig(interaction.guildId);
+    const reconciled = await deps.caseStore.reconcileOperation(
+      caseId,
+      action === 'reconcile-applied',
+      interaction.user.id,
+    );
+    if (!reconciled) {
+      await interaction.reply({
+        content: 'Case no longer requires reconciliation.',
+        ephemeral: true,
+      });
+      return;
+    }
+
+    if (reconciled.status === 'pending_review') {
+      await interaction.update(
+        caseReviewRevertUpdate(interaction.message.components, {
+          caseId,
+          punishment: config.policies.punishment,
+          punishmentReady:
+            caseConfidence(reconciled.evidenceSummaryJson) !== null,
+        }),
+      );
+      return;
+    }
+    if (reconciled.status === 'dismissed' || reconciled.status === 'punished') {
+      await interaction.update(
+        caseReviewResolutionUpdate(interaction.message.components, {
+          caseId,
+          status: reconciled.status,
+          actorId: interaction.user.id,
+          userId: reconciled.userId,
+          detail: reconciled.reason ?? 'Interrupted operation reconciled',
+          punishment: config.policies.punishment,
+          canRevert: true,
+        }),
+      );
+      return;
+    }
+    throw new Error(`Unexpected reconciled case status: ${reconciled.status}`);
+  }
+
+  if (caseRow.status.endsWith('_uncertain')) {
+    await interaction.update(
+      caseReviewUncertainUpdate(interaction.message.components, { caseId }),
+    );
+    return;
+  }
+
   if (action === 'dismiss') {
     const config = await deps.configStore.getGuildConfig(interaction.guildId);
-    const revertResult = await revertPrevention(interaction, caseRow, config);
+    const operation = await runCaseOperation(interaction, deps, {
+      caseId,
+      operation: 'dismiss',
+      actionTakenOnSuccess: null,
+      run: (onMutationStarted) =>
+        deps.moderationQueue.enqueue(interaction.guildId, () =>
+          revertPrevention(
+            interaction,
+            caseRow,
+            config,
+            onMutationStarted,
+          ),
+        ),
+      completion: (revertResult) => ({
+        actionTaken: null,
+        reason: `Dismissed by moderator; prevention revert: ${revertResult}`,
+      }),
+    });
+    if (!operation) return;
+    const revertResult = operation.value;
     await deps.caseStore.addEvent(
       caseId,
       'prevention_reverted',
@@ -1484,13 +1555,6 @@ async function handleCaseButton(
       interaction.user.id,
       'Dismissed by moderator',
       { revertResult },
-    );
-    await deps.caseStore.resolve(
-      caseId,
-      'dismissed',
-      null,
-      interaction.user.id,
-      `Dismissed by moderator; prevention revert: ${revertResult}`,
     );
     await interaction.update(
       caseReviewResolutionUpdate(interaction.message.components, {
@@ -1518,6 +1582,14 @@ async function handleCaseButton(
   const config = await deps.configStore.getGuildConfig(interaction.guildId);
 
   if (action === 'punish') {
+    if (caseConfidence(caseRow.evidenceSummaryJson) === null) {
+      await interaction.reply({
+        content: 'Analysis is still in progress. Try again when it completes.',
+        ephemeral: true,
+      });
+      return;
+    }
+
     const policy = config.policies.punishment;
     const reason = caseRow.reason ?? 'Punished by Honeybot moderator review';
     const auditReason = honeybotAuditReason({
@@ -1527,25 +1599,35 @@ async function handleCaseButton(
       confidence: caseConfidence(caseRow.evidenceSummaryJson),
       actorId: interaction.user.id,
     });
-    const applyResult = await deps.moderationQueue.enqueue(
-      interaction.guildId,
-      () =>
-        applyPolicyWithBestEffortDm({
-          guild: interaction.guild,
-          userId: caseRow.userId,
-          policy,
-          reason: auditReason,
-          dm: config.punishmentDmNotify
-            ? {
-                caseId,
-                reason,
-                auditReason,
-                caseStore: deps.caseStore,
-                storage: deps.storage,
-              }
-            : null,
-        }),
-    );
+    const operation = await runCaseOperation(interaction, deps, {
+      caseId,
+      operation: 'punish',
+      actionTakenOnSuccess: policy.actionType,
+      run: (onMutationStarted) =>
+        deps.moderationQueue
+          .enqueue(interaction.guildId, () =>
+            applyPolicyWithBestEffortDm({
+              guild: interaction.guild,
+              userId: caseRow.userId,
+              policy,
+              reason: auditReason,
+              dm: config.punishmentDmNotify
+                ? {
+                    caseId,
+                    reason,
+                    auditReason,
+                    caseStore: deps.caseStore,
+                    storage: deps.storage,
+                  }
+                : null,
+              onMutationStarted,
+            }),
+          )
+          .then(requireAppliedPolicy),
+      completion: () => ({ actionTaken: policy.actionType, reason }),
+    });
+    if (!operation) return;
+    const applyResult = operation.value;
     await deps.caseStore.addEvent(
       caseId,
       'punishment_applied',
@@ -1553,13 +1635,6 @@ async function handleCaseButton(
       interaction.user.id,
       reason,
       { applyResult },
-    );
-    await deps.caseStore.resolve(
-      caseId,
-      'punished',
-      policy.actionType,
-      interaction.user.id,
-      reason,
     );
     await interaction.update(
       caseReviewResolutionUpdate(interaction.message.components, {
@@ -1577,12 +1652,27 @@ async function handleCaseButton(
 
   if (action === 'revert') {
     if (caseRow.status === 'punished') {
-      const revertResult = await revertPolicyForUser(
-        interaction.guild,
-        caseRow.userId,
-        config.policies.punishment,
-        'Reverted Honeybot punishment action',
-      );
+      const operation = await runCaseOperation(interaction, deps, {
+        caseId,
+        operation: 'revert_punishment',
+        actionTakenOnSuccess: null,
+        run: (onMutationStarted) =>
+          deps.moderationQueue.enqueue(interaction.guildId, () =>
+            revertPolicyForUser(
+              interaction.guild,
+              caseRow.userId,
+              config.policies.punishment,
+              'Reverted Honeybot punishment action',
+              { onMutationStarted },
+            ),
+          ),
+        completion: (revertResult) => ({
+          actionTaken: null,
+          reason: `Reverted punishment by moderator: ${revertResult}`,
+        }),
+      });
+      if (!operation) return;
+      const revertResult = operation.value;
       await deps.caseStore.addEvent(
         caseId,
         'reverted',
@@ -1591,17 +1681,11 @@ async function handleCaseButton(
         'Reverted punishment by moderator',
         { revertResult },
       );
-      await deps.caseStore.resolve(
-        caseId,
-        'pending_review',
-        null,
-        interaction.user.id,
-        `Reverted punishment by moderator: ${revertResult}`,
-      );
       await interaction.update(
         caseReviewRevertUpdate(interaction.message.components, {
           caseId,
           punishment: config.policies.punishment,
+          punishmentReady: caseConfidence(caseRow.evidenceSummaryJson) !== null,
         }),
       );
       return;
@@ -1612,22 +1696,35 @@ async function handleCaseButton(
         caseRow.triggerType === 'honeypot'
           ? config.policies.honeypot_prevention
           : config.policies.crosschannel_prevention;
-      const applyResult = await deps.moderationQueue.enqueue(
-        interaction.guildId,
-        () =>
-          applyPolicyForUser(
-            interaction.guild,
-            caseRow.userId,
-            prevention,
-            honeybotAuditReason({
-              caseId,
-              triggerType: caseRow.triggerType,
-              decisionSource: 'dismissal-reverted',
-              confidence: caseConfidence(caseRow.evidenceSummaryJson),
-              actorId: interaction.user.id,
-            }),
+      const operation = await runCaseOperation(interaction, deps, {
+        caseId,
+        operation: 'revert_dismissal',
+        actionTakenOnSuccess: prevention.actionType,
+        run: async (onMutationStarted) =>
+          requireAppliedPolicy(
+            await deps.moderationQueue.enqueue(interaction.guildId, () =>
+              applyPolicyForUser(
+                interaction.guild,
+                caseRow.userId,
+                prevention,
+                honeybotAuditReason({
+                  caseId,
+                  triggerType: caseRow.triggerType,
+                  decisionSource: 'dismissal-reverted',
+                  confidence: caseConfidence(caseRow.evidenceSummaryJson),
+                  actorId: interaction.user.id,
+                }),
+                { onMutationStarted },
+              ),
+            ),
           ),
-      );
+        completion: (applyResult) => ({
+          actionTaken: prevention.actionType,
+          reason: `Reverted dismissal; prevention reapplied: ${applyResult}`,
+        }),
+      });
+      if (!operation) return;
+      const applyResult = operation.value;
       await deps.caseStore.addEvent(
         caseId,
         'dismissal_reverted',
@@ -1636,17 +1733,11 @@ async function handleCaseButton(
         'Reverted dismissal and reapplied prevention',
         { applyResult },
       );
-      await deps.caseStore.resolve(
-        caseId,
-        'pending_review',
-        prevention.actionType,
-        interaction.user.id,
-        `Reverted dismissal; prevention reapplied: ${applyResult}`,
-      );
       await interaction.update(
         caseReviewRevertUpdate(interaction.message.components, {
           caseId,
           punishment: config.policies.punishment,
+          punishmentReady: caseConfidence(caseRow.evidenceSummaryJson) !== null,
         }),
       );
       return;
@@ -1662,10 +1753,109 @@ async function handleCaseButton(
   await interaction.reply({ content: 'Unknown case action.', ephemeral: true });
 }
 
+async function runCaseOperation<T>(
+  interaction: ButtonInteraction<'cached'>,
+  deps: InteractionDependencies,
+  input: {
+    caseId: string;
+    operation: CaseOperation;
+    actionTakenOnSuccess: string | null;
+    run: (onMutationStarted: () => Promise<void>) => Promise<T>;
+    completion: (value: T) => { actionTaken: string | null; reason: string };
+  },
+): Promise<{ value: T } | null> {
+  const claimed = await deps.caseStore.claimOperation(
+    input.caseId,
+    input.operation,
+    interaction.user.id,
+    input.actionTakenOnSuccess,
+  );
+  if (!claimed) {
+    await interaction.reply({
+      content: 'Case already resolved by another moderator.',
+      ephemeral: true,
+    });
+    return null;
+  }
+
+  let mutationStarted = false;
+  let value: T;
+  try {
+    value = await input.run(async () => {
+      const dispatched = await deps.caseStore.markOperationDispatched(
+        input.caseId,
+        input.operation,
+        interaction.user.id,
+      );
+      if (!dispatched) {
+        throw new Error('Case operation state changed before Discord dispatch');
+      }
+      mutationStarted = true;
+    });
+  } catch (error) {
+    if (mutationStarted) {
+      const uncertain = await deps.caseStore.markOperationUncertain(
+        input.caseId,
+        input.operation,
+        interaction.user.id,
+        error,
+      );
+      if (!uncertain) throw error;
+      await interaction.update(
+        caseReviewUncertainUpdate(interaction.message.components, {
+          caseId: input.caseId,
+        }),
+      );
+      return null;
+    }
+
+    await deps.caseStore.failOperation(
+      input.caseId,
+      input.operation,
+      interaction.user.id,
+      error,
+    );
+    await interaction.reply({
+      content: `Case action failed; the case remains retryable. ${error instanceof Error ? error.message : String(error)}`,
+      ephemeral: true,
+    });
+    return null;
+  }
+
+  try {
+    const completion = input.completion(value);
+    const completed = await deps.caseStore.completeOperation(
+      input.caseId,
+      input.operation,
+      completion.actionTaken,
+      interaction.user.id,
+      completion.reason,
+    );
+    if (!completed)
+      throw new Error('Case operation state changed unexpectedly');
+    return { value };
+  } catch (error) {
+    const uncertain = await deps.caseStore.markOperationUncertain(
+      input.caseId,
+      input.operation,
+      interaction.user.id,
+      error,
+    );
+    if (!uncertain) throw error;
+    await interaction.update(
+      caseReviewUncertainUpdate(interaction.message.components, {
+        caseId: input.caseId,
+      }),
+    );
+    return null;
+  }
+}
+
 async function revertPrevention(
   interaction: ButtonInteraction<'cached'>,
   caseRow: NonNullable<Awaited<ReturnType<CaseStore['getCase']>>>,
   config: GuildConfig,
+  onMutationStarted: () => Promise<void>,
 ) {
   const policy =
     caseRow.triggerType === 'honeypot'
@@ -1676,6 +1866,7 @@ async function revertPrevention(
     caseRow.userId,
     policy,
     'Reverted Honeybot prevention action',
+    { onMutationStarted },
   );
 }
 

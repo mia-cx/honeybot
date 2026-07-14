@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
+import { RESTJSONErrorCodes } from 'discord.js';
+import { eq, inArray } from 'drizzle-orm';
 import {
+  caseAttachments,
   cases,
   caseEvents,
   caseMessages,
@@ -8,6 +10,7 @@ import {
   knownTexts,
 } from '../src/db/schema.js';
 import { defaultGuildConfig } from '../src/domain/defaults.js';
+import { handleInteractionCreate } from '../src/events/interactionCreate.js';
 import { handleMessageCreate } from '../src/events/messageCreate.js';
 import { FairQueue } from '../src/queues/fairQueue.js';
 import { CaseStore } from '../src/services/caseStore.js';
@@ -32,7 +35,17 @@ import {
   setVerboseLogging,
   toggleVerboseLogging,
 } from '../src/services/verbose.js';
-import { cleanupTempDirs, testDatabase, testModelDefaults } from './helpers.js';
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENTS_PER_CASE,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+} from '../src/storage/fileStorage.js';
+import {
+  cleanupTempDirs,
+  testDatabase,
+  testDatabaseWithSetup,
+  testModelDefaults,
+} from './helpers.js';
 import type { AnalysisResult } from '../src/domain/types.js';
 import type { CachedMessage, ClassificationResult } from '../src/types.js';
 
@@ -239,7 +252,7 @@ describe('handleMessageCreate', () => {
   });
 
   it.each(['timeout', 'kick', 'ban'] as const)(
-    'does not send DMs for %s prevention actions',
+    'does not send punishment DMs for %s prevention actions',
     async (action) => {
       const database = testDatabase();
       const config = defaultGuildConfig({
@@ -287,67 +300,330 @@ describe('handleMessageCreate', () => {
         await database.db
           .select()
           .from(caseEvents)
-          .where(eq(caseEvents.eventType, 'dm_notified')),
+          .where(inArray(caseEvents.eventType, ['dm_notified', 'failed'])),
       ).toHaveLength(0);
       database.sqlite.close();
     },
   );
 
-  it('continues auto-punishment when the final DM fails', async () => {
+  it('does not record or display unapplied prevention as successful', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
-      moderationChannelId: null,
-      punishmentDmNotify: true,
-      reviewBypassEnabled: true,
+      moderationChannelId: 'review',
+      punishmentDmNotify: false,
     });
     config.policies.honeypot_prevention.actionType = 'timeout';
     config.policies.honeypot_prevention.deleteMessages = false;
-    config.policies.punishment.actionType = 'ban';
-    config.policies.punishment.deleteMessages = false;
 
     const actions: string[] = [];
-    const guild = fakeDiscordGuild([], actions, {
-      dmError: new Error('closed'),
-    });
+    const guild = fakeDiscordGuild([], actions);
     const message = fakeDiscordMessage({
-      id: 'm1',
+      id: 'unapplied-prevention',
       channelId: 'honey',
-      content: 'free nitro',
       guild,
     });
     guild.register(message);
-
+    type ReviewPayload = { components: unknown[] };
+    const reviewMessage = {
+      id: 'review-message',
+      channelId: 'review',
+      components: [] as unknown[],
+      edit: vi.fn(async (payload: ReviewPayload) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    const reviewChannel = {
+      isTextBased: () => true,
+      messages: { fetch: vi.fn(async () => reviewMessage) },
+      send: vi.fn(async (payload: ReviewPayload) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    guild.channels.fetch.mockResolvedValue(reviewChannel);
+    guild.members.fetch.mockRejectedValueOnce({
+      code: RESTJSONErrorCodes.UnknownMember,
+    });
+    const analyzer = {
+      analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+        confidence: 0,
+        shouldPunish: false,
+        reason: 'review required',
+        evidence: [],
+      })),
+    };
     const dependencies = {
       configStore: { getGuildConfig: vi.fn(async () => config) },
       messageCache: new MessageCache(),
       duplicateDetector: new DuplicateDetector(),
       caseStore: new CaseStore(database.db, fakeStorage()),
-      analyzer: {
-        analyze: vi.fn(async () => ({
-          confidence: 1,
-          shouldPunish: true,
-          reason: 'scam confirmed',
-          evidence: [],
-        })),
-      },
+      analyzer,
       moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
       storage: fakeStorage(),
     } as any;
 
     await handleMessageCreate(message, dependencies);
 
-    expect(actions).toEqual(['timeout', 'ban']);
-    expect(dependencies.moderationQueue.enqueue).toHaveBeenCalledTimes(2);
-    expect(await database.db.select().from(cases)).toEqual([
-      expect.objectContaining({ status: 'punished', actionTaken: 'ban' }),
-    ]);
+    expect(actions).toEqual([]);
+    expect(analyzer.analyze).toHaveBeenCalledOnce();
+    const reviewPayloads = [
+      ...reviewChannel.send.mock.calls.map(([payload]) => payload),
+      ...reviewMessage.edit.mock.calls.map(([payload]) => payload),
+    ];
+    expect(reviewPayloads).not.toHaveLength(0);
+    for (const payload of reviewPayloads) {
+      const reviewText = JSON.stringify(payload.components);
+      expect(reviewText).toContain(
+        'prevention was not applied: timeout could not be applied because the member is no longer in the guild',
+      );
+      expect(reviewText).not.toContain('was timed out until');
+    }
     expect(
       await database.db
         .select()
         .from(caseEvents)
-        .where(eq(caseEvents.eventType, 'failed')),
-    ).toHaveLength(1);
+        .where(eq(caseEvents.eventType, 'prevention_applied')),
+    ).toHaveLength(0);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'prevention_not_applied')),
+    ).toEqual([
+      expect.objectContaining({
+        reason:
+          'timeout could not be applied because the member is no longer in the guild',
+      }),
+    ]);
+    database.sqlite.close();
+  });
+
+  it('keeps a transient prevention lookup failure reviewable', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: 'review',
+      punishmentDmNotify: false,
+    });
+    config.policies.honeypot_prevention.actionType = 'timeout';
+    config.policies.honeypot_prevention.deleteMessages = true;
+
+    const deleted: string[] = [];
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild(deleted, actions);
+    const message = fakeDiscordMessage({
+      id: 'transient-prevention',
+      channelId: 'honey',
+      guild,
+    });
+    guild.register(message);
+    const reviewMessage = {
+      id: 'review-message',
+      channelId: 'review',
+      components: [] as unknown[],
+      edit: vi.fn(async (payload: { components: unknown[] }) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    const reviewChannel = {
+      isTextBased: () => true,
+      messages: { fetch: vi.fn(async () => reviewMessage) },
+      send: vi.fn(async (payload: { components: unknown[] }) => {
+        reviewMessage.components = payload.components;
+        return reviewMessage;
+      }),
+    };
+    guild.channels.fetch.mockResolvedValue(reviewChannel);
+    guild.members.fetch.mockRejectedValueOnce(new Error('Discord unavailable'));
+    const analyzer = {
+      analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+        confidence: 0,
+        shouldPunish: false,
+        reason: 'review required',
+        evidence: [],
+      })),
+    };
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual(['delete:transient-prevention']);
+    expect(deleted).toEqual(['transient-prevention']);
+    expect(analyzer.analyze).toHaveBeenCalledOnce();
+    expect(JSON.stringify(reviewMessage.components)).toContain(
+      'prevention was not applied',
+    );
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'prevention_not_applied')),
+    ).toEqual([
+      expect.objectContaining({
+        reason: expect.stringContaining('Discord unavailable'),
+      }),
+    ]);
+    database.sqlite.close();
+  });
+
+  it.each(['ban', 'log'] as const)(
+    'applies %s prevention by user id after the member leaves',
+    async (action) => {
+      const database = testDatabase();
+      const config = defaultGuildConfig({
+        honeypotChannelIds: ['honey'],
+        moderationChannelId: null,
+        punishmentDmNotify: false,
+      });
+      config.policies.honeypot_prevention.actionType = action;
+      config.policies.honeypot_prevention.deleteMessages = false;
+
+      const actions: string[] = [];
+      const guild = fakeDiscordGuild([], actions);
+      const message = fakeDiscordMessage({ channelId: 'honey', guild });
+      guild.register(message);
+      message.member = null;
+      guild.members.fetch.mockRejectedValueOnce({
+        code: RESTJSONErrorCodes.UnknownMember,
+      });
+      const analyzer = {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 0,
+          shouldPunish: false,
+          reason: 'review required',
+          evidence: [],
+        })),
+      };
+      const dependencies = {
+        configStore: { getGuildConfig: vi.fn(async () => config) },
+        messageCache: new MessageCache(),
+        duplicateDetector: new DuplicateDetector(),
+        caseStore: new CaseStore(database.db, fakeStorage()),
+        analyzer,
+        moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+        storage: fakeStorage(),
+      } as any;
+
+      await handleMessageCreate(message, dependencies);
+
+      expect(guild.members.fetch).toHaveBeenCalledOnce();
+      expect(actions).toEqual(action === 'ban' ? ['ban'] : []);
+      expect(
+        await database.db
+          .select()
+          .from(caseEvents)
+          .where(eq(caseEvents.eventType, 'prevention_applied')),
+      ).toHaveLength(1);
+      expect(analyzer.analyze).toHaveBeenCalledTimes(action === 'log' ? 1 : 0);
+      database.sqlite.close();
+    },
+  );
+
+  it('honors user-id bypasses without requiring a current member', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderatorUsers: ['user'],
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions);
+    const message = fakeDiscordMessage({ channelId: 'honey', guild });
+    guild.register(message);
+    message.member = null;
+    guild.members.fetch.mockRejectedValueOnce({
+      code: RESTJSONErrorCodes.UnknownMember,
+    });
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(guild.members.fetch).not.toHaveBeenCalled();
+    expect(actions).toEqual([]);
+    expect(await database.db.select().from(cases)).toHaveLength(0);
+    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
+    database.sqlite.close();
+  });
+
+  it('applies prevention before slow attachment storage completes', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: false,
+    });
+    config.policies.honeypot_prevention.actionType = 'ban';
+    config.policies.honeypot_prevention.deleteMessages = false;
+
+    let signalStorageStarted: () => void = () => undefined;
+    const storageStarted = new Promise<void>((resolve) => {
+      signalStorageStarted = resolve;
+    });
+    let releaseStorage: () => void = () => undefined;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      signalStorageStarted();
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions);
+    const message = fakeDiscordMessage({
+      id: 'slow-attachment',
+      channelId: 'honey',
+      guild,
+      attachments: [attachment({ id: 'slow' })],
+    });
+    guild.register(message);
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, storage),
+      analyzer: { analyze: vi.fn() },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage,
+    } as any;
+
+    const handling = handleMessageCreate(message, dependencies);
+    await storageStarted;
+    await vi.waitFor(() => expect(actions).toEqual(['ban']));
+    releaseStorage();
+    await handling;
+
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    expect(dependencies.analyzer.analyze).not.toHaveBeenCalled();
     database.sqlite.close();
   });
 
@@ -400,6 +676,543 @@ describe('handleMessageCreate', () => {
     expect(dependencies.analyzer.analyze).toHaveBeenCalledTimes(1);
     database.sqlite.close();
   });
+
+  it('continues auto-punishment when its DM notification fails', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: true,
+      reviewBypassEnabled: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'log';
+    config.policies.honeypot_prevention.deleteMessages = false;
+    config.policies.punishment.actionType = 'ban';
+
+    const actions: string[] = [];
+    const guild = fakeDiscordGuild([], actions, {
+      dmError: new Error('closed'),
+    });
+    const message = fakeDiscordMessage({ channelId: 'honey', guild });
+    guild.register(message);
+    const caseStore = new CaseStore(database.db, fakeStorage());
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore,
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 1,
+          shouldPunish: true,
+          reason: 'known scam',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(actions).toEqual(['ban']);
+    expect(await database.db.select().from(cases)).toEqual([
+      expect.objectContaining({ status: 'punished' }),
+    ]);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('marks a failed dispatched auto-punishment uncertain', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      honeypotChannelIds: ['honey'],
+      moderationChannelId: null,
+      punishmentDmNotify: false,
+      reviewBypassEnabled: true,
+    });
+    config.policies.honeypot_prevention.actionType = 'log';
+    config.policies.honeypot_prevention.deleteMessages = false;
+    config.policies.punishment.actionType = 'ban';
+
+    const guild = fakeDiscordGuild([]);
+    guild.members.ban.mockRejectedValueOnce(new Error('Discord response lost'));
+    const message = fakeDiscordMessage({ channelId: 'honey', guild });
+    guild.register(message);
+    const caseStore = new CaseStore(database.db, fakeStorage());
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore,
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 1,
+          shouldPunish: true,
+          reason: 'known scam',
+          evidence: [],
+        })),
+      },
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(message, dependencies);
+
+    expect(guild.members.ban).toHaveBeenCalledOnce();
+    expect(await database.db.select().from(cases)).toEqual([
+      expect.objectContaining({
+        status: 'punishment_uncertain',
+        actionTaken: null,
+        operationActionTaken: 'ban',
+      }),
+    ]);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_outcome_uncertain')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+});
+
+describe('case review interactions', () => {
+  it('rejects moderator punishment until analysis is recorded', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'case triggered',
+    });
+    const ban = vi.fn(async () => undefined);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(), ban },
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(ban).not.toHaveBeenCalled();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'pending_review',
+    });
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: 'Analysis is still in progress. Try again when it completes.',
+      ephemeral: true,
+    });
+    database.sqlite.close();
+  });
+
+  it('marks a failed dispatched punishment uncertain instead of retrying it', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: false,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    const ban = vi.fn(async () => {
+      throw new Error('Discord response lost');
+    });
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => null), ban },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punishment_uncertain',
+      actionTaken: null,
+      operationActionTaken: 'ban',
+    });
+    expect(interaction.reply).not.toHaveBeenCalled();
+    expect(JSON.stringify(interaction.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
+    database.sqlite.close();
+  });
+
+  it('marks a failed dispatched punishment revert uncertain', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    await store.claimOperation(caseRow.id, 'punish', 'moderator-1', 'ban');
+    await store.completeOperation(
+      caseRow.id,
+      'punish',
+      'ban',
+      'moderator-1',
+      'punished',
+    );
+    const unban = vi.fn(async () => {
+      throw new Error('Discord response lost');
+    });
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => null), unban },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:revert:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(unban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punishment_revert_uncertain',
+      actionTaken: 'ban',
+      operationActionTaken: null,
+    });
+    expect(JSON.stringify(interaction.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
+    database.sqlite.close();
+  });
+
+  it('applies a ban when its DM-only member lookup fails', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    const ban = vi.fn(async () => undefined);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: {
+        fetch: vi.fn().mockRejectedValueOnce(new Error('Discord unavailable')),
+        ban,
+      },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toEqual([expect.objectContaining({ reason: 'Punishment DM failed' })]);
+    database.sqlite.close();
+  });
+
+  it('makes post-side-effect persistence failures explicitly reconcilable', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    vi.spyOn(store, 'completeOperation').mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    const ban = vi.fn(async () => undefined);
+    const punishedMember = {
+      id: 'user',
+      guild: null as any,
+      send: vi.fn(async () => undefined),
+    };
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: { fetch: vi.fn(async () => punishedMember), ban },
+    } as any;
+    punishedMember.guild = guild;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const punish = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(punish as any, deps);
+
+    expect(punishedMember.send).toHaveBeenCalledOnce();
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punishment_uncertain',
+      actionTaken: null,
+      operationActionTaken: 'ban',
+    });
+    expect(JSON.stringify(punish.update.mock.calls[0]?.[0])).toContain(
+      `case:reconcile-applied:${caseRow.id}`,
+    );
+
+    const reconcile = fakeCaseButtonInteraction(
+      guild,
+      `case:reconcile-applied:${caseRow.id}`,
+      'moderator-1',
+    );
+    await handleInteractionCreate(reconcile as any, deps);
+
+    expect(punishedMember.send).toHaveBeenCalledOnce();
+    expect(ban).toHaveBeenCalledOnce();
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+      actionTaken: 'ban',
+      operationActionTaken: null,
+    });
+    expect(reconcile.update).toHaveBeenCalledOnce();
+    await expect(
+      store.reconcileOperation(caseRow.id, true, 'moderator-1'),
+    ).resolves.toBeNull();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_reconciled')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('keeps absent-member punishments retryable when no action was applied', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1'],
+      punishmentDmNotify: false,
+    });
+    config.policies.punishment.actionType = 'timeout';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'departed-user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: {
+        fetch: vi.fn(async () => null),
+      },
+    } as any;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const interaction = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+
+    await handleInteractionCreate(interaction as any, deps);
+
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'pending_review',
+      actionTaken: null,
+    });
+    expect(interaction.update).not.toHaveBeenCalled();
+    expect(interaction.reply).toHaveBeenCalledWith({
+      content: expect.stringContaining('no longer in the guild'),
+      ephemeral: true,
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('applies one concurrent punishment and treats the failed DM as best-effort', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({
+      moderatorUsers: ['moderator-1', 'moderator-2'],
+      punishmentDmNotify: true,
+    });
+    config.policies.punishment.actionType = 'ban';
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'known scam',
+    });
+    await recordAnalysis(store, caseRow.id);
+    const actions: string[] = [];
+    const punishedMember = {
+      id: 'user',
+      guild: null as any,
+      send: vi.fn(async () => Promise.reject(new Error('closed'))),
+    };
+    const guild = {
+      id: 'guild',
+      ownerId: 'owner',
+      members: {
+        fetch: vi.fn(async () => punishedMember),
+        ban: vi.fn(async () => actions.push('ban')),
+      },
+    } as any;
+    punishedMember.guild = guild;
+    const deps = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      modelStore: {},
+      caseStore: store,
+      db: database.db,
+      moderationQueue: { enqueue: vi.fn(async (_guildId, job) => job()) },
+      storage: fakeStorage(),
+    } as any;
+    const first = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-1',
+    );
+    const second = fakeCaseButtonInteraction(
+      guild,
+      `case:punish:${caseRow.id}`,
+      'moderator-2',
+    );
+
+    await Promise.all([
+      handleInteractionCreate(first as any, deps),
+      handleInteractionCreate(second as any, deps),
+    ]);
+
+    expect(actions).toEqual(['ban']);
+    expect(
+      first.update.mock.calls.length + second.update.mock.calls.length,
+    ).toBe(1);
+    expect(first.reply.mock.calls.length + second.reply.mock.calls.length).toBe(
+      1,
+    );
+    expect([first, second].flatMap((item) => item.reply.mock.calls)).toEqual([
+      [
+        {
+          content: 'Case already resolved by another moderator.',
+          ephemeral: true,
+        },
+      ],
+    ]);
+    expect(await store.getCase(caseRow.id)).toMatchObject({
+      status: 'punished',
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'failed')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
 });
 
 describe('FairQueue', () => {
@@ -407,7 +1220,7 @@ describe('FairQueue', () => {
     const queue = new FairQueue({
       name: 'test',
       globalLimit: 10,
-      perGuildLimit: 10,
+      perGroupLimit: 10,
       windowMs: 1_000,
     });
 
@@ -417,6 +1230,58 @@ describe('FairQueue', () => {
         throw new Error('boom');
       }),
     ).rejects.toThrow('boom');
+  });
+
+  it('rejects work beyond configured queue capacity', async () => {
+    const queue = new FairQueue({
+      name: 'bounded',
+      globalLimit: 10,
+      perGroupLimit: 10,
+      windowMs: 1_000,
+      maxPendingGlobal: 1,
+      maxPendingPerGroup: 1,
+    });
+    let release!: () => void;
+    const blocked = queue.enqueue(
+      'guild',
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+
+    await expect(queue.enqueue('guild', async () => undefined)).rejects.toThrow(
+      'capacity',
+    );
+    release();
+    await blocked;
+  });
+
+  it('expires limiter state for idle queue groups', async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new FairQueue({
+        name: 'expiring-groups',
+        globalLimit: 100,
+        perGroupLimit: 10,
+        windowMs: 100,
+      });
+      await Promise.all(
+        Array.from({ length: 50 }, (_, index) =>
+          queue.enqueue(`case-${index}`, async () => undefined),
+        ),
+      );
+      const state = queue as unknown as {
+        groupLimiters: Map<string, unknown>;
+        groupLimiterCleanupTimers: Map<string, NodeJS.Timeout>;
+      };
+      expect(state.groupLimiters.size).toBe(50);
+      expect(state.groupLimiterCleanupTimers.size).toBe(50);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(state.groupLimiters.size).toBe(0);
+      expect(state.groupLimiterCleanupTimers.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1042,6 +1907,1057 @@ describe('EvidenceAnalyzer', () => {
 });
 
 describe('CaseStore', () => {
+  it('migrates legacy uncertain operations to reconcilable statuses', () => {
+    const database = testDatabaseWithSetup((sqlite) => {
+      sqlite.exec(`
+        CREATE TABLE cases (
+          id TEXT PRIMARY KEY,
+          guild_id TEXT NOT NULL,
+          user_id TEXT NOT NULL,
+          trigger_type TEXT NOT NULL,
+          status TEXT NOT NULL,
+          action_taken TEXT,
+          reason TEXT,
+          evidence_summary_json TEXT NOT NULL,
+          review_channel_id TEXT,
+          review_message_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE case_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          case_id TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          actor_type TEXT NOT NULL,
+          actor_id TEXT,
+          reason TEXT,
+          metadata_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO cases VALUES
+          ('claimed', 'guild', 'user', 'honeypot', 'punishment_pending', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('punish', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('dismiss', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('revert-punishment', 'guild', 'user', 'honeypot', 'operation_uncertain', 'ban', NULL, '{}', NULL, NULL, 'now', 'now'),
+          ('revert-dismissal', 'guild', 'user', 'honeypot', 'operation_uncertain', NULL, NULL, '{}', NULL, NULL, 'now', 'now');
+        INSERT INTO case_events
+          (case_id, event_type, actor_type, actor_id, reason, metadata_json, created_at)
+        VALUES
+          ('punish', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"punish"}', 'now'),
+          ('dismiss', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"dismiss"}', 'now'),
+          ('revert-punishment', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"revert_punishment"}', 'now'),
+          ('revert-dismissal', 'operation_outcome_uncertain', 'bot', NULL, NULL, '{"operation":"revert_dismissal"}', 'now');
+      `);
+    });
+
+    expect(
+      database.sqlite.prepare('SELECT id, status FROM cases ORDER BY id').all(),
+    ).toEqual([
+      { id: 'claimed', status: 'punishment_pending' },
+      { id: 'dismiss', status: 'dismissal_uncertain' },
+      { id: 'punish', status: 'punishment_uncertain' },
+      {
+        id: 'revert-dismissal',
+        status: 'dismissal_revert_uncertain',
+      },
+      {
+        id: 'revert-punishment',
+        status: 'punishment_revert_uncertain',
+      },
+    ]);
+    expect(
+      database.sqlite
+        .prepare(
+          "SELECT operation_dispatched_at AS operationDispatchedAt FROM cases WHERE id = 'claimed'",
+        )
+        .get(),
+    ).toEqual({ operationDispatchedAt: 'now' });
+    expect(
+      database.sqlite
+        .prepare('PRAGMA table_info(cases)')
+        .all()
+        .map((column) => (column as { name: string }).name),
+    ).toEqual(
+      expect.arrayContaining([
+        'operation_action_taken',
+        'operation_dispatched_at',
+      ]),
+    );
+
+    database.sqlite.close();
+  });
+
+  it('queues each case independently within the global attachment bound', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const firstCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'first-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const secondCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'second-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+
+    const messages = await Promise.all(
+      [firstCase, secondCase].flatMap((caseRow) =>
+        Array.from({ length: 4 }, (_, messageIndex) =>
+          store.attachMessage(
+            caseRow.id,
+            fakeMessage({
+              id: `${caseRow.id}-${messageIndex}`,
+              attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+                attachment({
+                  id: `${caseRow.id}-${messageIndex}-${attachmentIndex}`,
+                }),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+
+    releaseStorage();
+    await Promise.all(messages.map((message) => message.processedAttachments));
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_CASE * 2,
+    );
+    const rows = await database.db.select().from(caseAttachments);
+    expect(
+      rows.filter(
+        (row) =>
+          row.caseId === firstCase.id && row.processingState === 'stored',
+      ),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE);
+    expect(
+      rows.filter(
+        (row) =>
+          row.caseId === secondCase.id && row.processingState === 'stored',
+      ),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE);
+    database.sqlite.close();
+  });
+
+  it('keeps globally backlogged attachments pending until queue capacity frees', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const caseRows = await Promise.all(
+      ['first-user', 'second-user', 'third-user'].map((userId) =>
+        store.getOrCreateCase(
+          {
+            guildId: 'guild',
+            userId,
+            triggerType: 'honeypot',
+            reason: 'triggered',
+          },
+          { reusePending: false },
+        ),
+      ),
+    );
+    const messages = await Promise.all(
+      caseRows.flatMap((caseRow) =>
+        Array.from({ length: 4 }, (_, messageIndex) =>
+          store.attachMessage(
+            caseRow.id,
+            fakeMessage({
+              id: `${caseRow.id}-${messageIndex}`,
+              attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+                attachment({
+                  id: `${caseRow.id}-${messageIndex}-${attachmentIndex}`,
+                }),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+
+    let backlogProcessingComplete = false;
+    const backlogProcessing = Promise.all(
+      messages.slice(8).map((message) => message.processedAttachments),
+    ).then((attachments) => {
+      backlogProcessingComplete = true;
+      return attachments;
+    });
+    await Promise.resolve();
+
+    const backlogged = await database.db.select().from(caseAttachments);
+    expect(backlogged).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+    expect(
+      backlogged.filter((row) => row.processingState === 'failed'),
+    ).toHaveLength(0);
+    expect(
+      backlogged.filter((row) => row.processingState === 'pending'),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+    expect(backlogProcessingComplete).toBe(false);
+
+    releaseStorage();
+    const [, processedBacklog] = await Promise.all([
+      Promise.all(
+        messages.slice(0, 8).map((message) => message.processedAttachments),
+      ),
+      backlogProcessing,
+    ]);
+    expect(processedBacklog.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          processingState: 'stored',
+          storageKey: 'guild/case/file.png',
+        }),
+      ]),
+    );
+    await vi.waitFor(
+      async () => {
+        const rows = await database.db.select().from(caseAttachments);
+        expect(
+          rows.filter((row) => row.processingState === 'stored'),
+        ).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+      },
+      { timeout: 2_000 },
+    );
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_CASE * 3,
+    );
+    database.sqlite.close();
+  });
+
+  it('retries a durable attachment backlog after a transient pump failure', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const queue = new FairQueue({
+      name: 'attachment-retry-test',
+      globalLimit: Number.MAX_SAFE_INTEGER,
+      perGroupLimit: Number.MAX_SAFE_INTEGER,
+      windowMs: 1_000,
+      maxPendingGlobal: 1,
+      maxPendingPerGroup: 1,
+      logFailures: false,
+    });
+    const store = new CaseStore(database.db, storage, undefined, queue);
+    const [firstCase, secondCase] = await Promise.all([
+      store.getOrCreateCase(
+        {
+          guildId: 'guild',
+          userId: 'first-user',
+          triggerType: 'honeypot',
+          reason: 'triggered',
+        },
+        { reusePending: false },
+      ),
+      store.getOrCreateCase(
+        {
+          guildId: 'guild',
+          userId: 'second-user',
+          triggerType: 'honeypot',
+          reason: 'triggered',
+        },
+        { reusePending: false },
+      ),
+    ]);
+    const first = await store.attachMessage(
+      firstCase.id,
+      fakeMessage({ id: 'first', attachments: [attachment({ id: 'first' })] }),
+    );
+    const second = await store.attachMessage(
+      secondCase.id,
+      fakeMessage({
+        id: 'second',
+        attachments: [attachment({ id: 'second' })],
+      }),
+    );
+    let secondComplete = false;
+    const secondProcessing = second.processedAttachments.then((attachments) => {
+      secondComplete = true;
+      return attachments;
+    });
+    const selectSpy = vi.spyOn(database.db, 'select');
+    selectSpy.mockImplementationOnce(() => {
+      throw new Error('database temporarily unavailable');
+    });
+
+    releaseStorage();
+    await first.processedAttachments;
+    expect(secondComplete).toBe(false);
+    await expect(secondProcessing).resolves.toEqual([
+      expect.objectContaining({ processingState: 'stored' }),
+    ]);
+    expect(selectSpy).toHaveBeenCalled();
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(2);
+    database.sqlite.close();
+  });
+
+  it.each(['stored', 'failed'] as const)(
+    'waits for a durable %s attachment state before completing processing',
+    async (terminalState) => {
+      const database = testDatabase();
+      let releaseStorage!: () => void;
+      const storageGate = new Promise<void>((resolve) => {
+        releaseStorage = resolve;
+      });
+      const storage = fakeStorage();
+      storage.saveFromUrl.mockImplementation(async () => {
+        await storageGate;
+        if (terminalState === 'failed') throw new Error('download failed');
+        return {
+          storageKey: 'guild/case/file.png',
+          sha256: 'sha256',
+          sizeBytes: 456,
+          path: '/tmp/guild/case/file.png',
+          contentType: 'image/png',
+          fileName: 'file.png',
+          normalized: false,
+        };
+      });
+      const store = new CaseStore(database.db, storage);
+      const caseRow = await store.getOrCreateCase({
+        guildId: 'guild',
+        userId: `${terminalState}-user`,
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      });
+      const attached = await store.attachMessage(
+        caseRow.id,
+        fakeMessage({
+          id: `${terminalState}-message`,
+          attachments: [attachment({ id: `${terminalState}-attachment` })],
+        }),
+      );
+      let processingComplete = false;
+      const processing = attached.processedAttachments.then((attachments) => {
+        processingComplete = true;
+        return attachments;
+      });
+      const updateSpy = vi.spyOn(database.db, 'update');
+      const transactionSpy = vi.spyOn(database.db, 'transaction');
+      if (terminalState === 'failed') {
+        transactionSpy.mockImplementationOnce(() => {
+          throw new Error('database temporarily unavailable');
+        });
+      } else {
+        updateSpy.mockImplementationOnce(() => {
+          throw new Error('database temporarily unavailable');
+        });
+      }
+
+      releaseStorage();
+      await vi.waitFor(() => {
+        const persistenceSpy =
+          terminalState === 'failed' ? transactionSpy : updateSpy;
+        expect(persistenceSpy).toHaveBeenCalled();
+      });
+      expect(processingComplete).toBe(false);
+      await expect(processing).resolves.toEqual([
+        expect.objectContaining({ processingState: terminalState }),
+      ]);
+      expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+      if (terminalState === 'stored') {
+        expect(storage.remove).not.toHaveBeenCalled();
+      } else {
+        const failureEvent = await database.db
+          .select()
+          .from(caseEvents)
+          .where(eq(caseEvents.eventType, 'attachment_storage_failed'))
+          .get();
+        expect(JSON.parse(failureEvent?.metadataJson ?? '{}')).toMatchObject({
+          error: 'download failed',
+        });
+      }
+      database.sqlite.close();
+    },
+  );
+
+  it('cleans stored files before cancelling deleted attachment processing', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    storage.remove.mockRejectedValueOnce(new Error('storage unavailable'));
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'deleted-attachment-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const attached = await store.attachMessage(
+      caseRow.id,
+      fakeMessage({
+        id: 'deleted-attachment-message',
+        attachments: [attachment({ id: 'deleted-attachment' })],
+      }),
+    );
+    await database.db
+      .delete(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    const completion = expect(attached.processedAttachments).rejects.toThrow(
+      'Attachment was removed before storage completed',
+    );
+
+    releaseStorage();
+    await completion;
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    expect(storage.remove).toHaveBeenCalledTimes(2);
+    expect(storage.remove).toHaveBeenCalledWith('guild/case/file.png');
+    database.sqlite.close();
+  });
+
+  it('atomically caps concurrent attachment processing per case', async () => {
+    const database = testDatabase();
+    let active = 0;
+    let maxActive = 0;
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      active -= 1;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'concurrent-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    await Promise.all(
+      Array.from({ length: 8 }, (_, messageIndex) =>
+        attachCaseMessage(
+          store,
+          caseRow.id,
+          fakeMessage({
+            id: `concurrent-${messageIndex}`,
+            attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+              attachment({ id: `${messageIndex}-${attachmentIndex}` }),
+            ),
+          }),
+        ),
+      ),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(MAX_ATTACHMENTS_PER_CASE);
+    expect(maxActive).toBe(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.caseId, caseRow.id)),
+    ).toHaveLength(64);
+    database.sqlite.close();
+  });
+
+  it('counts only admitted downloads toward the per-message limit', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'mixed-size-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const oversized = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE },
+      (_, index) =>
+        attachment({
+          id: `oversized-${index}`,
+          size: MAX_ATTACHMENT_BYTES + 1,
+        }),
+    );
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'mixed-size-message',
+        attachments: [
+          ...oversized,
+          attachment({ id: 'admitted', url: 'https://cdn.test/admitted.png' }),
+        ],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledWith(
+      'https://cdn.test/admitted.png',
+      ['guild', caseRow.id],
+      'image.png',
+      { contentType: 'image/png', expectedSizeBytes: 123 },
+    );
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(rows.filter((row) => row.processingState === 'stored')).toHaveLength(
+      1,
+    );
+    expect(rows.filter((row) => row.processingState === null)).toHaveLength(
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
+
+    database.sqlite.close();
+  });
+
+  it('does not let non-images consume image evidence slots', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'mixed-evidence-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const nonImages = Array.from(
+      { length: MAX_ATTACHMENTS_PER_MESSAGE },
+      (_, index) =>
+        attachment({
+          id: `document-${index}`,
+          name: `document-${index}.pdf`,
+          contentType: 'application/pdf',
+        }),
+    );
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'mixed-evidence-message',
+        attachments: [...nonImages, attachment({ id: 'image-evidence' })],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(
+      rows.find((row) => row.discordAttachmentId === 'image-evidence'),
+    ).toMatchObject({ processingState: 'stored' });
+    const documentRows = rows.filter((row) =>
+      row.discordAttachmentId.startsWith('document-'),
+    );
+    expect(documentRows).toHaveLength(MAX_ATTACHMENTS_PER_MESSAGE);
+    for (const row of documentRows) {
+      expect(row).toMatchObject({ processingState: null, storageKey: null });
+    }
+
+    database.sqlite.close();
+  });
+
+  it('admits image filenames when Discord omits or generalizes content type', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'inferred-image-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    await attachCaseMessage(
+      store,
+      caseRow.id,
+      fakeMessage({
+        id: 'inferred-image-message',
+        attachments: [
+          attachment({
+            id: 'missing-type',
+            name: 'evidence.png',
+            contentType: null,
+          }),
+          attachment({
+            id: 'generic-type',
+            name: 'evidence.jpg',
+            contentType: 'application/octet-stream',
+          }),
+          attachment({
+            id: 'non-image',
+            name: 'evidence.bin',
+            contentType: 'application/octet-stream',
+          }),
+        ],
+      }),
+    );
+
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(2);
+    const rows = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    expect(
+      rows
+        .filter((row) => row.processingState === 'stored')
+        .map((row) => row.discordAttachmentId),
+    ).toEqual(['missing-type', 'generic-type']);
+    expect(
+      rows.find((row) => row.discordAttachmentId === 'non-image'),
+    ).toMatchObject({ processingState: null, storageKey: null });
+
+    database.sqlite.close();
+  });
+
+  it('keeps skipped attachments as metadata without exceeding processing limits', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const store = new CaseStore(database.db, storage);
+    const perMessageCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'per-message-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    await attachCaseMessage(
+      store,
+      perMessageCase.id,
+      fakeMessage({
+        id: 'per-message',
+        attachments: Array.from({ length: 10 }, (_, index) =>
+          attachment({ id: `per-message-${index}` }),
+        ),
+      }),
+    );
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE,
+    );
+
+    const perCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'per-case-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+
+    for (let messageIndex = 0; messageIndex < 5; messageIndex += 1) {
+      await attachCaseMessage(
+        store,
+        perCase.id,
+        fakeMessage({
+          id: `per-case-message-${messageIndex}`,
+          attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+            attachment({
+              id: `per-case-${messageIndex}-${attachmentIndex}`,
+            }),
+          ),
+        }),
+      );
+    }
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE + MAX_ATTACHMENTS_PER_CASE,
+    );
+
+    const oversizedCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'oversized-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+    await attachCaseMessage(
+      store,
+      oversizedCase.id,
+      fakeMessage({
+        id: 'oversized-message',
+        attachments: [
+          attachment({ id: 'oversized', size: MAX_ATTACHMENT_BYTES + 1 }),
+        ],
+      }),
+    );
+
+    const [oversized] = await database.db
+      .select()
+      .from(caseAttachments)
+      .where(eq(caseAttachments.caseId, oversizedCase.id));
+    expect(oversized).toMatchObject({
+      sizeBytes: MAX_ATTACHMENT_BYTES + 1,
+      storageKey: null,
+      sha256: null,
+    });
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_MESSAGE + MAX_ATTACHMENTS_PER_CASE,
+    );
+
+    database.sqlite.close();
+  });
+
+  it('recovers pending attachment downloads without retrying terminal failures', async () => {
+    const database = testDatabase();
+    const seedStore = new CaseStore(database.db, fakeStorage());
+    const caseRow = await seedStore.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'restart-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const [caseMessage] = await database.db
+      .insert(caseMessages)
+      .values({
+        caseId: caseRow.id,
+        messageId: 'restart-message',
+        channelId: 'channel',
+        authorId: 'restart-user',
+        content: '',
+        normalizedContent: '',
+        textHash: null,
+        deleted: 0,
+        createdAt: new Date().toISOString(),
+      })
+      .returning();
+    if (!caseMessage) throw new Error('Failed to seed case message');
+    const attachmentValues = {
+      caseId: caseRow.id,
+      caseMessageId: caseMessage.id,
+      name: 'evidence.png',
+      reviewAttachmentUrl: null,
+      contentType: 'image/png',
+      sizeBytes: 123,
+      sha256: null,
+      perceptualHash: null,
+      storageKey: null,
+      createdAt: new Date().toISOString(),
+    };
+    await database.db.insert(caseAttachments).values([
+      {
+        ...attachmentValues,
+        discordAttachmentId: 'pending',
+        originalUrl: 'https://cdn.test/pending.png',
+        processingSlot: 1,
+        processingState: 'pending',
+      },
+      {
+        ...attachmentValues,
+        discordAttachmentId: 'failed',
+        originalUrl: 'https://cdn.test/failed.png',
+        processingSlot: 2,
+        processingState: 'failed',
+      },
+    ]);
+
+    const storage = fakeStorage();
+    const restartedStore = new CaseStore(database.db, storage);
+
+    await expect(restartedStore.recoverInterruptedAttachments()).resolves.toBe(
+      1,
+    );
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledWith(
+      'https://cdn.test/pending.png',
+      ['guild', caseRow.id],
+      'evidence.png',
+      { contentType: 'image/png', expectedSizeBytes: 123 },
+    );
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.discordAttachmentId, 'pending'))
+        .get(),
+    ).toMatchObject({
+      processingState: 'stored',
+      storageKey: 'guild/case/file.png',
+      sha256: 'sha256',
+    });
+    expect(
+      await database.db
+        .select()
+        .from(caseAttachments)
+        .where(eq(caseAttachments.discordAttachmentId, 'failed'))
+        .get(),
+    ).toMatchObject({ processingState: 'failed', storageKey: null });
+
+    database.sqlite.close();
+  });
+
+  it('allows only one concurrent operation claim from the expected case status', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+
+    const transitions = await Promise.all([
+      store.claimOperation(caseRow.id, 'dismiss', 'moderator-1'),
+      store.claimOperation(caseRow.id, 'punish', 'moderator-2'),
+    ]);
+
+    expect(transitions.filter(Boolean)).toHaveLength(1);
+    await expect(
+      store.claimOperation(caseRow.id, 'dismiss', 'moderator-3'),
+    ).resolves.toBeNull();
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.caseId, caseRow.id)),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          eventType: 'operation_claimed',
+        }),
+      ]),
+    );
+
+    database.sqlite.close();
+  });
+
+  it('recovers only dispatched interrupted operations as uncertain', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const pendingCase = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'pending-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const punishedCase = await store.getOrCreateCase(
+      {
+        guildId: 'guild',
+        userId: 'punished-user',
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      },
+      { reusePending: false },
+    );
+    await store.resolve(
+      punishedCase.id,
+      'punished',
+      'ban',
+      'moderator',
+      'punished',
+    );
+    await store.claimOperation(pendingCase.id, 'punish', 'moderator', 'ban');
+    await store.claimOperation(
+      punishedCase.id,
+      'revert_punishment',
+      'moderator',
+      null,
+    );
+    await expect(
+      store.markOperationDispatched(
+        punishedCase.id,
+        'revert_punishment',
+        'moderator',
+      ),
+    ).resolves.toMatchObject({ operationDispatchedAt: expect.any(String) });
+    await expect(
+      store.markOperationDispatched(
+        punishedCase.id,
+        'revert_punishment',
+        'moderator',
+      ),
+    ).resolves.toBeNull();
+
+    await store.setReviewMessage(
+      punishedCase.id,
+      'review-channel',
+      'review-message',
+    );
+
+    await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
+    await expect(store.listUncertainCaseReviews()).resolves.toEqual([
+      {
+        caseId: punishedCase.id,
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ]);
+    await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
+    await expect(store.listUncertainCaseReviews()).resolves.toEqual([
+      {
+        caseId: punishedCase.id,
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ]);
+    expect(await store.getCase(pendingCase.id)).toMatchObject({
+      status: 'pending_review',
+      actionTaken: null,
+      operationActionTaken: null,
+      operationDispatchedAt: null,
+    });
+    expect(await store.getCase(punishedCase.id)).toMatchObject({
+      status: 'punishment_revert_uncertain',
+      actionTaken: 'ban',
+      operationActionTaken: null,
+    });
+    await expect(
+      store.claimOperation(pendingCase.id, 'punish', 'moderator'),
+    ).resolves.toMatchObject({ status: 'punishment_pending' });
+    await expect(
+      store.reconcileOperation(pendingCase.id, true, 'moderator'),
+    ).resolves.toBeNull();
+    await expect(
+      store.reconcileOperation(punishedCase.id, false, 'moderator'),
+    ).resolves.toMatchObject({ status: 'punished', actionTaken: 'ban' });
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_outcome_uncertain')),
+    ).toHaveLength(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'operation_recovered')),
+    ).toHaveLength(1);
+
+    database.sqlite.close();
+  });
+
+  it.each([
+    'punishment_pending',
+    'dismissal_pending',
+    'punishment_revert_pending',
+    'dismissal_revert_pending',
+    'punishment_uncertain',
+    'dismissal_uncertain',
+    'punishment_revert_uncertain',
+    'dismissal_revert_uncertain',
+  ] as const)('reuses unresolved %s cases for new evidence', async (status) => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const first = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'first',
+    });
+    await database.db
+      .update(cases)
+      .set({ status })
+      .where(eq(cases.id, first.id));
+
+    const second = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'second',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('atomically creates one active case for concurrent evidence', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const input = {
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot' as const,
+      reason: 'triggered',
+    };
+
+    const caseRows = await Promise.all(
+      Array.from({ length: 8 }, () => store.getOrCreateCase(input)),
+    );
+
+    expect(new Set(caseRows.map((caseRow) => caseRow.id)).size).toBe(1);
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'triggered')),
+    ).toHaveLength(1);
+    database.sqlite.close();
+  });
+
   it('creates cases once, persists messages, resolves, and finds by message ids', async () => {
     const database = testDatabase();
     const storage = fakeStorage();
@@ -1061,7 +2977,8 @@ describe('CaseStore', () => {
     });
     expect(second.id).toBe(first.id);
 
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       first.id,
       fakeMessage({
         id: 'source',
@@ -1120,7 +3037,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam reason',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({
         id: 'msg',
@@ -1190,7 +3108,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam reason',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({
         id: 'msg-no-embeddings',
@@ -1277,7 +3196,8 @@ describe('CaseStore', () => {
       triggerType: 'honeypot',
       reason: 'scam',
     });
-    await store.attachMessage(
+    await attachCaseMessage(
+      store,
       caseRow.id,
       fakeMessage({ attachments: [attachment({ id: 'img' })] }),
     );
@@ -1292,6 +3212,18 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 });
+
+async function attachCaseMessage(
+  store: CaseStore,
+  caseId: string,
+  message: ReturnType<typeof fakeMessage>,
+) {
+  const persisted = await store.attachMessage(caseId, message);
+  return {
+    ...persisted,
+    attachments: await persisted.processedAttachments,
+  };
+}
 
 function fakeDiscordGuild(
   deleted: string[],
@@ -1365,8 +3297,10 @@ function fakeDiscordMessage(
     guild: ReturnType<typeof fakeDiscordGuild>;
     channelId: string;
     content: string;
+    attachments: unknown[];
   }>,
 ) {
+  const attachments = input.attachments ?? [];
   return {
     id: input.id ?? 'message',
     guildId: 'guild',
@@ -1380,10 +3314,38 @@ function fakeDiscordMessage(
     deletable: true,
     inGuild: () => true,
     attachments: {
-      map: <T>(fn: (attachment: any) => T) => ([] as any[]).map(fn),
-      values: () => ([] as any[])[Symbol.iterator](),
+      size: attachments.length,
+      map: <T>(fn: (attachment: any) => T) => attachments.map(fn),
+      values: () => attachments[Symbol.iterator](),
     },
   } as any;
+}
+
+function fakeCaseButtonInteraction(
+  guild: ReturnType<typeof fakeDiscordGuild>,
+  customId: string,
+  userId: string,
+) {
+  return {
+    inCachedGuild: () => true,
+    isChatInputCommand: () => false,
+    isMessageContextMenuCommand: () => false,
+    isButton: () => true,
+    customId,
+    guildId: guild.id,
+    guild,
+    user: { id: userId },
+    member: {
+      id: userId,
+      guild,
+      permissions: { has: () => false },
+      roles: { cache: { some: () => false } },
+    },
+    client: { application: null },
+    message: { components: [] },
+    reply: vi.fn(async (payload: unknown) => void payload),
+    update: vi.fn(async (payload: unknown) => void payload),
+  };
 }
 
 function matchesDuplicateAfter(
@@ -1399,12 +3361,20 @@ function matchesDuplicateAfter(
 
   now.mockReturnValue(0);
   detector.record(
-    fakeMessage({ channelId: 'c1', content: 'same', attachments: attachments[0] }),
+    fakeMessage({
+      channelId: 'c1',
+      content: 'same',
+      attachments: attachments[0],
+    }),
     config,
   );
   now.mockReturnValue(delayMs);
   return detector.record(
-    fakeMessage({ channelId: 'c2', content: 'same', attachments: attachments[1] }),
+    fakeMessage({
+      channelId: 'c2',
+      content: 'same',
+      attachments: attachments[1],
+    }),
     config,
   ).matched;
 }
@@ -1439,7 +3409,7 @@ function attachment(
   input: Partial<{
     id: string;
     name: string;
-    contentType: string;
+    contentType: string | null;
     size: number;
     url: string;
     proxyURL: string;
@@ -1448,7 +3418,8 @@ function attachment(
   return {
     id: input.id ?? 'attachment',
     name: input.name ?? 'image.png',
-    contentType: input.contentType ?? 'image/png',
+    contentType:
+      input.contentType === undefined ? 'image/png' : input.contentType,
     size: input.size ?? 123,
     url: input.url ?? 'https://cdn.discordapp.test/image.png',
     proxyURL: input.proxyURL ?? 'https://proxy.discordapp.test/image.png',
@@ -1465,6 +3436,7 @@ function storedAttachment(
     size: input.size ?? 123,
     url: input.url ?? 'https://cdn.discordapp.test/image.png',
     proxyUrl: input.proxyUrl ?? 'https://proxy.discordapp.test/image.png',
+    dataUrl: input.dataUrl ?? 'data:image/png;base64,aW1hZ2U=',
     sha256: input.sha256 ?? 'sha',
     storageKey: input.storageKey ?? 'guild/case/file.png',
   };
@@ -1483,6 +3455,15 @@ function cachedMessage(input: Partial<CachedMessage> = {}): CachedMessage {
     createdAt: input.createdAt ?? new Date('2026-01-01T00:00:00Z'),
     reason: input.reason ?? 'honeypot',
   };
+}
+
+async function recordAnalysis(store: CaseStore, caseId: string) {
+  await store.saveAnalysis(caseId, {
+    confidence: 1,
+    shouldPunish: true,
+    reason: 'known scam',
+    evidence: [],
+  });
 }
 
 function fakeStorage() {

@@ -20,6 +20,14 @@ export type PolicyAction = PreventionAction | PunishmentAction;
 
 export const caseStatuses = [
   'pending_review',
+  'punishment_pending',
+  'dismissal_pending',
+  'punishment_revert_pending',
+  'dismissal_revert_pending',
+  'punishment_uncertain',
+  'dismissal_uncertain',
+  'punishment_revert_uncertain',
+  'dismissal_revert_uncertain',
   'punished',
   'dismissed',
   'reverted',
@@ -35,6 +43,13 @@ export type Policy = {
   roleId: string | null;
   deleteMessages: boolean;
 };
+
+export type PolicyApplicationResult =
+  { applied: true; detail: string } | { applied: false; detail: string };
+
+export type PolicyApplicationOutcome =
+  | { applied: true; detail: string; appliedAtMs: number }
+  | { applied: false; detail: string; attemptedAtMs: number };
 
 export type GuildSettings = {
   moderationChannelId: string | null;

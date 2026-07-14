@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Collection } from 'discord.js';
+import { Collection, RESTJSONErrorCodes } from 'discord.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { registerCommands } from '../src/commands/register.js';
 import {
@@ -10,8 +10,10 @@ import {
   caseReviewMessage,
   caseReviewResolutionUpdate,
   caseReviewRevertUpdate,
+  caseReviewUncertainUpdate,
   type CaseReviewInput,
 } from '../src/interactions/caseReviewUi.js';
+import { refreshRecoveredCaseReviews } from '../src/services/caseReviewRecovery.js';
 import { OpenRouterScamClassifier } from '../src/services/classifier.js';
 import { OpenRouterEmbeddings } from '../src/services/embeddings.js';
 import { GlobalBanService } from '../src/services/globalBanList.js';
@@ -119,6 +121,42 @@ describe('case review UI', () => {
     ]);
   });
 
+  it('disables punishment until analysis completes', () => {
+    const pending = caseReviewMessage(caseInput({ analysis: null }))
+      .components as Array<any>;
+    expect(componentByCustomId(pending, 'case:punish:case1')).toMatchObject({
+      disabled: true,
+    });
+    expect(componentByCustomId(pending, 'case:dismiss:case1')).toMatchObject({
+      disabled: false,
+    });
+
+    const progressing = caseReviewEdit(
+      caseInput({ punishmentReady: false }),
+      pending,
+    ).components as Array<any>;
+    expect(componentByCustomId(progressing, 'case:punish:case1')).toMatchObject(
+      {
+        disabled: true,
+      },
+    );
+
+    const completed = caseReviewEdit(caseInput(), progressing)
+      .components as Array<any>;
+    expect(componentByCustomId(completed, 'case:punish:case1')).toMatchObject({
+      disabled: false,
+    });
+
+    const revertedWhilePending = caseReviewRevertUpdate(pending, {
+      caseId: 'case1',
+      punishment: policy('ban'),
+      punishmentReady: false,
+    }).components as Array<any>;
+    expect(
+      componentByCustomId(revertedWhilePending, 'case:punish:case1'),
+    ).toMatchObject({ disabled: true });
+  });
+
   it('shows waiting copy before classifier evidence arrives', () => {
     const content = textContent(
       caseReviewMessage(
@@ -198,6 +236,21 @@ describe('case review UI', () => {
     expect(textContent(roleCase)).toContain(
       'duplicate messages across <#channel>, <#other>',
     );
+
+    const unappliedCase = caseReviewMessage(
+      caseInput({
+        preventionOutcome: {
+          applied: false,
+          detail:
+            'timeout could not be applied because the member left the guild',
+          attemptedAtMs: 1_700_000_000_000,
+        },
+      }),
+    ).components as Array<any>;
+    expect(textContent(unappliedCase)).toContain(
+      'prevention was not applied: timeout could not be applied because the member left the guild',
+    );
+    expect(textContent(unappliedCase)).not.toContain('<@user> was timed out');
     expect(textContent(roleCase)).toContain(
       'Likelihood of being a scam: pending',
     );
@@ -262,6 +315,183 @@ describe('case review UI', () => {
     ]);
   });
 
+  it('renders uncertain operations with explicit reconciliation actions', () => {
+    const existing = caseReviewMessage(caseInput()).components as Array<any>;
+    const uncertain = caseReviewUncertainUpdate(existing, {
+      caseId: 'case1',
+    }).components as Array<any>;
+
+    expect(textContent(uncertain)).toContain('Reconciliation required');
+    expect(customIds(uncertain)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+
+    const reconciled = caseReviewRevertUpdate(uncertain, {
+      caseId: 'case1',
+      punishment: policy('ban'),
+      punishmentReady: true,
+    }).components as Array<any>;
+    expect(textContent(reconciled)).not.toContain('Reconciliation required');
+    expect(customIds(reconciled)).toEqual([
+      'case:punish:case1',
+      'case:dismiss:case1',
+    ]);
+  });
+
+  it('refreshes recovered uncertain case messages with reconciliation actions', async () => {
+    const existing = {
+      components: caseReviewMessage(caseInput()).components as Array<any>,
+      edit: vi.fn(async (payload: unknown) => void payload),
+    };
+    const channel = {
+      isTextBased: () => true,
+      messages: { fetch: vi.fn(async () => existing) },
+      send: vi.fn(async (payload: unknown) => void payload),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
+        ]),
+      },
+    };
+    const caseStore = { setReviewMessage: vi.fn() };
+
+    await expect(
+      refreshRecoveredCaseReviews(client as any, caseStore as any, [
+        {
+          caseId: 'case1',
+          guildId: 'guild',
+          reviewChannelId: 'review-channel',
+          reviewMessageId: 'review-message',
+        },
+      ]),
+    ).resolves.toEqual({ updated: 1, reposted: 0, skipped: 0, failed: 0 });
+
+    expect(channel.messages.fetch).toHaveBeenCalledWith('review-message');
+    const payload = existing.edit.mock.calls[0]?.[0] as {
+      components: Array<any>;
+    };
+    expect(textContent(payload.components)).toContain(
+      'Reconciliation required',
+    );
+    expect(customIds(payload.components)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it('reposts recovered reconciliation controls when the old review is gone', async () => {
+    const channel = {
+      isTextBased: () => true,
+      messages: {
+        fetch: vi.fn(async () => {
+          throw { code: RESTJSONErrorCodes.UnknownMessage };
+        }),
+      },
+      send: vi.fn(async (payload: unknown) => {
+        void payload;
+        return {
+          id: 'new-review-message',
+          channelId: 'review-channel',
+        };
+      }),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
+        ]),
+      },
+    };
+    const caseStore = {
+      setReviewMessage: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      refreshRecoveredCaseReviews(client as any, caseStore as any, [
+        {
+          caseId: 'case1',
+          guildId: 'guild',
+          reviewChannelId: 'review-channel',
+          reviewMessageId: 'old-review-message',
+        },
+      ]),
+    ).resolves.toEqual({ updated: 0, reposted: 1, skipped: 0, failed: 0 });
+
+    const payload = channel.send.mock.calls[0]?.[0] as {
+      components: Array<any>;
+    };
+    expect(textContent(payload.components)).toContain(
+      'Reconciliation required',
+    );
+    expect(customIds(payload.components)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+    expect(caseStore.setReviewMessage).toHaveBeenCalledWith(
+      'case1',
+      'review-channel',
+      'new-review-message',
+    );
+  });
+
+  it('retries recovered review refreshes after transient Discord failures', async () => {
+    const existing = {
+      components: caseReviewMessage(caseInput()).components as Array<any>,
+      edit: vi.fn(async (payload: unknown) => void payload),
+    };
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Discord unavailable'))
+      .mockResolvedValueOnce(existing);
+    const channel = {
+      isTextBased: () => true,
+      messages: { fetch },
+      send: vi.fn(async (payload: unknown) => void payload),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          [
+            'guild',
+            { channels: { fetch: vi.fn(async () => channel) } },
+          ],
+        ]),
+      },
+    };
+    const caseStore = { setReviewMessage: vi.fn() };
+    const recovered = [
+      {
+        caseId: 'case1',
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ];
+
+    await expect(
+      refreshRecoveredCaseReviews(
+        client as any,
+        caseStore as any,
+        recovered,
+      ),
+    ).resolves.toEqual({ updated: 0, reposted: 0, skipped: 0, failed: 1 });
+    await expect(
+      refreshRecoveredCaseReviews(
+        client as any,
+        caseStore as any,
+        recovered,
+      ),
+    ).resolves.toEqual({ updated: 1, reposted: 0, skipped: 0, failed: 0 });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(existing.edit).toHaveBeenCalledOnce();
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
   it('adds and removes resolution containers without mutating case and signal containers', () => {
     const existing = caseReviewMessage(caseInput()).components as Array<any>;
     const resolved = caseReviewResolutionUpdate(existing, {
@@ -283,6 +513,7 @@ describe('case review UI', () => {
     const reverted = caseReviewRevertUpdate(resolved, {
       caseId: 'case1',
       punishment: policy('ban'),
+      punishmentReady: true,
     }).components as Array<any>;
     expect(textContent(reverted)).not.toContain('Resolved by');
     expect(customIds(reverted)).toEqual([
@@ -547,10 +778,6 @@ describe('OpenRouterScamClassifier', () => {
       },
       {
         type: 'image_url',
-        image_url: { url: 'https://proxy.test/image-2.jpg' },
-      },
-      {
-        type: 'image_url',
         image_url: { url: 'data:image/png;base64,a25vd24=' },
       },
     ]);
@@ -732,6 +959,7 @@ describe('OpenRouterScamClassifier', () => {
             name: 'current.png',
             contentType: 'image/png',
             url: 'https://cdn.test/image.png',
+            dataUrl: 'data:image/png;base64,Y3VycmVudA==',
           },
         ] as any,
       }),
@@ -813,6 +1041,14 @@ describe('OpenRouterEmbeddings', () => {
         name: 'proof.png',
         url: 'https://cdn.test/proof.png',
       }),
+    ).resolves.toBeNull();
+    await expect(
+      embedder.embedImage('guild', {
+        contentType: 'image/png',
+        name: 'proof.png',
+        url: 'https://cdn.test/proof.png',
+        dataUrl: 'data:image/png;base64,cHJvb2Y=',
+      }),
     ).resolves.toMatchObject({ vector: [1, 0, 0] });
 
     const bodies = fetchMock.mock.calls.map((call) =>
@@ -841,7 +1077,7 @@ describe('moderation actions', () => {
         policy('timeout', { durationSeconds: 999999999 }),
         'reason',
       ),
-    ).resolves.toBe('timeout applied');
+    ).resolves.toEqual({ applied: true, detail: 'timeout applied' });
     expect(member.timeout).toHaveBeenCalledWith(
       28 * 24 * 60 * 60 * 1000,
       'reason',
@@ -853,11 +1089,11 @@ describe('moderation actions', () => {
         policy('role', { roleId: 'role' }),
         'reason',
       ),
-    ).resolves.toBe('role applied');
+    ).resolves.toEqual({ applied: true, detail: 'role applied' });
     expect(member.roles.add).toHaveBeenCalledWith('role', 'reason');
     await expect(
       applyPolicyForUser(guild, 'user', policy('kick'), 'reason'),
-    ).resolves.toBe('user kicked');
+    ).resolves.toEqual({ applied: true, detail: 'user kicked' });
     await expect(
       applyPolicyForUser(
         guild,
@@ -865,7 +1101,7 @@ describe('moderation actions', () => {
         policy('ban', { deleteMessages: true }),
         'reason',
       ),
-    ).resolves.toBe('user banned');
+    ).resolves.toEqual({ applied: true, detail: 'user banned' });
     expect(guild.members.ban).toHaveBeenCalledWith(
       'user',
       expect.objectContaining({ deleteMessageSeconds: 604800 }),
@@ -891,7 +1127,30 @@ describe('moderation actions', () => {
     const guild = fakeGuild(null);
     await expect(
       applyPolicyForUser(guild, 'user', policy('timeout'), 'reason'),
-    ).resolves.toContain('no longer in the guild');
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'timeout could not be applied because the member is no longer in the guild',
+    });
+    await expect(
+      applyPolicyForUser(
+        guild,
+        'user',
+        policy('role', { roleId: 'role' }),
+        'reason',
+      ),
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'role could not be applied because the member is no longer in the guild',
+    });
+    await expect(
+      applyPolicyForUser(guild, 'user', policy('kick'), 'reason'),
+    ).resolves.toEqual({
+      applied: false,
+      detail:
+        'kick could not be applied because the member is no longer in the guild',
+    });
     await expect(
       applyPolicyForUser(guild, 'user', policy('role'), 'reason'),
     ).rejects.toThrow('missing role_id');
@@ -918,14 +1177,23 @@ describe('moderation actions', () => {
           sizeBytes: 10,
           discordAttachmentId: 'att',
           name: 'proof.png',
+          originalUrl: 'https://cdn.test/stored.png',
+        },
+        {
+          id: 2,
+          storageKey: null,
+          contentType: 'image/png',
+          sizeBytes: 10,
+          discordAttachmentId: 'pending-att',
+          name: 'pending.png',
+          originalUrl: 'https://cdn.test/pending.png',
         },
       ]),
       addEvent: vi.fn(async () => undefined),
     };
     const member = fakeMember();
     await dmPunishedUser({
-      guild: member.guild,
-      userId: member.id,
+      member,
       caseId: 'case1',
       action: 'ban',
       reason: 'reason',
@@ -938,19 +1206,21 @@ describe('moderation actions', () => {
         components: expect.any(Array),
       }),
     );
+    expect(JSON.stringify(member.send.mock.calls[0]?.[0])).not.toContain(
+      'https://cdn.test/pending.png',
+    );
     expect(caseStore.addEvent).toHaveBeenCalledWith(
       'case1',
       'dm_notified',
       'bot',
       null,
       'Punishment DM sent',
-      expect.any(Object),
+      { omitted: ['pending-att'] },
     );
 
     member.send.mockRejectedValueOnce(new Error('closed'));
     await dmPunishedUser({
-      guild: member.guild,
-      userId: member.id,
+      member,
       caseId: 'case1',
       action: 'kick',
       reason: 'reason',
@@ -966,13 +1236,12 @@ describe('moderation actions', () => {
       expect.objectContaining({ error: 'closed' }),
     );
 
-    member.guild.members.fetch.mockRejectedValueOnce(
-      new Error('Discord unavailable'),
+    caseStore.listCaseMessages.mockRejectedValueOnce(
+      new Error('database unavailable'),
     );
     await expect(
       dmPunishedUser({
-        guild: member.guild,
-        userId: member.id,
+        member,
         caseId: 'case1',
         action: 'ban',
         reason: 'reason',
@@ -980,23 +1249,13 @@ describe('moderation actions', () => {
         storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
       }),
     ).resolves.toBe(false);
-    expect(caseStore.addEvent).toHaveBeenCalledWith(
-      'case1',
-      'failed',
-      'bot',
-      null,
-      'Punishment DM failed',
-      expect.objectContaining({
-        error: 'Cannot fetch user for punishment DM: Discord unavailable',
-      }),
-    );
   });
 
-  it('applies punishment after a DM lookup failure', async () => {
+  it('skips an unavailable DM but still bans a user who left the guild', async () => {
     const member = fakeMember();
-    member.guild.members.fetch.mockRejectedValueOnce(
-      new Error('Discord unavailable'),
-    );
+    member.guild.members.fetch.mockRejectedValueOnce({
+      code: RESTJSONErrorCodes.UnknownMember,
+    });
     const caseStore = {
       listCaseMessages: vi.fn(async () => []),
       listCaseAttachments: vi.fn(async () => []),
@@ -1016,15 +1275,88 @@ describe('moderation actions', () => {
           storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
         },
       }),
-    ).resolves.toBe('user banned');
-    expect(member.guild.members.ban).toHaveBeenCalledWith(member.id, {
-      reason: 'Banned for likely scam • audit reason',
-      deleteMessageSeconds: 7 * 24 * 60 * 60,
-    });
+    ).resolves.toEqual({ applied: true, detail: 'user banned' });
+    expect(member.guild.members.ban).toHaveBeenCalledOnce();
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      expect.objectContaining({
+        error: 'Cannot DM user because they are no longer in the guild',
+      }),
+    );
+  });
+
+  it('does not notify after a dispatched punishment fails', async () => {
+    const member = fakeMember();
+    member.guild.members.fetch.mockResolvedValueOnce(member);
+    member.guild.members.ban.mockRejectedValueOnce(
+      new Error('Discord response lost'),
+    );
+
+    await expect(
+      applyPolicyWithBestEffortDm({
+        guild: member.guild,
+        userId: member.id,
+        policy: policy('ban'),
+        reason: 'audit reason',
+        dm: {
+          caseId: 'case1',
+          reason: 'reason',
+          caseStore: {
+            listCaseMessages: vi.fn(),
+            listCaseAttachments: vi.fn(),
+            addEvent: vi.fn(),
+          } as any,
+          storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+        },
+      }),
+    ).rejects.toThrow('Discord response lost');
+    expect(member.send).not.toHaveBeenCalled();
+  });
+
+  it('records a transient DM lookup failure without blocking punishment', async () => {
+    const member = fakeMember();
+    member.guild.members.fetch.mockRejectedValueOnce(
+      new Error('Discord unavailable'),
+    );
+    const caseStore = {
+      listCaseMessages: vi.fn(),
+      listCaseAttachments: vi.fn(),
+      addEvent: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      applyPolicyWithBestEffortDm({
+        guild: member.guild,
+        userId: member.id,
+        policy: policy('ban'),
+        reason: 'audit reason',
+        dm: {
+          caseId: 'case1',
+          reason: 'reason',
+          caseStore: caseStore as any,
+          storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
+        },
+      }),
+    ).resolves.toEqual({ applied: true, detail: 'user banned' });
+    expect(member.guild.members.ban).toHaveBeenCalledOnce();
+    expect(caseStore.addEvent).toHaveBeenCalledWith(
+      'case1',
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      expect.objectContaining({
+        error: expect.stringContaining('Discord unavailable'),
+      }),
+    );
   });
 
   it.each(['case preparation', 'failure recording'] as const)(
-    'applies punishment after DM %s throws',
+    'keeps applied punishment successful when DM %s fails',
     async (failure) => {
       const member = fakeMember();
       const caseStore = {
@@ -1056,7 +1388,7 @@ describe('moderation actions', () => {
             storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
           },
         }),
-      ).resolves.toBe('user banned');
+      ).resolves.toEqual({ applied: true, detail: 'user banned' });
       expect(member.guild.members.ban).toHaveBeenCalledOnce();
     },
   );
@@ -1073,10 +1405,10 @@ describe('FileStorage and prompts', () => {
     const stored = await storage.saveFromUrl(
       'https://cdn.test/file',
       ['guild', 'case'],
-      '../bad name.png',
+      '../bad name.txt',
     );
     expect(stored.storageKey).toMatch(
-      /^guild\/case\/[a-f0-9]{64}-bad_name\.png$/,
+      /^guild\/case\/[a-f0-9]{64}-bad_name\.txt$/,
     );
     await expect(storage.read(stored.storageKey)).resolves.toEqual(
       Buffer.from('hello'),
@@ -1087,7 +1419,59 @@ describe('FileStorage and prompts', () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it('normalizes downloaded model evidence images to webp', async () => {
+  it('rejects declared and streamed attachment bodies over the byte limit', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { maxAttachmentBytes: 8 });
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    await expect(
+      storage.saveFromUrl('https://cdn.test/declared', ['guild'], 'large.bin', {
+        expectedSizeBytes: 9,
+      }),
+    ).rejects.toThrow('8 byte download limit');
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Buffer.alloc(5));
+            controller.enqueue(Buffer.alloc(5));
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/streamed', ['guild'], 'large.bin'),
+    ).rejects.toThrow('8 byte download limit');
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('aborts attachment downloads that exceed the fetch deadline', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { fetchTimeoutMs: 5 });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) return reject(new Error('Missing abort signal'));
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+
+    await expect(
+      storage.saveFromUrl('https://cdn.test/slow', ['guild'], 'slow.bin'),
+    ).rejects.toBeInstanceOf(Error);
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('normalizes filename-identified model evidence images to webp', async () => {
     const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
     const svg = Buffer.from(
       '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"><rect width="1" height="1" fill="red"/></svg>',
@@ -1095,7 +1479,7 @@ describe('FileStorage and prompts', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(svg, {
         status: 200,
-        headers: { 'content-type': 'image/svg+xml' },
+        headers: { 'content-type': 'application/octet-stream' },
       }),
     );
     const storage = new FileStorage(root);
@@ -1104,7 +1488,7 @@ describe('FileStorage and prompts', () => {
       'https://cdn.test/image.png',
       ['guild', 'case'],
       'image.svg',
-      { contentType: 'image/svg+xml' },
+      { contentType: 'application/octet-stream' },
     );
 
     expect(stored.contentType).toBe('image/webp');
@@ -1112,6 +1496,39 @@ describe('FileStorage and prompts', () => {
     expect(stored.normalized).toBe(true);
     expect(stored.storageKey).toMatch(/\.webp$/);
     await expect(storage.read(stored.storageKey)).resolves.not.toEqual(svg);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('rejects unsupported and over-pixel-limit images as metadata-only evidence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'honeybot-storage-'));
+    const storage = new FileStorage(root, { image: { maxInputPixels: 1 } });
+    const fetchMock = vi.spyOn(globalThis, 'fetch');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(Buffer.from('not an image'), {
+        status: 200,
+        headers: { 'content-type': 'image/png' },
+      }),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/bad', ['guild'], 'bad.png'),
+    ).rejects.toThrow('Image could not be normalized safely');
+
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        Buffer.from(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2"/></svg>',
+        ),
+        {
+          status: 200,
+          headers: { 'content-type': 'image/svg+xml' },
+        },
+      ),
+    );
+    await expect(
+      storage.saveFromUrl('https://cdn.test/large', ['guild'], 'large.svg'),
+    ).rejects.toThrow('Image could not be normalized safely');
+
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -1205,9 +1622,13 @@ function caseInput(overrides: Partial<CaseReviewInput> = {}): CaseReviewInput {
     storage: { pathFor: (key: string) => `/tmp/${key}` } as any,
     prevention: policy('timeout'),
     punishment: policy('ban'),
-    preventionApplied: true,
-    preventionAppliedAtMs: 1_700_000_000_000,
+    preventionOutcome: {
+      applied: true,
+      detail: 'timeout applied',
+      appliedAtMs: 1_700_000_000_000,
+    },
     triggerMessageDeleted: true,
+    punishmentReady: overrides.analysis !== null,
     analysis: {
       confidence: 0.88,
       reason: 'classifier',
@@ -1281,6 +1702,18 @@ function textContent(components: Array<any>): string {
   };
   for (const component of components) visit(component);
   return result.join('\n');
+}
+
+function componentByCustomId(
+  components: Array<any>,
+  customId: string,
+): any | undefined {
+  for (const component of components) {
+    if (component.custom_id === customId) return component;
+    const nested = componentByCustomId(component.components ?? [], customId);
+    if (nested) return nested;
+  }
+  return undefined;
 }
 
 function customIds(components: Array<any>): string[] {

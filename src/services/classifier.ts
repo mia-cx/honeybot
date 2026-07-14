@@ -1,5 +1,6 @@
 import { loadClassifierPrompt } from './prompts.js';
 import type { CachedMessage, ClassificationResult } from '../types.js';
+import { isModelImageAttachment } from '../types.js';
 import type {
   ClassifierEvidenceContext,
   ProximalKnownScam,
@@ -48,9 +49,7 @@ export class OpenRouterScamClassifier implements ScamClassifier {
     context: ClassifierEvidenceContext,
   ): Promise<ClassificationResult> {
     return this.queue.enqueue(message.guildId, async () => {
-      const hasImages = message.attachments.some((attachment) =>
-        attachment.contentType?.startsWith('image/'),
-      );
+      const hasImages = message.attachments.some(isModelImageAttachment);
       const purpose = hasImages ? 'image_classifier' : 'text_classifier';
       const systemPrompt = await loadClassifierPrompt(
         hasImages ? 'scam-image' : 'scam-text',
@@ -66,9 +65,7 @@ export class OpenRouterScamClassifier implements ScamClassifier {
     message: CachedMessage,
     context: ClassifierEvidenceContext,
   ): Promise<AdditionalSignalResult[]> {
-    const hasImages = message.attachments.some((attachment) =>
-      attachment.contentType?.startsWith('image/'),
-    );
+    const hasImages = message.attachments.some(isModelImageAttachment);
     const signalConfig = hasImages
       ? this.additionalSignalModels.image
       : this.additionalSignalModels.text;
@@ -504,9 +501,7 @@ function contentFor(
     ...(includeImages
       ? [
           ...message.attachments
-            .filter((attachment) =>
-              attachment.contentType?.startsWith('image/'),
-            )
+            .filter(isModelImageAttachment)
             .flatMap((attachment, index) => [
               {
                 type: 'text',
@@ -514,7 +509,7 @@ function contentFor(
               },
               {
                 type: 'image_url',
-                image_url: { url: imageUrlFor(attachment) },
+                image_url: { url: attachment.dataUrl },
               },
             ]),
           ...proximalKnownScamImageParts(context.proximalKnownScams),
@@ -559,10 +554,6 @@ function promptFor(
       ? 'Make an independent classifier verdict from the current message/images. Always include a non-empty reason field with concrete observations from the current text/images. Proximal known scams are reference examples only: compare concrete visual/text similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.'
       : 'Make an independent classifier verdict from the current text. Always include a non-empty reason field with concrete observations from the current text. Proximal known scams are reference examples only: compare concrete textual similarities and differences, but do not restate retrieval, exact-match, or embedding scores as your reason. If differences look like parody, quotation, warning, or other humorous/benign intent rather than credential theft, payment bait, phishing, or spam, lower the scam verdict accordingly and explain that difference.',
   });
-}
-
-function imageUrlFor(attachment: CachedMessage['attachments'][number]) {
-  return attachment.dataUrl ?? attachment.proxyUrl ?? attachment.url;
 }
 
 function proximalKnownScamImageParts(scams: ProximalKnownScam[]) {

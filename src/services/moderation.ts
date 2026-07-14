@@ -7,7 +7,11 @@ import {
   type Message,
 } from 'discord.js';
 import { logger } from '../logger.js';
-import type { GuildConfig, Policy } from '../domain/types.js';
+import type {
+  GuildConfig,
+  Policy,
+  PolicyApplicationResult,
+} from '../domain/types.js';
 import type { CaseStore } from './caseStore.js';
 import type { FileStorage } from '../storage/fileStorage.js';
 
@@ -17,9 +21,22 @@ const BAN_DELETE_SECONDS = 7 * 24 * 60 * 60;
 
 type RawComponent = { type: number; [key: string]: unknown };
 
-export function hasBypass(member: GuildMember, config: GuildConfig) {
-  if (member.id === member.guild.ownerId) return true;
-  if (config.moderatorUsers.includes(member.id)) return true;
+export function requireAppliedPolicy(result: PolicyApplicationResult) {
+  if (!result.applied) throw new Error(result.detail);
+  return result.detail;
+}
+
+export async function hasModerationBypass(
+  guild: Guild,
+  userId: string,
+  cachedMember: GuildMember | null,
+  config: GuildConfig,
+) {
+  if (userId === guild.ownerId || config.moderatorUsers.includes(userId))
+    return true;
+
+  const member = cachedMember ?? (await fetchCurrentMember(guild, userId));
+  if (!member) return false;
   if (member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   if (member.permissions.has(PermissionFlagsBits.Administrator)) return true;
   return member.roles.cache.some((role) =>
@@ -27,55 +44,131 @@ export function hasBypass(member: GuildMember, config: GuildConfig) {
   );
 }
 
-export async function applyPolicy(
-  member: GuildMember,
-  policy: Policy,
-  reason: string,
-) {
-  return applyPolicyForUser(member.guild, member.id, policy, reason);
-}
+type DiscordMutationLifecycle = {
+  onMutationStarted?: () => Promise<void>;
+};
 
 export async function applyPolicyForUser(
   guild: Guild,
   userId: string,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
+) {
+  const member = policyRequiresMember(policy)
+    ? await fetchCurrentMember(guild, userId)
+    : null;
+  return applyPolicyWithMember(
+    guild,
+    userId,
+    member,
+    policy,
+    reason,
+    lifecycle,
+  );
+}
+
+export async function applyPreventionPolicyForUser(
+  guild: Guild,
+  userId: string,
+  policy: Policy,
+  reason: string,
+) {
+  let member: GuildMember | null = null;
+  if (policyRequiresMember(policy)) {
+    try {
+      member = await fetchCurrentMember(guild, userId);
+    } catch (error) {
+      const detail = `${policy.actionType} could not be applied because member lookup failed: ${errorMessage(error)}`;
+      logger.warn('Failed to look up member for prevention policy', {
+        guildId: guild.id,
+        userId,
+        action: policy.actionType,
+        error: errorMessage(error),
+      });
+      return { applied: false, detail } as const;
+    }
+  }
+
+  return applyPolicyWithMember(guild, userId, member, policy, reason, {});
+}
+
+async function applyPolicyWithMember(
+  guild: Guild,
+  userId: string,
+  member: GuildMember | null,
+  policy: Policy,
+  reason: string,
+  lifecycle: DiscordMutationLifecycle,
 ) {
   switch (policy.actionType) {
     case 'log':
-      return 'log action applied';
+      return { applied: true, detail: 'log action applied' } as const;
     case 'timeout': {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'timeout could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'timeout could not be applied because the member is no longer in the guild',
+        } as const;
+      }
       const seconds = Math.min(
         policy.durationSeconds ?? 1_800,
         DISCORD_MAX_TIMEOUT_SECONDS,
       );
+      await lifecycle.onMutationStarted?.();
       await member.timeout(seconds * 1000, reason);
-      return 'timeout applied';
+      return { applied: true, detail: 'timeout applied' } as const;
     }
     case 'role': {
       if (!policy.roleId) throw new Error('Role policy missing role_id');
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'role could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'role could not be applied because the member is no longer in the guild',
+        } as const;
+      }
+      await lifecycle.onMutationStarted?.();
       await member.roles.add(policy.roleId, reason);
-      return 'role applied';
+      return { applied: true, detail: 'role applied' } as const;
     }
     case 'kick': {
-      const member = await guild.members.fetch(userId).catch(() => null);
-      if (!member)
-        return 'kick could not be applied because the member is no longer in the guild';
+      if (!member) {
+        return {
+          applied: false,
+          detail:
+            'kick could not be applied because the member is no longer in the guild',
+        } as const;
+      }
+      await lifecycle.onMutationStarted?.();
       await member.kick(moderationAuditReason(policy, reason));
-      return 'user kicked';
+      return { applied: true, detail: 'user kicked' } as const;
     }
     case 'ban':
+      await lifecycle.onMutationStarted?.();
       await guild.members.ban(userId, {
         reason: moderationAuditReason(policy, reason),
         deleteMessageSeconds: policy.deleteMessages ? BAN_DELETE_SECONDS : 0,
       });
-      return 'user banned';
+      return { applied: true, detail: 'user banned' } as const;
+  }
+}
+
+function policyRequiresMember(policy: Policy) {
+  return (
+    policy.actionType === 'timeout' ||
+    policy.actionType === 'role' ||
+    policy.actionType === 'kick'
+  );
+}
+
+async function fetchCurrentMember(guild: Guild, userId: string) {
+  try {
+    return await guild.members.fetch({ user: userId, force: true });
+  } catch (error) {
+    if (isUnknownMemberError(error)) return null;
+    throw error;
   }
 }
 
@@ -108,8 +201,15 @@ export async function revertPolicy(
   member: GuildMember,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
-  return revertPolicyForUser(member.guild, member.id, policy, reason);
+  return revertPolicyForUser(
+    member.guild,
+    member.id,
+    policy,
+    reason,
+    lifecycle,
+  );
 }
 
 export async function revertPolicyForUser(
@@ -117,24 +217,28 @@ export async function revertPolicyForUser(
   userId: string,
   policy: Policy,
   reason: string,
+  lifecycle: DiscordMutationLifecycle = {},
 ) {
   switch (policy.actionType) {
     case 'timeout': {
-      const member = await guild.members.fetch(userId).catch(() => null);
+      const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'timeout could not be removed because the member is no longer in the guild';
+      await lifecycle.onMutationStarted?.();
       await member.timeout(null, reason);
       return 'timeout removed';
     }
     case 'role': {
       if (!policy.roleId) return 'role policy had no role';
-      const member = await guild.members.fetch(userId).catch(() => null);
+      const member = await fetchCurrentMember(guild, userId);
       if (!member)
         return 'role could not be removed because the member is no longer in the guild';
+      await lifecycle.onMutationStarted?.();
       await member.roles.remove(policy.roleId, reason);
       return 'role removed';
     }
     case 'ban':
+      await lifecycle.onMutationStarted?.();
       await guild.members.unban(userId, reason);
       return 'user unbanned';
     case 'kick':
@@ -150,145 +254,142 @@ export async function deleteMessage(message: Message<true>) {
   return true;
 }
 
+type PunishmentDmContext = {
+  caseId: string;
+  reason: string;
+  auditReason?: string;
+  caseStore: CaseStore;
+  storage: FileStorage;
+};
+
 export async function applyPolicyWithBestEffortDm(input: {
   guild: Guild;
   userId: string;
   policy: Policy;
   reason: string;
-  dm: {
-    caseId: string;
-    reason: string;
-    auditReason?: string;
-    caseStore: CaseStore;
-    storage: FileStorage;
-  } | null;
+  dm: PunishmentDmContext | null;
+  onMutationStarted?: () => Promise<void>;
 }) {
-  if (input.dm) {
-    let dmSent = false;
-    try {
-      dmSent = await dmPunishedUser({
-        guild: input.guild,
-        userId: input.userId,
-        caseId: input.dm.caseId,
-        action: input.policy.actionType,
-        reason: input.dm.reason,
-        ...(input.dm.auditReason === undefined
-          ? {}
-          : { auditReason: input.dm.auditReason }),
-        caseStore: input.dm.caseStore,
-        storage: input.dm.storage,
-      });
-    } catch (error) {
-      logger.warn('Punishment DM attempt failed unexpectedly', {
-        guildId: input.guild.id,
-        userId: input.userId,
-        caseId: input.dm.caseId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    if (!dmSent) {
-      logger.info('Continuing punishment after DM delivery failure', {
-        guildId: input.guild.id,
-        userId: input.userId,
-        caseId: input.dm.caseId,
-      });
-    }
-  }
+  const memberRequired = policyRequiresMember(input.policy);
+  const optionalDmLookup =
+    input.dm && !memberRequired
+      ? await fetchOptionalDmMember(input.guild, input.userId)
+      : null;
+  const member = memberRequired
+    ? await fetchCurrentMember(input.guild, input.userId)
+    : (optionalDmLookup?.member ?? null);
 
-  return applyPolicyForUser(
+  const result = await applyPolicyWithMember(
     input.guild,
     input.userId,
+    member,
     input.policy,
     input.reason,
+    input,
   );
+  if (!result.applied || !input.dm) return result;
+
+  if (member) {
+    await dmPunishedUser({
+      member,
+      caseId: input.dm.caseId,
+      action: input.policy.actionType,
+      reason: input.dm.reason,
+      ...(input.dm.auditReason === undefined
+        ? {}
+        : { auditReason: input.dm.auditReason }),
+      caseStore: input.dm.caseStore,
+      storage: input.dm.storage,
+    });
+  } else {
+    const failure =
+      optionalDmLookup?.failure ??
+      'Cannot DM user because they are no longer in the guild';
+    logger.info('Skipped punishment DM because member lookup failed', {
+      guildId: input.guild.id,
+      userId: input.userId,
+      caseId: input.dm.caseId,
+      failure,
+    });
+    await recordDmFailure(input.dm, failure, []);
+  }
+
+  return result;
 }
 
-export async function dmPunishedUser(input: {
-  guild: Guild;
-  userId: string;
+async function fetchOptionalDmMember(guild: Guild, userId: string) {
+  try {
+    const member = await fetchCurrentMember(guild, userId);
+    return {
+      member,
+      failure: member
+        ? null
+        : 'Cannot DM user because they are no longer in the guild',
+    };
+  } catch (error) {
+    return {
+      member: null,
+      failure: `Cannot look up member for punishment DM: ${errorMessage(error)}`,
+    };
+  }
+}
+
+type PunishmentDmInput = {
+  member: GuildMember;
   caseId: string;
   action: string;
   reason: string;
   auditReason?: string;
   caseStore: CaseStore;
   storage: FileStorage;
-}) {
-  let member: GuildMember;
-  try {
-    member = await input.guild.members.fetch({
-      user: input.userId,
-      force: true,
-    });
-  } catch (error) {
-    const detail = isUnknownMemberError(error)
-      ? 'Cannot DM user because they are no longer in the guild'
-      : `Cannot fetch user for punishment DM: ${error instanceof Error ? error.message : String(error)}`;
-    const context = {
-      guildId: input.guild.id,
-      userId: input.userId,
-      error: detail,
-    };
-    if (isUnknownMemberError(error)) {
-      logger.info('Skipped punishment DM for user outside guild', context);
-    } else {
-      logger.warn('Failed to fetch punished user for DM', context);
-    }
-    await recordDmFailure(input, detail, []);
-    return false;
-  }
+};
 
-  const messages = await input.caseStore.listCaseMessages(input.caseId);
-  const attachments = await input.caseStore.listCaseAttachments(input.caseId);
-  const firstMessage = messages[0];
-  const files = [] as Array<{
-    filename: string;
-    attachment: AttachmentBuilder;
-  }>;
+export async function dmPunishedUser(input: PunishmentDmInput) {
   const omitted: string[] = [];
-
-  for (const attachment of attachments.slice(0, 8)) {
-    if (!attachment.storageKey) continue;
-    if (
-      !attachment.contentType?.startsWith('image/') ||
-      attachment.sizeBytes > 8 * 1024 * 1024
-    ) {
-      omitted.push(attachment.discordAttachmentId);
-      continue;
-    }
-    const filename = `SPOILER_${attachment.id}_${safeName(attachment.name ?? `${attachment.discordAttachmentId}.bin`)}`;
-    files.push({
-      filename,
-      attachment: new AttachmentBuilder(
-        input.storage.pathFor(attachment.storageKey),
-        { name: filename },
-      ),
-    });
-  }
-
   try {
-    await member.send({
+    const messages = await input.caseStore.listCaseMessages(input.caseId);
+    const attachments = await input.caseStore.listCaseAttachments(input.caseId);
+    const files: Array<{
+      filename: string;
+      attachment: AttachmentBuilder;
+    }> = [];
+
+    for (const attachment of attachments.slice(0, 8)) {
+      if (!attachment.storageKey) {
+        omitted.push(attachment.discordAttachmentId);
+        continue;
+      }
+      if (
+        !attachment.contentType?.startsWith('image/') ||
+        attachment.sizeBytes > 8 * 1024 * 1024
+      ) {
+        omitted.push(attachment.discordAttachmentId);
+        continue;
+      }
+      const filename = `SPOILER_${attachment.id}_${safeName(attachment.name ?? `${attachment.discordAttachmentId}.bin`)}`;
+      files.push({
+        filename,
+        attachment: new AttachmentBuilder(
+          input.storage.pathFor(attachment.storageKey),
+          { name: filename },
+        ),
+      });
+    }
+
+    await input.member.send({
       flags: COMPONENTS_V2,
       files: files.map((file) => file.attachment),
       components: punishmentDmComponents(
         input,
-        firstMessage?.content ?? '',
+        messages[0]?.content ?? '',
         files.map((file) => file.filename),
       ),
       allowedMentions: { parse: [] },
     });
-    await input.caseStore.addEvent(
-      input.caseId,
-      'dm_notified',
-      'bot',
-      null,
-      'Punishment DM sent',
-      { omitted },
-    );
-    return true;
   } catch (error) {
     logger.warn('Failed to DM punished user', {
-      guildId: input.guild.id,
-      userId: input.userId,
+      guildId: input.member.guild.id,
+      userId: input.member.id,
       error: error instanceof Error ? error.message : String(error),
     });
     await recordDmFailure(
@@ -298,6 +399,23 @@ export async function dmPunishedUser(input: {
     );
     return false;
   }
+
+  try {
+    await input.caseStore.addEvent(
+      input.caseId,
+      'dm_notified',
+      'bot',
+      null,
+      'Punishment DM sent',
+      { omitted },
+    );
+  } catch (error) {
+    logger.warn('Failed to record punishment DM success', {
+      caseId: input.caseId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return true;
 }
 
 function isUnknownMemberError(error: unknown) {
@@ -309,24 +427,36 @@ function isUnknownMemberError(error: unknown) {
   );
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function recordDmFailure(
-  input: Pick<Parameters<typeof dmPunishedUser>[0], 'caseId' | 'caseStore'>,
+  input: Pick<PunishmentDmContext, 'caseId' | 'caseStore'>,
   error: string,
   omitted: string[],
 ) {
-  await input.caseStore.addEvent(
-    input.caseId,
-    'failed',
-    'bot',
-    null,
-    'Punishment DM failed',
-    { error, omitted },
-  );
+  try {
+    await input.caseStore.addEvent(
+      input.caseId,
+      'failed',
+      'bot',
+      null,
+      'Punishment DM failed',
+      { error, omitted },
+    );
+  } catch (eventError) {
+    logger.warn('Failed to record punishment DM failure', {
+      caseId: input.caseId,
+      error:
+        eventError instanceof Error ? eventError.message : String(eventError),
+    });
+  }
 }
 
 function punishmentDmComponents(
   input: {
-    guild: Guild;
+    member: GuildMember;
     caseId: string;
     action: string;
     reason: string;
@@ -337,7 +467,7 @@ function punishmentDmComponents(
 ): RawComponent[] {
   const components: RawComponent[] = [
     text(
-      `## 🍯 Honeybot moderation notice\n-# Server: **${input.guild.name}** · Case \`${input.caseId}\``,
+      `## 🍯 Honeybot moderation notice\n-# Server: **${input.member.guild.name}** · Case \`${input.caseId}\``,
     ),
     separator(),
     text(

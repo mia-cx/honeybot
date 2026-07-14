@@ -55,18 +55,19 @@ Fresh guild defaults:
 
 Case statuses:
 
-- `pending_review`
-- `punished`
-- `dismissed`
-- `reverted`
+- stable review states: `pending_review`, `punished`, `dismissed`
+- claimed operation states: `punishment_pending`, `dismissal_pending`, `punishment_revert_pending`, `dismissal_revert_pending`
+- reconciliation states: `punishment_uncertain`, `dismissal_uncertain`, `punishment_revert_uncertain`, `dismissal_revert_uncertain`
 
 When a case is dismissed or reverted, Honeybot deletes the case row, case messages, case attachments, temporary files, case evidence rows, and pending corpus rows copied from that case. Append-only audit events remain.
 
 Punished cases retain raw evidence indefinitely by default for audit and corpus work. `retention:case_days` defaults to 180 days for non-dismissed case metadata/review lifecycle compaction, without deleting raw punished-case evidence by default.
 
-If `punishment:dm_notify` is true, Honeybot DMs locally punished users with the server name, decision/action, configured reason, concise evidence reason, triggering message content when available, and relevant evidence attachments as real Discord file attachments loaded from Honeybot's stored files. It must not send bot-hosted/CDN evidence links. DM failure or attachment-size limits do not block punishment; Honeybot records notification success/failure and omitted attachments in the audit trail. There is no local appeal workflow in MVP.
+If `punishment:dm_notify` is true, Honeybot DMs users only after case evidence has been collected, an automatic or moderator punishment decision has been made, and that punishment has been confirmed as applied. Prevention actions do not send punishment DMs. Moderator punishment remains disabled and is rejected server-side until analysis is recorded. The DM includes the server name, decision/action, configured reason, concise evidence reason, triggering message content when available, and relevant evidence attachments as real Discord file attachments loaded from Honeybot's stored files. It must not send bot-hosted/CDN evidence links. DM failure or attachment-size limits do not block punishment; Honeybot records notification success/failure and omitted attachments in the audit trail. There is no local appeal workflow in MVP.
 
 `reverted` means best-effort undo: remove active timeouts, remove punishment roles, and unban banned users. Kicks and deleted Discord messages cannot be undone, so Honeybot records them as irreversible in the audit trail. Revert applies to both prevention and punishment actions.
+
+Case operations are retryable only while failure is known to precede a Discord mutation. Honeybot durably records the dispatch boundary immediately before calling Discord: startup restores interrupted, undispatched claims to their prior stable state, while interrupted dispatched operations enter their operation-specific reconciliation state. A failed Discord response or post-dispatch local persistence failure also requires reconciliation. Moderators must verify Discord's actual user state and explicitly reconcile the case; Honeybot never automatically replays an ambiguous side effect.
 
 If a prevention policy action is `kick` or `ban`, Honeybot skips paid embeddings/classifier analysis by default. It preserves available evidence, posts/updates the moderation-channel case, and lets moderators audit/revert if needed.
 

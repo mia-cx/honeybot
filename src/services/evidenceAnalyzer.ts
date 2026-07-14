@@ -8,6 +8,7 @@ import type {
   GuildConfig,
 } from '../domain/types.js';
 import type { CachedMessage } from '../types.js';
+import { isModelImageAttachment } from '../types.js';
 
 export type AnalysisProgress = {
   phase: 'matches' | 'embeddings' | 'classifier';
@@ -160,9 +161,7 @@ export class EvidenceAnalyzer {
       providerConfigured: this.embedder !== undefined,
       textAttempted: cached.normalizedContent.length > 0,
       textSucceeded: false,
-      imageAttempted: cached.attachments.some((attachment) =>
-        attachment.contentType?.startsWith('image/'),
-      ),
+      imageAttempted: cached.attachments.some(isModelImageAttachment),
       imageSucceeded: 0,
     };
     if (!this.embedder)
@@ -175,7 +174,7 @@ export class EvidenceAnalyzer {
     diagnostics.textSucceeded = textEmbedding !== null;
     const imageEmbeddings = await Promise.all(
       cached.attachments
-        .filter((attachment) => attachment.contentType?.startsWith('image/'))
+        .filter(isModelImageAttachment)
         .map((attachment) =>
           this.embedder!.embedImage(cached.guildId, attachment).catch(
             () => null,

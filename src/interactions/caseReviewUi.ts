@@ -4,7 +4,11 @@ import {
   type MessageCreateOptions,
   type MessageEditOptions,
 } from 'discord.js';
-import type { AnalysisResult, Policy } from '../domain/types.js';
+import type {
+  AnalysisResult,
+  Policy,
+  PolicyApplicationOutcome,
+} from '../domain/types.js';
 import type { FileStorage } from '../storage/fileStorage.js';
 
 const COMPONENTS_V2 = 1 << 15;
@@ -24,10 +28,10 @@ export type CaseReviewInput = {
   storage: FileStorage;
   prevention: Policy;
   punishment: Policy;
-  preventionApplied: boolean;
-  preventionAppliedAtMs: number;
+  preventionOutcome: PolicyApplicationOutcome;
   triggerMessageDeleted: boolean;
   analysis: AnalysisResult | null;
+  punishmentReady: boolean;
 };
 
 type RawComponent = { type: number; [key: string]: unknown };
@@ -106,7 +110,11 @@ export function caseReviewResolutionUpdate(
 
 export function caseReviewRevertUpdate(
   existingComponents: readonly unknown[],
-  input: { caseId: string; punishment: Policy },
+  input: {
+    caseId: string;
+    punishment: Policy;
+    punishmentReady: boolean;
+  },
 ): InteractionUpdateOptions {
   return {
     components: [
@@ -115,10 +123,41 @@ export function caseReviewRevertUpdate(
         caseActionButtons({
           caseId: input.caseId,
           punishment: input.punishment,
+          punishmentReady: input.punishmentReady,
         }),
       ),
     ],
   } as InteractionUpdateOptions;
+}
+
+export function caseReviewUncertainUpdate(
+  existingComponents: readonly unknown[],
+  input: { caseId: string },
+): InteractionUpdateOptions {
+  return {
+    components: uncertainReviewComponents(existingComponents, input.caseId),
+  } as InteractionUpdateOptions;
+}
+
+export function caseReviewUncertainMessage(input: {
+  caseId: string;
+}): MessageCreateOptions {
+  return {
+    flags: COMPONENTS_V2,
+    components: uncertainReviewComponents([], input.caseId),
+    allowedMentions: { parse: [] },
+  } as MessageCreateOptions;
+}
+
+function uncertainReviewComponents(
+  existingComponents: readonly unknown[],
+  caseId: string,
+) {
+  return [
+    ...withoutResolutionOrActions(existingComponents),
+    uncertainOperationContainer(),
+    buttonRow(reconciliationButtons(caseId)),
+  ];
 }
 
 function caseReviewComponents(
@@ -152,7 +191,14 @@ function caseReviewComponents(
       text(['## Prevention', preventionSummary(input)].join('\n')),
     ]),
     signalsContainer(input),
-    buttonRow(caseActionButtons(input)),
+    buttonRow(
+      caseActionButtons({
+        caseId: input.caseId,
+        punishment: input.punishment,
+        status: input.status,
+        punishmentReady: input.punishmentReady,
+      }),
+    ),
   ];
 }
 
@@ -193,7 +239,11 @@ function caseActionButtons(input: {
   caseId: string;
   punishment: Policy;
   status?: string;
+  punishmentReady: boolean;
 }) {
+  if (input.status && isUncertainStatus(input.status))
+    return reconciliationButtons(input.caseId);
+
   if (input.status && isPunishedStatus(input.status))
     return resolvedActionButtons(
       input.caseId,
@@ -207,8 +257,20 @@ function caseActionButtons(input: {
       `case:punish:${input.caseId}`,
       punishmentButtonLabel(input.punishment),
       4,
+      !input.punishmentReady,
     ),
     button(`case:dismiss:${input.caseId}`, 'Dismiss case', 2),
+  ];
+}
+
+function reconciliationButtons(caseId: string) {
+  return [
+    button(`case:reconcile-applied:${caseId}`, 'Confirm action applied', 3),
+    button(
+      `case:reconcile-not-applied:${caseId}`,
+      'Confirm action not applied',
+      2,
+    ),
   ];
 }
 
@@ -228,6 +290,21 @@ function resolvedActionButtons(
       !canRevert,
     ),
   ];
+}
+
+function uncertainOperationContainer(): RawComponent {
+  return container([
+    text(
+      [
+        '# ⚠️ Reconciliation required',
+        '-# The previous case action may already have reached Discord.',
+      ].join('\n'),
+    ),
+    separator(),
+    text(
+      'Verify the current Discord user state, then record whether the action was applied.',
+    ),
+  ]);
 }
 
 function resolutionContainer(input: {
@@ -272,7 +349,7 @@ function resolutionTitle(input: {
 function withoutResolutionOrActions(existingComponents: readonly unknown[]) {
   return existingComponents
     .map((component) => cloneComponent(component))
-    .filter((component) => !isResolutionContainer(component))
+    .filter((component) => !isCaseStateContainer(component))
     .filter((component) => component.type !== 1);
 }
 
@@ -281,14 +358,14 @@ function resolutionAndActions(existingComponents: readonly unknown[]) {
     cloneComponent(component),
   );
   const resolutionIndex = cloned.findIndex((component) =>
-    isResolutionContainer(component),
+    isCaseStateContainer(component),
   );
   if (resolutionIndex === -1) return [];
 
   return cloned
     .slice(resolutionIndex)
     .filter(
-      (component) => isResolutionContainer(component) || component.type === 1,
+      (component) => isCaseStateContainer(component) || component.type === 1,
     );
 }
 
@@ -303,13 +380,14 @@ function cloneComponent(component: unknown): RawComponent {
   return component as RawComponent;
 }
 
-function isResolutionContainer(component: RawComponent) {
+function isCaseStateContainer(component: RawComponent) {
   if (component.type !== 17 || !Array.isArray(component.components))
     return false;
   return component.components.some(
     (child) =>
       typeof child?.content === 'string' &&
-      child.content.includes('-# Resolved by <@'),
+      (child.content.includes('-# Resolved by <@') ||
+        child.content.includes('-# The previous case action may already')),
   );
 }
 
@@ -321,11 +399,13 @@ function preventionSummary(input: CaseReviewInput) {
   else parts.push('Original message was left in place');
 
   parts.push(
-    policyAppliedSummary(
-      input.prevention,
-      input.userId,
-      input.preventionAppliedAtMs,
-    ),
+    input.preventionOutcome.applied
+      ? policyAppliedSummary(
+          input.prevention,
+          input.userId,
+          input.preventionOutcome.appliedAtMs,
+        )
+      : `prevention was not applied: ${input.preventionOutcome.detail}`,
   );
   return sentence(parts);
 }
@@ -524,6 +604,10 @@ function reversiblePolicy(policy: Policy) {
 
 function isPunishedStatus(status: string) {
   return status.toLowerCase().includes('punished');
+}
+
+function isUncertainStatus(status: string) {
+  return status.endsWith('_uncertain');
 }
 
 function durationLabel(seconds: number) {
