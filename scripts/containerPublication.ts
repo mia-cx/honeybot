@@ -379,13 +379,11 @@ function extractLabels(
   value: unknown,
   reference: string,
 ): Record<string, string> {
-  if (
-    !isRecord(value) ||
-    !isRecord(value.config) ||
-    !isRecord(value.config.Labels)
-  ) {
-    throw new Error(`Image config labels missing for ${reference}`);
+  if (!isRecord(value) || !isRecord(value.config)) {
+    throw new Error(`Image config missing for ${reference}`);
   }
+  if (!isRecord(value.config.Labels)) return {};
+
   const labels: Record<string, string> = {};
   for (const [key, label] of Object.entries(value.config.Labels)) {
     if (typeof label === 'string') labels[key] = label;

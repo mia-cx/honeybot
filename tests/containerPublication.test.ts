@@ -87,6 +87,25 @@ describe('registry publication adapter', () => {
       ),
     ).toThrow('same-registry operation rejected');
   });
+
+  it('observes a structurally valid image with no OCI labels', () => {
+    const adapter = new DockerBuildxAdapter(() =>
+      JSON.stringify({
+        manifest: { digest },
+        image: {
+          'linux/amd64': { config: {} },
+        },
+      }),
+    );
+
+    expect(
+      adapter.inspect('docker.io/miacx/honeybot:v1.0.1'),
+    ).toEqual({
+      reference: 'docker.io/miacx/honeybot:v1.0.1',
+      digest,
+      labels: {},
+    });
+  });
 });
 
 describe('immutable container publication', () => {
