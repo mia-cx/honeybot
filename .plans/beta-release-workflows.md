@@ -103,7 +103,7 @@ The existing `v1.0.1` registry references predate this invariant and have been m
 
 Require explicit `version`, full `ref`, `expectedLegacyDigest`, and `expectedLegacyRevision` inputs. Before writes, verify the package version at `ref`; require `v${version}` to be absent, or for its peeled commit target to equal `ref` only when the target registry identity is already complete; require every existing exact reference in both registries to be either the explicitly expected untagged legacy identity or the target identity; and require full-SHA references to be absent or match the target. Any unlisted digest, label, or Git-tag state fails closed.
 
-Build the exact target ref once only when no target canonical digest exists. Preserve that digest across partial retries, replace only the explicitly authorized untagged legacy exact references, create the full-SHA references in both registries, and verify all target digests and OCI identity labels. Create and push the immutable Git tag only after registry verification; a rerun may complete valid partial target state without rebuilding. After the tag exists, ordinary stable reconciliation repairs moving aliases. This migration path must not weaken the normal publisher's rule that immutable conflicts are never overwritten.
+Build the exact target ref once only when no target canonical digest exists. Preserve that digest across partial retries, replace only the explicitly authorized untagged legacy exact references, create the full-SHA references in both registries, and verify all target digests and OCI identity labels. Configure the shared repository-local automation identity before creating the annotated immutable Git tag, and create/push that tag only after registry verification; a rerun may complete valid partial target state without rebuilding. After the tag exists, ordinary stable reconciliation repairs moving aliases. This migration path must not weaken the normal publisher's rule that immutable conflicts are never overwritten.
 
 ## Target workflow architecture
 
@@ -161,12 +161,12 @@ Generate a short-lived installation token from a dedicated GitHub App with only 
 On each push to `main`:
 
 1. Continue running `changesets/action` with the GitHub App token so `changeset-release/main` is created or updated from pending fragments and receives normal CI.
-2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`; set up the pinned pnpm and Node versions; run `pnpm install --frozen-lockfile`; then set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`. Jobs share no filesystem or dependency state, so this setup is required independently of the version-PR job.
+2. In one stable-orchestration job, check out full first-parent history and tags with `fetch-depth: 0`; configure repository-local Git identity as `github-actions[bot]` / `41898282+github-actions[bot]@users.noreply.github.com`; verify both values; set up the pinned pnpm and Node versions; run `pnpm install --frozen-lockfile`; then set up QEMU/Buildx, authenticate both registries, and invoke `scripts/reconcileStableReleases.ts`. Jobs share no filesystem, dependency, or Git-identity state, so this setup is required independently of the version-PR job and must complete before any tag command.
 3. The script finds the latest complete stable release, then scans first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. It validates each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; it does not infer the release solely from the current push's `before`/`sha` pair.
 4. The script reconciles every candidate oldest-first in-process. For each exact release SHA it:
    - requires a valid increasing stable semantic version;
    - fetches and preflights `vX.Y.Z` through the shared Git adapter, failing if its peeled `^{commit}` target differs and accepting annotated or lightweight tags that peel to the release SHA;
-   - when absent, creates a temporary detached worktree at the release SHA, runs a frozen dependency install inside that worktree followed by `pnpm changeset tag`, then verifies the annotated tag's peeled commit target and pushes it so a later batched commit cannot become the target;
+   - when absent, creates a temporary detached worktree at the release SHA, applies and verifies the shared repository-local automation identity for that worktree, runs a frozen dependency install followed by `pnpm changeset tag`, then verifies the annotated tag's peeled commit target and pushes it so a later batched commit cannot become the target;
    - calls the shared `containerPublication` module to reconcile both registries from absent, partial-valid, or complete state;
    - requires the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
 5. After every immutable candidate is complete, derive the desired stable alias map across all complete stable releases: each minor alias points to the newest release in that minor line, each major alias to the newest release in that major line, and `latest` to the newest release globally. Reconcile the entire map from canonical digests without rebuilding, repairing aliases for every recovered release line rather than only the newest release.
@@ -178,7 +178,7 @@ A manual `workflow_dispatch` recovery path runs the same state reconciler for an
 
 ### Shared Git tag adapter
 
-Keep tag identity behind one narrow adapter used by beta reconciliation, stable reconciliation, and guarded legacy adoption. `resolveTagCommit(tag)` fetches the exact tag ref and returns the full commit SHA from `git rev-parse --verify "refs/tags/${tag}^{commit}"`; an absent ref returns an explicit absent state, while a tag that cannot peel to a commit fails closed. Tag-object SHAs are never release identities, and every post-creation check repeats the same peeled-target comparison.
+Keep tag identity and creation prerequisites behind one narrow adapter used by beta reconciliation, stable reconciliation, and guarded legacy adoption. `resolveTagCommit(tag)` fetches the exact tag ref and returns the full commit SHA from `git rev-parse --verify "refs/tags/${tag}^{commit}"`; an absent ref returns an explicit absent state, while a tag that cannot peel to a commit fails closed. `configureAutomationIdentity(worktree)` sets repository-local `user.name=github-actions[bot]` and `user.email=41898282+github-actions[bot]@users.noreply.github.com`, reads both values back, and fails before tag or registry writes if configuration is unavailable. Tag-object SHAs are never release identities, every annotated-tag command runs only after that identity precondition, and every post-creation check repeats the same peeled-target comparison.
 
 ### `scripts/reconcileBetaReleases.ts`
 
@@ -224,6 +224,7 @@ Cover:
 - Stable aliases include `latest`, major, minor, exact, and SHA tags.
 - Short or malformed commit SHAs are rejected, and SHA aliases embed the full 40-character `ref`.
 - Prerelease versions are rejected for stable publishing.
+- A clean-runner Git fixture with no global identity configures the deterministic repository-local automation identity before annotated tag creation; configuration failure aborts before writes and no global Git config is required or modified.
 - Lightweight and Changesets-created annotated tags that peel to the expected commit are accepted; raw annotated-tag object SHAs are never compared as release identities, and tags that peel elsewhere or not to a commit are rejected.
 - Stable Git tag/package mismatches are rejected.
 - Fully absent immutable references request one build.
@@ -325,7 +326,7 @@ Requirements:
 - A short-lived GitHub App installation token lets Changesets-created/updated release PRs run required CI automatically.
 - Stable-version detection scans first-parent history from the latest complete stable release rather than trusting one push event boundary or Git tag presence.
 - Every stable package transition is tied to and published from its exact release-PR merge commit, even when a push contains later commits.
-- `changeset tag` creates `vX.Y.Z` for this single-package private repository from a checkout of that exact release SHA.
+- A deterministic repository-local Git identity is configured and verified on a clean runner before `changeset tag` creates `vX.Y.Z` for this single-package private repository from a checkout of the exact release SHA.
 - One typed process performs the oldest-first tag/publication transactions; it does not attempt to call a reusable workflow from a dynamic loop.
 - Non-canceling serialization plus the self-healing scan recovers version bumps whose original workflow event never ran and tagged releases whose registry publication was interrupted.
 - Reruns reconcile partial registry state, are idempotent, and never move an existing tag.
@@ -338,6 +339,7 @@ Verification:
 - Simulate a skipped/canceled intermediate push event and confirm the next run finds every stable transition since the latest complete release.
 - Simulate failure immediately after Git-tag creation and confirm the next automatic run completes both registries.
 - Confirm multiple incomplete releases, whether tagged or untagged, are processed oldest-first.
+- Start from a clean runner with no global `user.name`/`user.email`; confirm repository-local automation identity setup succeeds before `pnpm changeset tag`, and an identity-setup failure prevents tag and registry writes.
 - Confirm an existing Changesets-created annotated tag is accepted when its peeled `^{commit}` target equals the release SHA, while a tag whose peeled target or immutable registry identity mismatches fails before image publication.
 - Confirm a Changesets release PR created or updated with the App token starts CI without `action_required`.
 - Recover candidates across minor and major boundaries and confirm every minor/major alias is repaired while `latest` points only to the newest complete release.
