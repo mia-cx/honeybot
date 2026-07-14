@@ -1253,6 +1253,36 @@ describe('FairQueue', () => {
     release();
     await blocked;
   });
+
+  it('expires limiter state for idle queue groups', async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new FairQueue({
+        name: 'expiring-groups',
+        globalLimit: 100,
+        perGroupLimit: 10,
+        windowMs: 100,
+      });
+      await Promise.all(
+        Array.from({ length: 50 }, (_, index) =>
+          queue.enqueue(`case-${index}`, async () => undefined),
+        ),
+      );
+      const state = queue as unknown as {
+        groupLimiters: Map<string, unknown>;
+        groupLimiterCleanupTimers: Map<string, NodeJS.Timeout>;
+      };
+      expect(state.groupLimiters.size).toBe(50);
+      expect(state.groupLimiterCleanupTimers.size).toBe(50);
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      expect(state.groupLimiters.size).toBe(0);
+      expect(state.groupLimiterCleanupTimers.size).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('ModelStore', () => {
@@ -2030,6 +2060,316 @@ describe('CaseStore', () => {
           row.caseId === secondCase.id && row.processingState === 'stored',
       ),
     ).toHaveLength(MAX_ATTACHMENTS_PER_CASE);
+    database.sqlite.close();
+  });
+
+  it('keeps globally backlogged attachments pending until queue capacity frees', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const store = new CaseStore(database.db, storage);
+    const caseRows = await Promise.all(
+      ['first-user', 'second-user', 'third-user'].map((userId) =>
+        store.getOrCreateCase(
+          {
+            guildId: 'guild',
+            userId,
+            triggerType: 'honeypot',
+            reason: 'triggered',
+          },
+          { reusePending: false },
+        ),
+      ),
+    );
+    const messages = await Promise.all(
+      caseRows.flatMap((caseRow) =>
+        Array.from({ length: 4 }, (_, messageIndex) =>
+          store.attachMessage(
+            caseRow.id,
+            fakeMessage({
+              id: `${caseRow.id}-${messageIndex}`,
+              attachments: Array.from({ length: 8 }, (_, attachmentIndex) =>
+                attachment({
+                  id: `${caseRow.id}-${messageIndex}-${attachmentIndex}`,
+                }),
+              ),
+            }),
+          ),
+        ),
+      ),
+    );
+
+    let backlogProcessingComplete = false;
+    const backlogProcessing = Promise.all(
+      messages.slice(8).map((message) => message.processedAttachments),
+    ).then((attachments) => {
+      backlogProcessingComplete = true;
+      return attachments;
+    });
+    await Promise.resolve();
+
+    const backlogged = await database.db.select().from(caseAttachments);
+    expect(backlogged).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+    expect(
+      backlogged.filter((row) => row.processingState === 'failed'),
+    ).toHaveLength(0);
+    expect(
+      backlogged.filter((row) => row.processingState === 'pending'),
+    ).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+    expect(backlogProcessingComplete).toBe(false);
+
+    releaseStorage();
+    const [, processedBacklog] = await Promise.all([
+      Promise.all(
+        messages.slice(0, 8).map((message) => message.processedAttachments),
+      ),
+      backlogProcessing,
+    ]);
+    expect(processedBacklog.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          processingState: 'stored',
+          storageKey: 'guild/case/file.png',
+        }),
+      ]),
+    );
+    await vi.waitFor(
+      async () => {
+        const rows = await database.db.select().from(caseAttachments);
+        expect(
+          rows.filter((row) => row.processingState === 'stored'),
+        ).toHaveLength(MAX_ATTACHMENTS_PER_CASE * 3);
+      },
+      { timeout: 2_000 },
+    );
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(
+      MAX_ATTACHMENTS_PER_CASE * 3,
+    );
+    database.sqlite.close();
+  });
+
+  it('retries a durable attachment backlog after a transient pump failure', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    const queue = new FairQueue({
+      name: 'attachment-retry-test',
+      globalLimit: Number.MAX_SAFE_INTEGER,
+      perGroupLimit: Number.MAX_SAFE_INTEGER,
+      windowMs: 1_000,
+      maxPendingGlobal: 1,
+      maxPendingPerGroup: 1,
+      logFailures: false,
+    });
+    const store = new CaseStore(database.db, storage, undefined, queue);
+    const [firstCase, secondCase] = await Promise.all([
+      store.getOrCreateCase(
+        {
+          guildId: 'guild',
+          userId: 'first-user',
+          triggerType: 'honeypot',
+          reason: 'triggered',
+        },
+        { reusePending: false },
+      ),
+      store.getOrCreateCase(
+        {
+          guildId: 'guild',
+          userId: 'second-user',
+          triggerType: 'honeypot',
+          reason: 'triggered',
+        },
+        { reusePending: false },
+      ),
+    ]);
+    const first = await store.attachMessage(
+      firstCase.id,
+      fakeMessage({ id: 'first', attachments: [attachment({ id: 'first' })] }),
+    );
+    const second = await store.attachMessage(
+      secondCase.id,
+      fakeMessage({
+        id: 'second',
+        attachments: [attachment({ id: 'second' })],
+      }),
+    );
+    let secondComplete = false;
+    const secondProcessing = second.processedAttachments.then((attachments) => {
+      secondComplete = true;
+      return attachments;
+    });
+    const selectSpy = vi.spyOn(database.db, 'select');
+    selectSpy.mockImplementationOnce(() => {
+      throw new Error('database temporarily unavailable');
+    });
+
+    releaseStorage();
+    await first.processedAttachments;
+    expect(secondComplete).toBe(false);
+    await expect(secondProcessing).resolves.toEqual([
+      expect.objectContaining({ processingState: 'stored' }),
+    ]);
+    expect(selectSpy).toHaveBeenCalled();
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(2);
+    database.sqlite.close();
+  });
+
+  it.each(['stored', 'failed'] as const)(
+    'waits for a durable %s attachment state before completing processing',
+    async (terminalState) => {
+      const database = testDatabase();
+      let releaseStorage!: () => void;
+      const storageGate = new Promise<void>((resolve) => {
+        releaseStorage = resolve;
+      });
+      const storage = fakeStorage();
+      storage.saveFromUrl.mockImplementation(async () => {
+        await storageGate;
+        if (terminalState === 'failed') throw new Error('download failed');
+        return {
+          storageKey: 'guild/case/file.png',
+          sha256: 'sha256',
+          sizeBytes: 456,
+          path: '/tmp/guild/case/file.png',
+          contentType: 'image/png',
+          fileName: 'file.png',
+          normalized: false,
+        };
+      });
+      const store = new CaseStore(database.db, storage);
+      const caseRow = await store.getOrCreateCase({
+        guildId: 'guild',
+        userId: `${terminalState}-user`,
+        triggerType: 'honeypot',
+        reason: 'triggered',
+      });
+      const attached = await store.attachMessage(
+        caseRow.id,
+        fakeMessage({
+          id: `${terminalState}-message`,
+          attachments: [attachment({ id: `${terminalState}-attachment` })],
+        }),
+      );
+      let processingComplete = false;
+      const processing = attached.processedAttachments.then((attachments) => {
+        processingComplete = true;
+        return attachments;
+      });
+      const updateSpy = vi.spyOn(database.db, 'update');
+      const transactionSpy = vi.spyOn(database.db, 'transaction');
+      if (terminalState === 'failed') {
+        transactionSpy.mockImplementationOnce(() => {
+          throw new Error('database temporarily unavailable');
+        });
+      } else {
+        updateSpy.mockImplementationOnce(() => {
+          throw new Error('database temporarily unavailable');
+        });
+      }
+
+      releaseStorage();
+      await vi.waitFor(() => {
+        const persistenceSpy =
+          terminalState === 'failed' ? transactionSpy : updateSpy;
+        expect(persistenceSpy).toHaveBeenCalled();
+      });
+      expect(processingComplete).toBe(false);
+      await expect(processing).resolves.toEqual([
+        expect.objectContaining({ processingState: terminalState }),
+      ]);
+      expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+      if (terminalState === 'stored') {
+        expect(storage.remove).not.toHaveBeenCalled();
+      } else {
+        const failureEvent = await database.db
+          .select()
+          .from(caseEvents)
+          .where(eq(caseEvents.eventType, 'attachment_storage_failed'))
+          .get();
+        expect(JSON.parse(failureEvent?.metadataJson ?? '{}')).toMatchObject({
+          error: 'download failed',
+        });
+      }
+      database.sqlite.close();
+    },
+  );
+
+  it('cleans stored files before cancelling deleted attachment processing', async () => {
+    const database = testDatabase();
+    let releaseStorage!: () => void;
+    const storageGate = new Promise<void>((resolve) => {
+      releaseStorage = resolve;
+    });
+    const storage = fakeStorage();
+    storage.saveFromUrl.mockImplementation(async () => {
+      await storageGate;
+      return {
+        storageKey: 'guild/case/file.png',
+        sha256: 'sha256',
+        sizeBytes: 456,
+        path: '/tmp/guild/case/file.png',
+        contentType: 'image/png',
+        fileName: 'file.png',
+        normalized: false,
+      };
+    });
+    storage.remove.mockRejectedValueOnce(new Error('storage unavailable'));
+    const store = new CaseStore(database.db, storage);
+    const caseRow = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'deleted-attachment-user',
+      triggerType: 'honeypot',
+      reason: 'triggered',
+    });
+    const attached = await store.attachMessage(
+      caseRow.id,
+      fakeMessage({
+        id: 'deleted-attachment-message',
+        attachments: [attachment({ id: 'deleted-attachment' })],
+      }),
+    );
+    await database.db
+      .delete(caseAttachments)
+      .where(eq(caseAttachments.caseId, caseRow.id));
+    const completion = expect(attached.processedAttachments).rejects.toThrow(
+      'Attachment was removed before storage completed',
+    );
+
+    releaseStorage();
+    await completion;
+    expect(storage.saveFromUrl).toHaveBeenCalledOnce();
+    expect(storage.remove).toHaveBeenCalledTimes(2);
+    expect(storage.remove).toHaveBeenCalledWith('guild/case/file.png');
     database.sqlite.close();
   });
 

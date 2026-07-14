@@ -24,6 +24,10 @@ export class FairQueue {
   private readonly groupOrder: string[] = [];
   private readonly globalLimiter: RollingLimiter;
   private readonly groupLimiters = new Map<string, RollingLimiter>();
+  private readonly groupLimiterCleanupTimers = new Map<
+    string,
+    NodeJS.Timeout
+  >();
   private readonly groupOutstanding = new Map<string, number>();
   private globalOutstanding = 0;
   private running = false;
@@ -36,13 +40,19 @@ export class FairQueue {
   }
 
   enqueue<T>(groupKey: string, run: () => Promise<T>): Promise<T> {
-    if (!this.hasCapacity(groupKey)) {
-      return Promise.reject(
+    return (
+      this.tryEnqueue(groupKey, run) ??
+      Promise.reject(
         new QueueCapacityError(
           `${this.options.name} queue capacity exceeded for group ${groupKey}`,
         ),
-      );
-    }
+      )
+    );
+  }
+
+  tryEnqueue<T>(groupKey: string, run: () => Promise<T>): Promise<T> | null {
+    if (!this.hasCapacity(groupKey)) return null;
+
     this.reserveCapacity(groupKey);
     return new Promise<T>((resolve, reject) => {
       const queue = this.groupQueues.get(groupKey) ?? [];
@@ -131,6 +141,7 @@ export class FairQueue {
   }
 
   private reserveCapacity(groupKey: string) {
+    this.cancelGroupLimiterCleanup(groupKey);
     this.globalOutstanding += 1;
     this.groupOutstanding.set(
       groupKey,
@@ -142,7 +153,28 @@ export class FairQueue {
     this.globalOutstanding -= 1;
     const remaining = (this.groupOutstanding.get(groupKey) ?? 1) - 1;
     if (remaining > 0) this.groupOutstanding.set(groupKey, remaining);
-    else this.groupOutstanding.delete(groupKey);
+    else {
+      this.groupOutstanding.delete(groupKey);
+      this.scheduleGroupLimiterCleanup(groupKey);
+    }
+  }
+
+  private cancelGroupLimiterCleanup(groupKey: string) {
+    const timer = this.groupLimiterCleanupTimers.get(groupKey);
+    if (!timer) return;
+    clearTimeout(timer);
+    this.groupLimiterCleanupTimers.delete(groupKey);
+  }
+
+  private scheduleGroupLimiterCleanup(groupKey: string) {
+    this.cancelGroupLimiterCleanup(groupKey);
+    const timer = setTimeout(() => {
+      this.groupLimiterCleanupTimers.delete(groupKey);
+      if (!this.groupOutstanding.has(groupKey))
+        this.groupLimiters.delete(groupKey);
+    }, this.options.windowMs);
+    timer.unref();
+    this.groupLimiterCleanupTimers.set(groupKey, timer);
   }
 }
 

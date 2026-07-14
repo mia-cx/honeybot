@@ -1,6 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
-import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import {
+  and,
+  desc,
+  eq,
+  inArray,
+  isNotNull,
+  isNull,
+  notInArray,
+} from 'drizzle-orm';
 import type { Db } from '../db/database.js';
 import {
   caseAttachments,
@@ -31,6 +39,7 @@ import {
   MAX_ATTACHMENTS_PER_CASE,
   MAX_ATTACHMENTS_PER_MESSAGE,
   type FileStorage,
+  type StoredFile,
 } from '../storage/fileStorage.js';
 import type { Message } from 'discord.js';
 import { FairQueue } from '../queues/fairQueue.js';
@@ -42,12 +51,15 @@ const caseId = customAlphabet(
   16,
 );
 
+const MAX_QUEUED_ATTACHMENTS_GLOBAL = MAX_ATTACHMENTS_PER_CASE * 2;
+const ATTACHMENT_RETRY_DELAY_MS = 1_000;
+
 const attachmentQueueDefaults = {
   name: 'attachments',
   globalLimit: Number.MAX_SAFE_INTEGER,
   perGroupLimit: Number.MAX_SAFE_INTEGER,
   windowMs: 1_000,
-  maxPendingGlobal: MAX_ATTACHMENTS_PER_CASE * 2,
+  maxPendingGlobal: MAX_QUEUED_ATTACHMENTS_GLOBAL,
   maxPendingPerGroup: MAX_ATTACHMENTS_PER_CASE,
   logFailures: false,
 } as const;
@@ -127,11 +139,21 @@ function operationTransitionForStatus(
 
 type CaseAttachmentRow = typeof caseAttachments.$inferSelect;
 
+class AttachmentProcessingCancelledError extends Error {}
+
 export class CaseStore {
-  private readonly attachmentJobs = new Map<
+  private readonly attachmentJobs = new Map<number, Promise<void>>();
+  private readonly attachmentWaiters = new Map<
     number,
-    Promise<CaseAttachmentRow>
+    {
+      promise: Promise<CaseAttachmentRow>;
+      resolve: (row: CaseAttachmentRow) => void;
+      reject: (error: unknown) => void;
+    }
   >();
+  private retryingPendingAttachments = false;
+  private pendingAttachmentRetryRequested = false;
+  private pendingAttachmentRetryTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly db: Db,
@@ -326,12 +348,36 @@ export class CaseStore {
     guildId: string,
     row: CaseAttachmentRow,
   ): Promise<CaseAttachmentRow> {
-    const existing = this.attachmentJobs.get(row.id);
+    const waiting = this.attachmentWaiterFor(row.id);
+    if (!this.attachmentJobs.has(row.id))
+      this.startAttachmentStorage(guildId, row);
+    return waiting.promise;
+  }
+
+  private attachmentWaiterFor(rowId: number) {
+    const existing = this.attachmentWaiters.get(rowId);
     if (existing) return existing;
 
-    const storageTask = this.attachmentQueue
-      .enqueue(row.caseId, () =>
-        this.storage.saveFromUrl(
+    let resolve!: (row: CaseAttachmentRow) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<CaseAttachmentRow>(
+      (resolvePromise, rejectPromise) => {
+        resolve = resolvePromise;
+        reject = rejectPromise;
+      },
+    );
+    const waiting = { promise, resolve, reject };
+    this.attachmentWaiters.set(rowId, waiting);
+    return waiting;
+  }
+
+  private startAttachmentStorage(guildId: string, row: CaseAttachmentRow) {
+    if (this.attachmentJobs.has(row.id)) return true;
+
+    const queued = this.attachmentQueue.tryEnqueue(row.caseId, async () => {
+      let stored: StoredFile;
+      try {
+        stored = await this.storage.saveFromUrl(
           row.originalUrl,
           [guildId, row.caseId],
           row.name ?? `${row.discordAttachmentId}.bin`,
@@ -339,9 +385,34 @@ export class CaseStore {
             contentType: row.contentType,
             expectedSizeBytes: row.sizeBytes,
           },
-        ),
-      )
-      .then(async (stored) => {
+        );
+      } catch (error) {
+        return this.persistAttachmentFailure(row, error);
+      }
+      return this.persistStoredAttachment(row, stored);
+    });
+    if (!queued) return false;
+
+    const waiting = this.attachmentWaiterFor(row.id);
+    const storageTask = queued
+      .then(waiting.resolve, waiting.reject)
+      .finally(() => {
+        this.attachmentJobs.delete(row.id);
+        this.attachmentWaiters.delete(row.id);
+        if (this.attachmentWaiters.size > 0)
+          this.requestPendingAttachmentRetry();
+      });
+
+    this.attachmentJobs.set(row.id, storageTask);
+    return true;
+  }
+
+  private async persistStoredAttachment(
+    row: CaseAttachmentRow,
+    stored: StoredFile,
+  ): Promise<CaseAttachmentRow> {
+    while (true) {
+      try {
         const [updated] = await this.db
           .update(caseAttachments)
           .set({
@@ -356,59 +427,154 @@ export class CaseStore {
           .returning();
         if (updated) return updated;
 
-        await this.storage.remove(stored.storageKey);
-        return row;
-      })
-      .catch(async (error: unknown) => {
-        let failed = row;
-        try {
-          const [updated] = await this.db
-            .update(caseAttachments)
-            .set({ processingState: 'failed' })
-            .where(eq(caseAttachments.id, row.id))
-            .returning();
-          if (updated) failed = updated;
-        } catch (updateError) {
-          logger.warn('Failed to mark attachment storage failure', {
-            caseId: row.caseId,
-            discordAttachmentId: row.discordAttachmentId,
-            error:
-              updateError instanceof Error
-                ? updateError.message
-                : String(updateError),
-          });
-        }
+        await this.removeUncommittedAttachment(row, stored.storageKey);
+        throw new AttachmentProcessingCancelledError(
+          'Attachment was removed before storage completed',
+        );
+      } catch (error) {
+        if (error instanceof AttachmentProcessingCancelledError) throw error;
+        logger.warn('Failed to persist stored attachment', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
 
-        try {
-          await this.addEvent(
-            row.caseId,
-            'attachment_storage_failed',
-            'bot',
-            null,
-            'Attachment retained as metadata only',
-            {
-              discordAttachmentId: row.discordAttachmentId,
-              error: error instanceof Error ? error.message : String(error),
-            },
-          );
-        } catch (eventError) {
-          logger.warn('Failed to record attachment storage failure', {
-            caseId: row.caseId,
-            discordAttachmentId: row.discordAttachmentId,
-            error:
-              eventError instanceof Error
-                ? eventError.message
-                : String(eventError),
-          });
+  private async removeUncommittedAttachment(
+    row: CaseAttachmentRow,
+    storageKey: string,
+  ) {
+    while (true) {
+      try {
+        await this.storage.remove(storageKey);
+        return;
+      } catch (error) {
+        logger.warn('Failed to remove uncommitted attachment file', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
+
+  private async persistAttachmentFailure(
+    row: CaseAttachmentRow,
+    error: unknown,
+  ): Promise<CaseAttachmentRow> {
+    while (true) {
+      try {
+        const failed = this.db.transaction(
+          (tx) => {
+            const updated = tx
+              .update(caseAttachments)
+              .set({ processingState: 'failed' })
+              .where(eq(caseAttachments.id, row.id))
+              .returning()
+              .get();
+            if (!updated) return null;
+
+            tx.insert(caseEvents)
+              .values(
+                caseEventValues(
+                  row.caseId,
+                  'attachment_storage_failed',
+                  'bot',
+                  null,
+                  'Attachment retained as metadata only',
+                  {
+                    discordAttachmentId: row.discordAttachmentId,
+                    error:
+                      error instanceof Error ? error.message : String(error),
+                  },
+                ),
+              )
+              .run();
+            return updated;
+          },
+          { behavior: 'immediate' },
+        );
+        if (failed) return failed;
+        throw new AttachmentProcessingCancelledError(
+          'Attachment was removed before failure could be recorded',
+        );
+      } catch (updateError) {
+        if (updateError instanceof AttachmentProcessingCancelledError)
+          throw updateError;
+        logger.warn('Failed to persist attachment storage failure', {
+          caseId: row.caseId,
+          discordAttachmentId: row.discordAttachmentId,
+          error:
+            updateError instanceof Error
+              ? updateError.message
+              : String(updateError),
+        });
+        await this.waitForAttachmentRetry();
+      }
+    }
+  }
+
+  private waitForAttachmentRetry() {
+    return new Promise<void>((resolve) => {
+      setTimeout(resolve, ATTACHMENT_RETRY_DELAY_MS);
+    });
+  }
+
+  private requestPendingAttachmentRetry() {
+    this.pendingAttachmentRetryRequested = true;
+    if (!this.retryingPendingAttachments)
+      void this.retryPendingAttachmentStorage();
+  }
+
+  private schedulePendingAttachmentRetry() {
+    if (this.pendingAttachmentRetryTimer) return;
+    this.pendingAttachmentRetryTimer = setTimeout(() => {
+      this.pendingAttachmentRetryTimer = null;
+      this.requestPendingAttachmentRetry();
+    }, ATTACHMENT_RETRY_DELAY_MS);
+  }
+
+  private async retryPendingAttachmentStorage() {
+    if (this.retryingPendingAttachments) return;
+    this.retryingPendingAttachments = true;
+
+    try {
+      while (this.pendingAttachmentRetryRequested) {
+        this.pendingAttachmentRetryRequested = false;
+        const activeIds = [...this.attachmentJobs.keys()];
+        const pending = await this.db
+          .select({ attachment: caseAttachments, guildId: cases.guildId })
+          .from(caseAttachments)
+          .innerJoin(cases, eq(caseAttachments.caseId, cases.id))
+          .where(
+            activeIds.length > 0
+              ? and(
+                  eq(caseAttachments.processingState, 'pending'),
+                  notInArray(caseAttachments.id, activeIds),
+                )
+              : eq(caseAttachments.processingState, 'pending'),
+          )
+          .orderBy(caseAttachments.id)
+          .limit(MAX_QUEUED_ATTACHMENTS_GLOBAL);
+
+        for (const { attachment, guildId } of pending) {
+          void this.startAttachmentStorage(guildId, attachment);
         }
-        return failed;
-      })
-      .finally(() => {
-        this.attachmentJobs.delete(row.id);
+      }
+    } catch (error) {
+      logger.error('Failed to retry pending attachment storage', {
+        error: error instanceof Error ? error.message : String(error),
       });
-
-    this.attachmentJobs.set(row.id, storageTask);
-    return storageTask;
+      this.schedulePendingAttachmentRetry();
+    } finally {
+      this.retryingPendingAttachments = false;
+      if (this.pendingAttachmentRetryRequested)
+        void this.retryPendingAttachmentStorage();
+    }
   }
 
   async markMessageDeleted(messageId: string) {
