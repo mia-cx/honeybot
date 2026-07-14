@@ -106,6 +106,22 @@ describe('registry publication adapter', () => {
       labels: {},
     });
   });
+
+  it.each([{}, { config: 'invalid' }])(
+    'rejects a malformed platform image config %#',
+    (platformImage) => {
+      const adapter = new DockerBuildxAdapter(() =>
+        JSON.stringify({
+          manifest: { digest },
+          image: { 'linux/amd64': platformImage },
+        }),
+      );
+
+      expect(() =>
+        adapter.inspect('docker.io/miacx/honeybot:v1.0.1'),
+      ).toThrow('Image config missing');
+    },
+  );
 });
 
 describe('immutable container publication', () => {
