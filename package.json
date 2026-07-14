@@ -13,6 +13,10 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "release:beta": "tsx scripts/reconcileBetaReleases.ts --mode reconcile",
+    "release:beta:promote": "tsx scripts/reconcileBetaReleases.ts --mode promote",
+    "release:stable": "tsx scripts/reconcileStableReleases.ts",
+    "release:adopt-v1.0.1": "tsx scripts/adoptLegacyStableRelease.ts --version 1.0.1 --ref 67813a8ec9ef2cfc4ae6d66cec88345f567243ed",
     "eval:fixtures": "tsx scripts/eval-fixtures.ts",
     "seed:fixtures": "tsx scripts/seed-fixtures.ts",
     "format": "prettier --write ."
