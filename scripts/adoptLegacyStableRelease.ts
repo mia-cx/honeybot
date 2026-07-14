@@ -245,7 +245,7 @@ function fail(message: string): never {
 async function main(): Promise<void> {
   const repository = process.env.GITHUB_REPOSITORY;
   if (!repository) throw new Error('GITHUB_REPOSITORY is required');
-  const result = adoptLegacyStableRelease(
+  adoptLegacyStableRelease(
     {
       ...parseArguments(process.argv.slice(2)),
       repositories: getRepositories(),
@@ -253,12 +253,12 @@ async function main(): Promise<void> {
     },
     new DockerBuildxAdapter(),
   );
-  console.log(JSON.stringify(result, null, 2));
+  console.log('Guarded legacy stable adoption completed.');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error: unknown) => {
-    console.error(error);
+  main().catch(() => {
+    console.error('Guarded legacy stable adoption failed.');
     process.exitCode = 1;
   });
 }

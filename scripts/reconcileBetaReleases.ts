@@ -369,12 +369,12 @@ async function main(): Promise<void> {
       ? reconcileBetaReleases(runtime)
       : promoteLatestBeta(runtime);
   writeOutputs(result);
-  console.log(JSON.stringify(result, null, 2));
+  console.log('Beta release reconciliation completed.');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error: unknown) => {
-    console.error(error);
+  main().catch(() => {
+    console.error('Beta release reconciliation failed.');
     process.exitCode = 1;
   });
 }

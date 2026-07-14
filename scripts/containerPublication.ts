@@ -387,12 +387,12 @@ async function main(): Promise<void> {
     new DockerBuildxAdapter(),
   );
   writeGithubOutput(result);
-  console.log(JSON.stringify(result, null, 2));
+  console.log('Immutable container publication reconciliation completed.');
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error: unknown) => {
-    console.error(error);
+  main().catch(() => {
+    console.error('Immutable container publication reconciliation failed.');
     process.exitCode = 1;
   });
 }
