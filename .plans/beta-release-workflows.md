@@ -120,9 +120,11 @@ The beta workflow calls this CLI once; the stable reconciliation script imports 
 
 ### `.github/workflows/container.yml`
 
-Convert the existing workflow into the beta orchestrator for pushes to `main`.
+Convert the existing workflow into the beta orchestrator for pushes to `main`, and add `workflow_dispatch` as an explicit promotion-only successor entrypoint. A `push` run performs immutable beta publication and moving-alias reconciliation; a dispatch run skips version/tag/publication work and runs only moving-alias reconciliation.
 
-Responsibilities:
+Keep workflow-level permissions read-only. Grant the immutable-publication job only `contents: write` and `packages: write`, and grant the promotion job `contents: read`, `packages: write`, and `actions: write`. The promotion job uses `actions: write` solely to invoke this workflow's dispatch endpoint with its `GITHUB_TOKEN`; no other job receives that permission.
+
+Push-only responsibilities:
 
 1. Check out full history and tags.
 2. Install dependencies with the frozen lockfile.
@@ -137,7 +139,7 @@ Responsibilities:
 
 Do not apply branch-wide cancellation to immutable publication. Distinct beta versions may reconcile concurrently because their references cannot collide; same-version reruns use a version-scoped, non-canceling concurrency group so a run cannot be interrupted between registry reconciliation and Git-tag creation.
 
-Run moving-alias promotion as a separate serialized reconciler. Each attempt ignores the triggering event SHA, resolves the live remote `main` tip, then selects the newest complete beta publication whose tagged commit is reachable on that tip's first-parent history. If none exists, exit as an explicit no-op. Copy the selected canonical digest to `beta`, major-beta, and minor-beta aliases without rebuilding, then recompute the selection from a fresh `main` fetch. Finish when the selected release identity is unchanged; otherwise repeat within a bounded attempt budget and unconditionally dispatch a successor reconciliation before exiting. A failed successor dispatch fails the job loudly. No-Changeset pushes and stable release merges naturally retain the previous beta selection instead of retrying forever. Under eventual `main` quiescence, this guarantees convergence without claiming an unavailable registry compare-and-swap.
+Run moving-alias promotion as a separate serialized reconciler for both `push` and `workflow_dispatch` events. Each attempt ignores the triggering event SHA, resolves the live remote `main` tip, then selects the newest complete beta publication whose tagged commit is reachable on that tip's first-parent history. If none exists, exit as an explicit no-op. Copy the selected canonical digest to `beta`, major-beta, and minor-beta aliases without rebuilding, then recompute the selection from a fresh `main` fetch. Finish when the selected release identity is unchanged; otherwise repeat within a bounded attempt budget. If the budget is exhausted before the selection stabilizes, invoke `POST /repos/{owner}/{repo}/actions/workflows/container.yml/dispatches` with `ref: main` using the promotion job's `GITHUB_TOKEN` before exiting; a failed dispatch fails the job loudly. The successor dispatch executes only this promotion reconciler, so it cannot create another beta release. No-Changeset pushes and stable release merges naturally retain the previous beta selection instead of retrying forever. Under eventual `main` quiescence, this guarantees convergence without claiming an unavailable registry compare-and-swap.
 
 ### `.github/workflows/release.yml`
 
@@ -279,7 +281,7 @@ Verification:
 - Simulate cancellation requests after immutable publication begins and confirm the publication/tag transaction is non-canceling.
 - Simulate out-of-order events for two successive `main` SHAs and confirm every reconciler selects from the live remote tip's first-parent history.
 - Confirm no-Changeset tips and stable release merges retain the newest complete beta ancestor, while a history with no complete beta exits as a no-op.
-- Force the selected beta identity to change on the final in-process attempt and confirm the reconciler dispatches a successor; a dispatch failure must fail the job.
+- Force the selected beta identity to change on the final in-process attempt and confirm the promotion job invokes the `workflow_dispatch` successor with `actions: write`; confirm the dispatch event skips immutable beta publication, and that a dispatch failure fails the job.
 - Confirm `latest` cannot appear in beta outputs.
 
 ### Commit 4: Tag and publish stable releases automatically
@@ -369,7 +371,7 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 - [ ] Beta versions are transient and are never committed to `main`.
 - [ ] Beta builds publish only beta/exact/SHA aliases and never update `latest` or stable major/minor aliases.
 - [ ] Existing immutable beta Git/registry references are validated before registry writes; partial state is completed from one canonical digest, conflicts fail closed, and publish/tag transactions are not canceled after writes begin.
-- [ ] A serialized state-based reconciler promotes moving beta aliases from the newest complete beta publication reachable from the live `main` tip, treats no-release tips as stable selections/no-ops, and guarantees convergence under eventual quiescence through bounded retries plus mandatory successor dispatch without registry compare-and-swap.
+- [ ] A serialized state-based reconciler promotes moving beta aliases from the newest complete beta publication reachable from the live `main` tip, treats no-release tips as stable selections/no-ops, and guarantees convergence under eventual quiescence through bounded retries plus an `actions: write`-authorized, promotion-only `workflow_dispatch` successor without registry compare-and-swap.
 - [ ] Changesets aggregates all fragments and uses the largest semantic bump in its release PR.
 - [ ] Changesets-created or updated release PRs run required CI automatically through a least-privilege GitHub App token.
 - [ ] Merging the Changesets release PR automatically creates an immutable matching `vX.Y.Z` Git tag.
