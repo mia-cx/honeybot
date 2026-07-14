@@ -39,7 +39,7 @@ The target version can escalate as Changesets accumulate while the beta ordinal 
 - Pending `.changeset/*.md` files determine the next stable version. `pnpm changeset status --output <file>` already emits `releases[].newVersion` and selects the largest pending bump.
 - A beta build transiently changes the checked-out `package.json` to `<next-version>-beta.<N>` before building. It never commits that change or consumes Changesets.
 - The stable version is materialized only by the Changesets release PR, which updates `package.json`, writes `CHANGELOG.md`, and removes consumed fragments.
-- The stable Git tag must equal `v${package.json.version}` and point to the release PR merge commit.
+- The stable Git tag must equal `v${package.json.version}` and peel to the release PR merge commit. All tag-to-commit comparisons resolve the full commit target with `git rev-parse --verify "refs/tags/${tag}^{commit}"`; callers never compare a raw `refs/tags/*` object SHA, because Changesets creates annotated tags.
 
 ### Beta eligibility, baseline readiness, and ordinal
 
@@ -95,13 +95,13 @@ Before any registry write, inspect every immutable reference that already exists
 - If one or more exist, require every existing reference to resolve to one digest and verify its OCI version/revision labels against the release identity. Reuse that digest and copy it to missing references without rebuilding.
 - If existing digests or labels conflict, fail closed without changing either registry.
 
-After publication, re-inspect both registries and mark the immutable image complete only when every exact/SHA reference resolves to the canonical digest with matching identity labels. A release is complete only when that registry invariant holds and its immutable Git tag points to the same commit. Git tags therefore identify releases but are not publication-completion markers.
+After publication, re-inspect both registries and mark the immutable image complete only when every exact/SHA reference resolves to the canonical digest with matching identity labels. A release is complete only when that registry invariant holds and its immutable Git tag peels to the same commit. Git tags therefore identify releases but are not publication-completion markers.
 
 ### Guarded legacy baseline adoption
 
 The existing `v1.0.1` registry references predate this invariant and have been moved by later `main` builds, so normal reconciliation must continue to classify them as conflicts rather than gaining a general overwrite switch. Add a separate typed administrative command, `scripts/adoptLegacyStableRelease.ts`, for this one migration class.
 
-Require explicit `version`, full `ref`, `expectedLegacyDigest`, and `expectedLegacyRevision` inputs. Before writes, verify the package version at `ref`; require `v${version}` to be absent, or to point to `ref` only when the target registry identity is already complete; require every existing exact reference in both registries to be either the explicitly expected untagged legacy identity or the target identity; and require full-SHA references to be absent or match the target. Any unlisted digest, label, or Git-tag state fails closed.
+Require explicit `version`, full `ref`, `expectedLegacyDigest`, and `expectedLegacyRevision` inputs. Before writes, verify the package version at `ref`; require `v${version}` to be absent, or for its peeled commit target to equal `ref` only when the target registry identity is already complete; require every existing exact reference in both registries to be either the explicitly expected untagged legacy identity or the target identity; and require full-SHA references to be absent or match the target. Any unlisted digest, label, or Git-tag state fails closed.
 
 Build the exact target ref once only when no target canonical digest exists. Preserve that digest across partial retries, replace only the explicitly authorized untagged legacy exact references, create the full-SHA references in both registries, and verify all target digests and OCI identity labels. Create and push the immutable Git tag only after registry verification; a rerun may complete valid partial target state without rebuilding. After the tag exists, ordinary stable reconciliation repairs moving aliases. This migration path must not weaken the normal publisher's rule that immutable conflicts are never overwritten.
 
@@ -142,7 +142,7 @@ Immutable beta reconciliation (`push` or `reconcile-beta` mode):
 2. Invoke `scripts/reconcileBetaReleases.ts` to resolve the latest complete stable baseline and compare it with the stable package version at the live tip.
 3. If the live package version's stable tag/publication is incomplete, return an explicit `deferred` result without revision-range commands or writes. Stable reconciliation owns completion and the successor handoff.
 4. From a ready baseline, scan every first-parent commit through the captured live tip. In a detached worktree at each exact commit, parse Changesets status; skip no-release snapshots and stable release transitions, and collect every current-epoch eligible integration oldest-first.
-5. For each candidate, derive `<next-version>-beta.<N>` from that snapshot and its first-parent distance from the ready baseline tag. Preflight the immutable beta Git tag before registry writes, reconcile exact/full-SHA references through `containerPublication`, then create the Git tag only after verified publication.
+5. For each candidate, derive `<next-version>-beta.<N>` from that snapshot and its first-parent distance from the ready baseline tag. Preflight the immutable beta Git tag by comparing its peeled commit target before registry writes, reconcile exact/full-SHA references through `containerPublication`, then create the Git tag only after verified publication.
 6. Treat already complete candidates as idempotent no-ops and recover partial-valid candidates from their canonical digest without rebuilding. Any conflicting tag, digest, or identity label stops later candidates before their writes.
 7. Re-fetch the live tip after the pass. If new eligible history appeared, report that `reconcile-beta` successor work is required; the promotion job performs the dispatch with its restricted `actions: write` permission.
 
@@ -165,8 +165,8 @@ On each push to `main`:
 3. The script finds the latest complete stable release, then scans first-parent commits after its SHA through the current remote `main` tip for every stable `package.json` version transition, including transitions that already have Git tags. It validates each candidate against its first parent, consumed Changesets, and `CHANGELOG.md`; it does not infer the release solely from the current push's `before`/`sha` pair.
 4. The script reconciles every candidate oldest-first in-process. For each exact release SHA it:
    - requires a valid increasing stable semantic version;
-   - fetches and preflights `vX.Y.Z`, failing if it points elsewhere and accepting it if it already points to the release SHA;
-   - when absent, creates a temporary detached worktree at the release SHA, runs a frozen dependency install inside that worktree followed by `pnpm changeset tag`, then verifies and pushes the resulting tag so a later batched commit cannot become the target;
+   - fetches and preflights `vX.Y.Z` through the shared Git adapter, failing if its peeled `^{commit}` target differs and accepting annotated or lightweight tags that peel to the release SHA;
+   - when absent, creates a temporary detached worktree at the release SHA, runs a frozen dependency install inside that worktree followed by `pnpm changeset tag`, then verifies the annotated tag's peeled commit target and pushes it so a later batched commit cannot become the target;
    - calls the shared `containerPublication` module to reconcile both registries from absent, partial-valid, or complete state;
    - requires the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
 5. After every immutable candidate is complete, derive the desired stable alias map across all complete stable releases: each minor alias points to the newest release in that minor line, each major alias to the newest release in that major line, and `latest` to the newest release globally. Reconcile the entire map from canonical digests without rebuilding, repairing aliases for every recovered release line rather than only the newest release.
@@ -175,6 +175,10 @@ On each push to `main`:
 Use a branch-wide stable-publication concurrency group with `cancel-in-progress: false`, preventing a newer run from canceling the active run through GitHub concurrency. GitHub can still replace pending concurrency runs, and manual cancellation, timeouts, runner loss, or process failure can interrupt the active run, so correctness comes from the self-healing state scan and desired alias-map reconciliation. Any surviving later run recovers skipped events, pre-existing tags, partial registry publication, and missing major/minor aliases. Do not rely on the `GITHUB_TOKEN`-created tag to trigger another workflow; the originating release job performs the ordered transaction directly.
 
 A manual `workflow_dispatch` recovery path runs the same state reconciler for an existing stable tag after validating that the tag, commit, and package version agree. It must not create or move release tags.
+
+### Shared Git tag adapter
+
+Keep tag identity behind one narrow adapter used by beta reconciliation, stable reconciliation, and guarded legacy adoption. `resolveTagCommit(tag)` fetches the exact tag ref and returns the full commit SHA from `git rev-parse --verify "refs/tags/${tag}^{commit}"`; an absent ref returns an explicit absent state, while a tag that cannot peel to a commit fails closed. Tag-object SHAs are never release identities, and every post-creation check repeats the same peeled-target comparison.
 
 ### `scripts/reconcileBetaReleases.ts`
 
@@ -220,6 +224,7 @@ Cover:
 - Stable aliases include `latest`, major, minor, exact, and SHA tags.
 - Short or malformed commit SHAs are rejected, and SHA aliases embed the full 40-character `ref`.
 - Prerelease versions are rejected for stable publishing.
+- Lightweight and Changesets-created annotated tags that peel to the expected commit are accepted; raw annotated-tag object SHAs are never compared as release identities, and tags that peel elsewhere or not to a commit are rejected.
 - Stable Git tag/package mismatches are rejected.
 - Fully absent immutable references request one build.
 - Partial matching registry state reuses its canonical digest and fills only missing references.
@@ -301,7 +306,7 @@ Verification:
 - Confirm the current stable package version remains untouched in Git.
 - Simulate a release merge that advances `package.json` before its stable tag/publication is complete, followed by multiple Changesets-bearing pushes. Confirm those runs defer without `git rev-list` failure or writes; after a `reconcile-beta` handoff, confirm every still-eligible commit is published oldest-first from the now-ready baseline.
 - Simulate replaced pending workflow events and confirm one surviving live-tip scan recovers all still-eligible candidates.
-- Confirm mismatched existing Git tags, registry digests, or OCI identity labels fail before registry publication, while matching partial state reuses its canonical digest without rebuilding.
+- Confirm annotated and lightweight beta tags that peel to the candidate commit are accepted, while tags whose peeled target differs fail before registry publication; matching partial registry state reuses its canonical digest without rebuilding.
 - Start a second scanner after immutable publication begins and confirm GitHub concurrency does not cancel the active run. Separately inject interruption after registry reconciliation but before Git-tag creation and confirm the next scan completes the invariant without rebuilding.
 - Confirm no-Changeset snapshots and stable transitions are skipped, no-Changeset tips retain the newest complete beta ancestor, and a history with no complete beta exits as a no-op.
 - Force newer eligible history during the final scan and confirm the promotion job dispatches `reconcile-beta`; force a final alias-selection change and confirm it dispatches `promote-aliases`. Both dispatch failures must fail loudly.
@@ -333,7 +338,7 @@ Verification:
 - Simulate a skipped/canceled intermediate push event and confirm the next run finds every stable transition since the latest complete release.
 - Simulate failure immediately after Git-tag creation and confirm the next automatic run completes both registries.
 - Confirm multiple incomplete releases, whether tagged or untagged, are processed oldest-first.
-- Confirm an existing mismatched Git tag or immutable registry reference fails before image publication.
+- Confirm an existing Changesets-created annotated tag is accepted when its peeled `^{commit}` target equals the release SHA, while a tag whose peeled target or immutable registry identity mismatches fails before image publication.
 - Confirm a Changesets release PR created or updated with the App token starts CI without `action_required`.
 - Recover candidates across minor and major boundaries and confirm every minor/major alias is repaired while `latest` points only to the newest complete release.
 - Confirm a candidate failure stops later transactions and leaves moving aliases unchanged until a successful reconciliation.
