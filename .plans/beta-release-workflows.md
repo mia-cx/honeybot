@@ -145,7 +145,9 @@ Push-only responsibilities:
 9. Invoke `scripts/containerPublication.ts` in a workflow step to reconcile all immutable exact/SHA references for the current release identity, reusing a valid partial digest and rejecting conflicts.
 10. After verified immutable publication, create/push the beta Git tag if absent and assert the complete publication invariant.
 
-Do not apply branch-wide cancellation to immutable publication. Distinct beta versions may reconcile concurrently because their references cannot collide; same-version reruns use a version-scoped, non-canceling concurrency group so a run cannot be interrupted between registry reconciliation and Git-tag creation.
+Do not apply branch-wide cancellation to immutable publication. Distinct beta versions may reconcile concurrently because their references cannot collide; same-version reruns use a version-scoped concurrency group with `cancel-in-progress: false`, so a newer same-version run does not cancel the active run through GitHub concurrency.
+
+Concurrency settings are scheduling controls, not transaction boundaries. Manual cancellation, timeouts, runner loss, or process failure can still interrupt a run between registry reconciliation and Git-tag creation. Correctness therefore comes from the explicit publication invariant and idempotent recovery: a later run re-inspects state, reuses a verified canonical digest without rebuilding, completes missing registry references or the Git tag, and fails closed on conflicts.
 
 Run moving-alias promotion as a separate serialized reconciler for both `push` and `workflow_dispatch` events. Each attempt ignores the triggering event SHA, resolves the live remote `main` tip, then selects the newest complete beta publication whose tagged commit is reachable on that tip's first-parent history. If none exists, exit as an explicit no-op. Copy the selected canonical digest to `beta`, major-beta, and minor-beta aliases without rebuilding, then recompute the selection from a fresh `main` fetch. Finish when the selected release identity is unchanged; otherwise repeat within a bounded attempt budget. If the budget is exhausted before the selection stabilizes, invoke `POST /repos/{owner}/{repo}/actions/workflows/container.yml/dispatches` with `ref: main` using the promotion job's `GITHUB_TOKEN` before exiting; a failed dispatch fails the job loudly. The successor dispatch executes only this promotion reconciler, so it cannot create another beta release. No-Changeset pushes and stable release merges naturally retain the previous beta selection instead of retrying forever. Under eventual `main` quiescence, this guarantees convergence without claiming an unavailable registry compare-and-swap.
 
@@ -168,7 +170,7 @@ On each push to `main`:
    - requires the Git tag and every immutable registry reference to satisfy the publication invariant before advancing.
 5. After every immutable candidate is complete, derive the desired stable alias map across all complete stable releases: each minor alias points to the newest release in that minor line, each major alias to the newest release in that major line, and `latest` to the newest release globally. Reconcile the entire map from canonical digests without rebuilding, repairing aliases for every recovered release line rather than only the newest release.
 
-Use a branch-wide, non-canceling stable-publication concurrency group. GitHub can replace pending concurrency runs, so correctness comes from the self-healing state scan and desired alias-map reconciliation. Any surviving later run recovers skipped events, pre-existing tags, partial registry publication, and missing major/minor aliases. Do not rely on the `GITHUB_TOKEN`-created tag to trigger another workflow; the originating release job performs the ordered transaction directly.
+Use a branch-wide stable-publication concurrency group with `cancel-in-progress: false`, preventing a newer run from canceling the active run through GitHub concurrency. GitHub can still replace pending concurrency runs, and manual cancellation, timeouts, runner loss, or process failure can interrupt the active run, so correctness comes from the self-healing state scan and desired alias-map reconciliation. Any surviving later run recovers skipped events, pre-existing tags, partial registry publication, and missing major/minor aliases. Do not rely on the `GITHUB_TOKEN`-created tag to trigger another workflow; the originating release job performs the ordered transaction directly.
 
 A manual `workflow_dispatch` recovery path runs the same state reconciler for an existing stable tag after validating that the tag, commit, and package version agree. It must not create or move release tags.
 
@@ -280,7 +282,7 @@ Requirements:
 - Full Git history/tags are available for the ordinal.
 - Existing beta Git and registry references are validated before any registry write.
 - Beta tag creation occurs only after successful immutable image reconciliation.
-- Immutable publication uses version-scoped, non-canceling concurrency; distinct versions may publish concurrently.
+- Immutable publication uses version-scoped concurrency with `cancel-in-progress: false` so same-version runs do not cancel one another through GitHub concurrency; distinct versions may publish concurrently.
 - Moving aliases are handled by a separate serialized reconciler that ignores stale event SHAs and converges on the newest complete beta publication reachable from the live `main` tip.
 
 Verification:
@@ -289,7 +291,7 @@ Verification:
 - Confirm the current stable package version remains untouched in Git.
 - Confirm mismatched existing Git tags, registry digests, or OCI identity labels fail before registry publication.
 - Confirm matching partial registry state is completed from its canonical digest without a rebuild.
-- Simulate cancellation requests after immutable publication begins and confirm the publication/tag transaction is non-canceling.
+- Start a second same-version run after immutable publication begins and confirm GitHub concurrency does not cancel the active run. Separately inject interruption after registry reconciliation but before Git-tag creation and confirm the next run reuses the verified canonical digest, completes the invariant without rebuilding, and fails closed on conflicts.
 - Simulate out-of-order events for two successive `main` SHAs and confirm every reconciler selects from the live remote tip's first-parent history.
 - Confirm no-Changeset tips and stable release merges retain the newest complete beta ancestor, while a history with no complete beta exits as a no-op.
 - Force the selected beta identity to change on the final in-process attempt and confirm the promotion job invokes the `workflow_dispatch` successor with `actions: write`; confirm the dispatch event skips immutable beta publication, and that a dispatch failure fails the job.
@@ -385,7 +387,7 @@ Also validate workflow semantics with `actionlint`, then exercise the first beta
 - [ ] Each eligible `main` integration publishes a deterministic `<next-version>-beta.<N>` image when Changesets has pending release intent.
 - [ ] Beta versions are transient and are never committed to `main`.
 - [ ] Beta builds publish only beta/exact/SHA aliases and never update `latest` or stable major/minor aliases.
-- [ ] Existing immutable beta Git/registry references are validated before registry writes; partial state is completed from one canonical digest, conflicts fail closed, and publish/tag transactions are not canceled after writes begin.
+- [ ] Existing immutable beta Git/registry references are validated before registry writes; partial state is completed from one canonical digest; conflicts fail closed; GitHub concurrency does not cancel an active publish/tag run; and idempotent reruns recover manual cancellation, timeouts, runner loss, or other interruptions.
 - [ ] A serialized state-based reconciler promotes moving beta aliases from the newest complete beta publication reachable from the live `main` tip, treats no-release tips as stable selections/no-ops, and guarantees convergence under eventual quiescence through bounded retries plus an `actions: write`-authorized, promotion-only `workflow_dispatch` successor without registry compare-and-swap.
 - [ ] Changesets aggregates all fragments and uses the largest semantic bump in its release PR.
 - [ ] Changesets-created or updated release PRs run required CI automatically through a least-privilege GitHub App token.
