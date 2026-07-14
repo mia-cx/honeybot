@@ -2498,8 +2498,30 @@ describe('CaseStore', () => {
       ),
     ).resolves.toBeNull();
 
+    await store.setReviewMessage(
+      punishedCase.id,
+      'review-channel',
+      'review-message',
+    );
+
     await expect(store.recoverInterruptedOperations()).resolves.toBe(2);
+    await expect(store.listUncertainCaseReviews()).resolves.toEqual([
+      {
+        caseId: punishedCase.id,
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ]);
     await expect(store.recoverInterruptedOperations()).resolves.toBe(0);
+    await expect(store.listUncertainCaseReviews()).resolves.toEqual([
+      {
+        caseId: punishedCase.id,
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ]);
     expect(await store.getCase(pendingCase.id)).toMatchObject({
       status: 'pending_review',
       actionTaken: null,
@@ -2533,6 +2555,66 @@ describe('CaseStore', () => {
         .where(eq(caseEvents.eventType, 'operation_recovered')),
     ).toHaveLength(1);
 
+    database.sqlite.close();
+  });
+
+  it.each([
+    'punishment_pending',
+    'dismissal_pending',
+    'punishment_revert_pending',
+    'dismissal_revert_pending',
+    'punishment_uncertain',
+    'dismissal_uncertain',
+    'punishment_revert_uncertain',
+    'dismissal_revert_uncertain',
+  ] as const)('reuses unresolved %s cases for new evidence', async (status) => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const first = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'first',
+    });
+    await database.db
+      .update(cases)
+      .set({ status })
+      .where(eq(cases.id, first.id));
+
+    const second = await store.getOrCreateCase({
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot',
+      reason: 'second',
+    });
+
+    expect(second.id).toBe(first.id);
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    database.sqlite.close();
+  });
+
+  it('atomically creates one active case for concurrent evidence', async () => {
+    const database = testDatabase();
+    const store = new CaseStore(database.db, fakeStorage());
+    const input = {
+      guildId: 'guild',
+      userId: 'user',
+      triggerType: 'honeypot' as const,
+      reason: 'triggered',
+    };
+
+    const caseRows = await Promise.all(
+      Array.from({ length: 8 }, () => store.getOrCreateCase(input)),
+    );
+
+    expect(new Set(caseRows.map((caseRow) => caseRow.id)).size).toBe(1);
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    expect(
+      await database.db
+        .select()
+        .from(caseEvents)
+        .where(eq(caseEvents.eventType, 'triggered')),
+    ).toHaveLength(1);
     database.sqlite.close();
   });
 

@@ -7,6 +7,7 @@ import { handleMessageCreate } from './events/messageCreate.js';
 import { logger } from './logger.js';
 import { FairQueue } from './queues/fairQueue.js';
 import { CaseStore } from './services/caseStore.js';
+import { refreshRecoveredCaseReviews } from './services/caseReviewRecovery.js';
 import { OpenRouterScamClassifier } from './services/classifier.js';
 import { ConfigStore } from './services/configStore.js';
 import { DuplicateDetector } from './services/duplicateDetector.js';
@@ -78,10 +79,13 @@ void caseStore
       error: error instanceof Error ? error.message : String(error),
     });
   });
-const uncertainCaseOperations = await caseStore.recoverInterruptedOperations();
-if (uncertainCaseOperations > 0) {
-  logger.warn('Flagged interrupted case operations for manual review', {
-    uncertainCaseOperations,
+const recoveredCaseOperations =
+  await caseStore.recoverInterruptedOperations();
+const uncertainCaseReviews = await caseStore.listUncertainCaseReviews();
+if (recoveredCaseOperations > 0) {
+  logger.warn('Recovered interrupted case operations', {
+    recoveredCaseOperations,
+    uncertainCaseOperations: uncertainCaseReviews.length,
   });
 }
 const classifier = new OpenRouterScamClassifier(modelStore, modelQueue, {
@@ -133,6 +137,22 @@ client.once(Events.ClientReady, (readyClient) => {
         logger.info('Purged expired removed-guild settings', {
           purgedGuildCount,
         });
+    })
+    .then(() =>
+      refreshRecoveredCaseReviews(
+        readyClient,
+        caseStore,
+        uncertainCaseReviews,
+      ),
+    )
+    .then((recoverySummary) => {
+      if (
+        recoverySummary.updated > 0 ||
+        recoverySummary.reposted > 0 ||
+        recoverySummary.failed > 0
+      ) {
+        logger.info('Refreshed recovered case reviews', recoverySummary);
+      }
     })
     .then(() => registerCommands(readyClient))
     .then(() => {

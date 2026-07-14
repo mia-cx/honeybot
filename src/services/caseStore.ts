@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { customAlphabet } from 'nanoid';
-import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../db/database.js';
 import {
   caseAttachments,
@@ -97,6 +97,25 @@ function operationTransitions() {
   >;
 }
 
+const claimedCaseStatuses = operationTransitions().map(
+  ([, transition]) => transition.claimed,
+);
+const uncertainCaseStatuses = operationTransitions().map(
+  ([, transition]) => transition.uncertain,
+);
+const activeCaseStatuses = [
+  'pending_review',
+  ...claimedCaseStatuses,
+  ...uncertainCaseStatuses,
+] satisfies CaseStatus[];
+
+export type RecoveredUncertainCase = {
+  caseId: string;
+  guildId: string;
+  reviewChannelId: string | null;
+  reviewMessageId: string | null;
+};
+
 function operationTransitionForStatus(
   status: string,
   state: 'claimed' | 'uncertain',
@@ -130,49 +149,62 @@ export class CaseStore {
     },
     options: { reusePending?: boolean } = {},
   ) {
-    if (options.reusePending ?? true) {
-      const existing = await this.db
-        .select()
-        .from(cases)
-        .where(
-          and(
-            eq(cases.guildId, input.guildId),
-            eq(cases.userId, input.userId),
-            eq(cases.triggerType, input.triggerType),
-            eq(cases.status, 'pending_review'),
-          ),
-        )
-        .get();
+    return this.db.transaction(
+      (tx) => {
+        if (options.reusePending ?? true) {
+          const existing = tx
+            .select()
+            .from(cases)
+            .where(
+              and(
+                eq(cases.guildId, input.guildId),
+                eq(cases.userId, input.userId),
+                eq(cases.triggerType, input.triggerType),
+                inArray(cases.status, activeCaseStatuses),
+              ),
+            )
+            .orderBy(desc(cases.updatedAt))
+            .get();
 
-      if (existing) return existing;
-    }
+          if (existing) return existing;
+        }
 
-    const now = new Date().toISOString();
-    const created = {
-      id: caseId(),
-      guildId: input.guildId,
-      userId: input.userId,
-      triggerType: input.triggerType,
-      status: 'pending_review' as CaseStatus,
-      actionTaken: null,
-      reason: input.reason,
-      evidenceSummaryJson: '{}',
-      reviewChannelId: null,
-      reviewMessageId: null,
-      createdAt: now,
-      updatedAt: now,
-    };
+        const now = new Date().toISOString();
+        const created = tx
+          .insert(cases)
+          .values({
+            id: caseId(),
+            guildId: input.guildId,
+            userId: input.userId,
+            triggerType: input.triggerType,
+            status: 'pending_review' as CaseStatus,
+            actionTaken: null,
+            reason: input.reason,
+            evidenceSummaryJson: '{}',
+            reviewChannelId: null,
+            reviewMessageId: null,
+            createdAt: now,
+            updatedAt: now,
+          })
+          .returning()
+          .get();
 
-    await this.db.insert(cases).values(created);
-    await this.addEvent(
-      created.id,
-      'triggered',
-      'bot',
-      null,
-      input.reason,
-      input,
+        tx.insert(caseEvents)
+          .values(
+            caseEventValues(
+              created.id,
+              'triggered',
+              'bot',
+              null,
+              input.reason,
+              input,
+            ),
+          )
+          .run();
+        return created;
+      },
+      { behavior: 'immediate' },
     );
-    return created;
   }
 
   async attachMessage(caseId: string, message: Message<true>) {
@@ -207,8 +239,7 @@ export class CaseStore {
     const attachmentStorage: Array<Promise<CaseAttachmentRow>> = [];
     let admittedAttachments = 0;
     for (const attachment of message.attachments.values()) {
-      const attachmentName =
-        attachment.name ?? `${attachment.id}.bin`;
+      const attachmentName = attachment.name ?? `${attachment.id}.bin`;
       const eligibleForProcessing =
         resolveImageContentType(attachment.contentType, attachmentName) !==
           null &&
@@ -491,18 +522,12 @@ export class CaseStore {
   async recoverInterruptedOperations() {
     return this.db.transaction(
       (tx) => {
-        const transitions = operationTransitions();
         const interruptedCases = tx
           .select()
           .from(cases)
-          .where(
-            inArray(
-              cases.status,
-              transitions.map(([, transition]) => transition.claimed),
-            ),
-          )
+          .where(inArray(cases.status, claimedCaseStatuses))
           .all();
-        let recovered = 0;
+        let recoveredCount = 0;
 
         for (const caseRow of interruptedCases) {
           const entry = operationTransitionForStatus(caseRow.status, 'claimed');
@@ -556,13 +581,26 @@ export class CaseStore {
               ),
             )
             .run();
-          recovered += 1;
+          recoveredCount += 1;
         }
 
-        return recovered;
+        return recoveredCount;
       },
       { behavior: 'immediate' },
     );
+  }
+
+  async listUncertainCaseReviews(): Promise<RecoveredUncertainCase[]> {
+    return this.db
+      .select({
+        caseId: cases.id,
+        guildId: cases.guildId,
+        reviewChannelId: cases.reviewChannelId,
+        reviewMessageId: cases.reviewMessageId,
+      })
+      .from(cases)
+      .where(inArray(cases.status, uncertainCaseStatuses))
+      .all();
   }
 
   async claimOperation(

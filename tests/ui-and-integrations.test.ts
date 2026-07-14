@@ -13,6 +13,7 @@ import {
   caseReviewUncertainUpdate,
   type CaseReviewInput,
 } from '../src/interactions/caseReviewUi.js';
+import { refreshRecoveredCaseReviews } from '../src/services/caseReviewRecovery.js';
 import { OpenRouterScamClassifier } from '../src/services/classifier.js';
 import { OpenRouterEmbeddings } from '../src/services/embeddings.js';
 import { GlobalBanService } from '../src/services/globalBanList.js';
@@ -336,6 +337,159 @@ describe('case review UI', () => {
       'case:punish:case1',
       'case:dismiss:case1',
     ]);
+  });
+
+  it('refreshes recovered uncertain case messages with reconciliation actions', async () => {
+    const existing = {
+      components: caseReviewMessage(caseInput()).components as Array<any>,
+      edit: vi.fn(async (payload: unknown) => void payload),
+    };
+    const channel = {
+      isTextBased: () => true,
+      messages: { fetch: vi.fn(async () => existing) },
+      send: vi.fn(async (payload: unknown) => void payload),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
+        ]),
+      },
+    };
+    const caseStore = { setReviewMessage: vi.fn() };
+
+    await expect(
+      refreshRecoveredCaseReviews(client as any, caseStore as any, [
+        {
+          caseId: 'case1',
+          guildId: 'guild',
+          reviewChannelId: 'review-channel',
+          reviewMessageId: 'review-message',
+        },
+      ]),
+    ).resolves.toEqual({ updated: 1, reposted: 0, skipped: 0, failed: 0 });
+
+    expect(channel.messages.fetch).toHaveBeenCalledWith('review-message');
+    const payload = existing.edit.mock.calls[0]?.[0] as {
+      components: Array<any>;
+    };
+    expect(textContent(payload.components)).toContain(
+      'Reconciliation required',
+    );
+    expect(customIds(payload.components)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+    expect(channel.send).not.toHaveBeenCalled();
+  });
+
+  it('reposts recovered reconciliation controls when the old review is gone', async () => {
+    const channel = {
+      isTextBased: () => true,
+      messages: {
+        fetch: vi.fn(async () => {
+          throw { code: RESTJSONErrorCodes.UnknownMessage };
+        }),
+      },
+      send: vi.fn(async (payload: unknown) => {
+        void payload;
+        return {
+          id: 'new-review-message',
+          channelId: 'review-channel',
+        };
+      }),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
+        ]),
+      },
+    };
+    const caseStore = {
+      setReviewMessage: vi.fn(async () => undefined),
+    };
+
+    await expect(
+      refreshRecoveredCaseReviews(client as any, caseStore as any, [
+        {
+          caseId: 'case1',
+          guildId: 'guild',
+          reviewChannelId: 'review-channel',
+          reviewMessageId: 'old-review-message',
+        },
+      ]),
+    ).resolves.toEqual({ updated: 0, reposted: 1, skipped: 0, failed: 0 });
+
+    const payload = channel.send.mock.calls[0]?.[0] as {
+      components: Array<any>;
+    };
+    expect(textContent(payload.components)).toContain(
+      'Reconciliation required',
+    );
+    expect(customIds(payload.components)).toEqual([
+      'case:reconcile-applied:case1',
+      'case:reconcile-not-applied:case1',
+    ]);
+    expect(caseStore.setReviewMessage).toHaveBeenCalledWith(
+      'case1',
+      'review-channel',
+      'new-review-message',
+    );
+  });
+
+  it('retries recovered review refreshes after transient Discord failures', async () => {
+    const existing = {
+      components: caseReviewMessage(caseInput()).components as Array<any>,
+      edit: vi.fn(async (payload: unknown) => void payload),
+    };
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Discord unavailable'))
+      .mockResolvedValueOnce(existing);
+    const channel = {
+      isTextBased: () => true,
+      messages: { fetch },
+      send: vi.fn(async (payload: unknown) => void payload),
+    };
+    const client = {
+      guilds: {
+        cache: new Map([
+          [
+            'guild',
+            { channels: { fetch: vi.fn(async () => channel) } },
+          ],
+        ]),
+      },
+    };
+    const caseStore = { setReviewMessage: vi.fn() };
+    const recovered = [
+      {
+        caseId: 'case1',
+        guildId: 'guild',
+        reviewChannelId: 'review-channel',
+        reviewMessageId: 'review-message',
+      },
+    ];
+
+    await expect(
+      refreshRecoveredCaseReviews(
+        client as any,
+        caseStore as any,
+        recovered,
+      ),
+    ).resolves.toEqual({ updated: 0, reposted: 0, skipped: 0, failed: 1 });
+    await expect(
+      refreshRecoveredCaseReviews(
+        client as any,
+        caseStore as any,
+        recovered,
+      ),
+    ).resolves.toEqual({ updated: 1, reposted: 0, skipped: 0, failed: 0 });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(existing.edit).toHaveBeenCalledOnce();
+    expect(channel.send).not.toHaveBeenCalled();
   });
 
   it('adds and removes resolution containers without mutating case and signal containers', () => {

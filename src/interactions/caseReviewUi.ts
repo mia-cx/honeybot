@@ -135,12 +135,29 @@ export function caseReviewUncertainUpdate(
   input: { caseId: string },
 ): InteractionUpdateOptions {
   return {
-    components: [
-      ...withoutResolutionOrActions(existingComponents),
-      uncertainOperationContainer(),
-      buttonRow(reconciliationButtons(input.caseId)),
-    ],
+    components: uncertainReviewComponents(existingComponents, input.caseId),
   } as InteractionUpdateOptions;
+}
+
+export function caseReviewUncertainMessage(input: {
+  caseId: string;
+}): MessageCreateOptions {
+  return {
+    flags: COMPONENTS_V2,
+    components: uncertainReviewComponents([], input.caseId),
+    allowedMentions: { parse: [] },
+  } as MessageCreateOptions;
+}
+
+function uncertainReviewComponents(
+  existingComponents: readonly unknown[],
+  caseId: string,
+) {
+  return [
+    ...withoutResolutionOrActions(existingComponents),
+    uncertainOperationContainer(),
+    buttonRow(reconciliationButtons(caseId)),
+  ];
 }
 
 function caseReviewComponents(
