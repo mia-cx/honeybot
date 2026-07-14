@@ -1,3 +1,5 @@
+import { writeFileSync } from 'node:fs';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -12,6 +14,7 @@ import {
   releaseLabels,
   type ReleaseIdentity,
 } from '../scripts/releaseMetadata.js';
+import { runGit } from '../scripts/releaseGit.js';
 
 const ref = '0123456789abcdef0123456789abcdef01234567';
 const identity: ReleaseIdentity = {
@@ -30,9 +33,11 @@ const digest =
 describe('registry publication adapter', () => {
   it('uses a real registry transfer for cross-registry copies', () => {
     const commands: Array<{ command: string; args: string[] }> = [];
-    const adapter = new DockerBuildxAdapter((command, args) => {
-      commands.push({ command, args });
-      return '';
+    const adapter = new DockerBuildxAdapter({
+      capture: () => '',
+      stream: (command, args) => {
+        commands.push({ command, args });
+      },
     });
 
     adapter.transfer(
@@ -55,9 +60,11 @@ describe('registry publication adapter', () => {
 
   it('uses Buildx only for registry-local retags', () => {
     const commands: Array<{ command: string; args: string[] }> = [];
-    const adapter = new DockerBuildxAdapter((command, args) => {
-      commands.push({ command, args });
-      return '';
+    const adapter = new DockerBuildxAdapter({
+      capture: () => '',
+      stream: (command, args) => {
+        commands.push({ command, args });
+      },
     });
 
     adapter.retag(
@@ -89,14 +96,18 @@ describe('registry publication adapter', () => {
   });
 
   it('observes a structurally valid image with no OCI labels', () => {
-    const adapter = new DockerBuildxAdapter(() =>
-      JSON.stringify({
-        manifest: { digest },
-        image: {
-          'linux/amd64': { config: {} },
-        },
-      }),
-    );
+    const adapter = new DockerBuildxAdapter({
+      capture: () =>
+        JSON.stringify({
+          manifest: { digest },
+          image: {
+            'linux/amd64': { config: {} },
+          },
+        }),
+      stream: () => {
+        throw new Error('inspect must not use the streaming command path');
+      },
+    });
 
     expect(
       adapter.inspect('docker.io/miacx/honeybot:v1.0.1'),
@@ -110,18 +121,55 @@ describe('registry publication adapter', () => {
   it.each([{}, { config: 'invalid' }])(
     'rejects a malformed platform image config %#',
     (platformImage) => {
-      const adapter = new DockerBuildxAdapter(() =>
-        JSON.stringify({
-          manifest: { digest },
-          image: { 'linux/amd64': platformImage },
-        }),
-      );
+      const adapter = new DockerBuildxAdapter({
+        capture: () =>
+          JSON.stringify({
+            manifest: { digest },
+            image: { 'linux/amd64': platformImage },
+          }),
+        stream: () => {
+          throw new Error('inspect must not use the streaming command path');
+        },
+      });
 
       expect(() =>
         adapter.inspect('docker.io/miacx/honeybot:v1.0.1'),
       ).toThrow('Image config missing');
     },
   );
+
+  it('streams image build output instead of capturing it in memory', () => {
+    const streamed: Array<{ command: string; args: string[] }> = [];
+    const adapter = new DockerBuildxAdapter({
+      capture: () => {
+        throw new Error('build must not use the captured command path');
+      },
+      stream: (command, args) => {
+        streamed.push({ command, args });
+        const metadataIndex = args.indexOf('--metadata-file');
+        const metadataFile = args[metadataIndex + 1];
+        if (!metadataFile) throw new Error('metadata file argument missing');
+        writeFileSync(
+          metadataFile,
+          JSON.stringify({ 'containerimage.digest': digest }),
+        );
+      },
+    });
+    const currentRef = runGit(['rev-parse', 'HEAD']);
+
+    expect(
+      adapter.build({
+        identity: { channel: 'stable', version: '1.0.1', ref: currentRef },
+        references: ['ghcr.io/mia-cx/honeybot:v1.0.1'],
+        labels: releaseLabels(
+          { channel: 'stable', version: '1.0.1', ref: currentRef },
+          repository,
+        ),
+      }),
+    ).toBe(digest);
+    expect(streamed).toHaveLength(1);
+    expect(streamed[0]?.args.slice(0, 2)).toEqual(['buildx', 'build']);
+  });
 });
 
 describe('immutable container publication', () => {

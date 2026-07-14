@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,14 +15,16 @@ export interface CommandResult {
   status: number;
 }
 
+export interface CommandOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  allowFailure?: boolean;
+}
+
 export function runCommand(
   command: string,
   args: string[],
-  options: {
-    cwd?: string;
-    env?: NodeJS.ProcessEnv;
-    allowFailure?: boolean;
-  } = {},
+  options: CommandOptions = {},
 ): string {
   try {
     return execFileSync(command, args, {
@@ -37,6 +39,27 @@ export function runCommand(
     throw new Error(
       `${command} ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`,
     );
+  }
+}
+
+export function runStreamingCommand(
+  command: string,
+  args: string[],
+  options: Pick<CommandOptions, 'cwd' | 'env'> = {},
+): void {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ['ignore', 'inherit', 'inherit'],
+  });
+  if (result.error) {
+    throw new Error(`${command} failed to start: ${result.error.message}`);
+  }
+  if (result.signal) {
+    throw new Error(`${command} was terminated by signal ${result.signal}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`${command} failed with exit code ${result.status ?? 'unknown'}`);
   }
 }
 

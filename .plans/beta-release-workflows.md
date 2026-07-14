@@ -126,7 +126,7 @@ Responsibilities:
 7. Fail before writes on conflicting digests/identity labels, and verify all immutable references after writes.
 8. Return the canonical digest and verified completion state as typed data and GitHub outputs.
 
-The beta reconciliation script imports this module and calls it sequentially for every eligible integration in the current stable epoch; the stable reconciliation script does the same for each release candidate. Workflows remain responsible for pinned QEMU/Buildx/crane setup, registry authentication, permissions, secrets, and job summaries. The module never updates moving aliases: separate state reconcilers retag only from a verified immutable source in each alias's destination registry, preserving distinct immutable-publication and mutable-promotion failure boundaries.
+The beta reconciliation script imports this module and calls it sequentially for every eligible integration in the current stable epoch; the stable reconciliation script does the same for each release candidate. Workflows remain responsible for pinned QEMU/Buildx/crane setup, registry authentication, permissions, secrets, and job summaries. Bounded inspection/Git metadata commands use captured output, while long-running build, push, cross-registry transfer, and retag commands stream inherited output so normal BuildKit logs cannot exhaust Node's synchronous command buffer. The module never updates moving aliases: separate state reconcilers retag only from a verified immutable source in each alias's destination registry, preserving distinct immutable-publication and mutable-promotion failure boundaries.
 
 ### `.github/workflows/container.yml`
 

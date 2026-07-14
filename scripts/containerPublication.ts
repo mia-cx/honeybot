@@ -16,7 +16,11 @@ import {
   type RegistryRepositories,
   type ReleaseIdentity,
 } from './releaseMetadata.js';
-import { runCommand, withDetachedWorktree } from './releaseGit.js';
+import {
+  runCommand,
+  runStreamingCommand,
+  withDetachedWorktree,
+} from './releaseGit.js';
 
 export interface ImageObservation {
   reference: string;
@@ -30,7 +34,10 @@ export interface BuildRequest {
   labels: Record<string, string>;
 }
 
-export type CommandRunner = typeof runCommand;
+export interface PublicationCommandExecutor {
+  capture: typeof runCommand;
+  stream: typeof runStreamingCommand;
+}
 
 export interface PublicationAdapter {
   inspect(reference: string): ImageObservation | null;
@@ -60,13 +67,20 @@ export interface ReconcilePublicationInput {
   repository: string;
 }
 
+const publicationCommands: PublicationCommandExecutor = {
+  capture: runCommand,
+  stream: runStreamingCommand,
+};
+
 export class DockerBuildxAdapter implements PublicationAdapter {
-  constructor(private readonly command: CommandRunner = runCommand) {}
+  constructor(
+    private readonly commands: PublicationCommandExecutor = publicationCommands,
+  ) {}
 
   inspect(reference: string): ImageObservation | null {
     let output: string;
     try {
-      output = this.command('docker', [
+      output = this.commands.capture('docker', [
         'buildx',
         'imagetools',
         'inspect',
@@ -159,7 +173,7 @@ export class DockerBuildxAdapter implements PublicationAdapter {
             'type=gha,mode=max',
           );
         }
-        this.command('docker', args);
+        this.commands.stream('docker', args);
 
         const metadata: unknown = JSON.parse(
           readFileSync(metadataFile, 'utf8'),
@@ -187,7 +201,7 @@ export class DockerBuildxAdapter implements PublicationAdapter {
   ): void {
     assertRegistryRelationship(sourceReference, destinationReference, 'same');
     const sourceRepository = referenceRepository(sourceReference);
-    this.command('docker', [
+    this.commands.stream('docker', [
       'buildx',
       'imagetools',
       'create',
@@ -208,7 +222,7 @@ export class DockerBuildxAdapter implements PublicationAdapter {
       'different',
     );
     const sourceRepository = referenceRepository(sourceReference);
-    this.command('crane', [
+    this.commands.stream('crane', [
       'copy',
       `${sourceRepository}@${digest}`,
       destinationReference,
