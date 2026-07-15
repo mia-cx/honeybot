@@ -234,6 +234,79 @@ describe('stable release discovery', () => {
 });
 
 describe('beta alias convergence', () => {
+  it('repairs aliases from the previous beta epoch after its stable release', () => {
+    const fixture = createBetaRepository();
+    advanceBetaFixtureToStable(fixture);
+    const identity: ReleaseIdentity = {
+      channel: 'beta',
+      version: '1.1.0-beta.2',
+      ref: fixture.second,
+    };
+    const adapter = new AliasRepairAdapter(fixture.repositories, [identity]);
+
+    const result = promoteLatestBeta({
+      adapter,
+      repositories: fixture.repositories,
+      repository: 'mia-cx/honeybot',
+      cwd: fixture.repository,
+      changesetReleaseAt: () => ({
+        name: 'honeybot',
+        type: 'minor',
+        oldVersion: '1.0.0',
+        newVersion: '1.1.0',
+      }),
+    });
+
+    expect(result).toMatchObject({
+      state: 'promoted',
+      version: identity.version,
+      successorNeeded: false,
+    });
+    expect(adapter.promotedSources).not.toHaveLength(0);
+    expect(adapter.promotedSources.every((source) => source.includes(':v1.1.0-beta.2'))).toBe(true);
+  });
+
+  it('prefers a newer beta epoch even when its ordinal is lower', () => {
+    const fixture = createBetaRepository();
+    advanceBetaFixtureToStable(fixture);
+    writeFileSync(join(fixture.repository, 'next-beta.txt'), 'next beta\n');
+    runGit(['add', '.'], fixture.repository);
+    runGit(['commit', '--message', 'next beta integration'], fixture.repository);
+    const next = runGit(['rev-parse', 'HEAD'], fixture.repository);
+    runGit(['tag', 'v1.2.0-beta.1', next], fixture.repository);
+    runGit(['push', 'origin', 'main', '--tags'], fixture.repository);
+
+    const identities: ReleaseIdentity[] = [
+      {
+        channel: 'beta',
+        version: '1.1.0-beta.2',
+        ref: fixture.second,
+      },
+      { channel: 'beta', version: '1.2.0-beta.1', ref: next },
+    ];
+    const adapter = new AliasRepairAdapter(fixture.repositories, identities);
+
+    const result = promoteLatestBeta({
+      adapter,
+      repositories: fixture.repositories,
+      repository: 'mia-cx/honeybot',
+      cwd: fixture.repository,
+      changesetReleaseAt: (ref) => ({
+        name: 'honeybot',
+        type: 'minor',
+        oldVersion: ref === next ? '1.1.0' : '1.0.0',
+        newVersion: ref === next ? '1.2.0' : '1.1.0',
+      }),
+    });
+
+    expect(result).toMatchObject({
+      state: 'promoted',
+      version: '1.2.0-beta.1',
+      successorNeeded: false,
+    });
+    expect(adapter.promotedSources.every((source) => source.includes(':v1.2.0-beta.1'))).toBe(true);
+  });
+
   it('reselects complete beta state at the same main tip until aliases stabilize', () => {
     const fixture = createBetaRepository();
     const adapter = new PromotionAdapter(fixture);
@@ -321,6 +394,45 @@ class StableGapAdapter implements PublicationAdapter {
       .immutable) {
       this.images.set(reference, { reference, digest, labels });
     }
+  }
+}
+
+class AliasRepairAdapter implements PublicationAdapter {
+  readonly promotedSources: string[] = [];
+  private readonly images = new Map<string, ImageObservation>();
+
+  constructor(
+    repositories: Parameters<typeof imageReferences>[1],
+    identities: ReleaseIdentity[],
+  ) {
+    for (const [index, identity] of identities.entries()) {
+      const digest = `sha256:${String(index + 1).repeat(64)}`;
+      const labels = releaseLabels(identity, 'mia-cx/honeybot');
+      for (const reference of imageReferences(identity, repositories).immutable) {
+        this.images.set(reference, { reference, digest, labels });
+      }
+    }
+  }
+
+  inspect(reference: string): ImageObservation | null {
+    return this.images.get(reference) ?? null;
+  }
+
+  build(): string {
+    throw new Error('alias repair test must not build');
+  }
+
+  retag(source: string, digest: string, destination: string): void {
+    const image = this.images.get(source);
+    if (!image || image.digest !== digest) {
+      throw new Error(`Missing immutable source ${source}@${digest}`);
+    }
+    this.promotedSources.push(source);
+    this.images.set(destination, { ...image, reference: destination });
+  }
+
+  transfer(): void {
+    throw new Error('alias repair must use registry-local retags');
   }
 }
 
@@ -457,6 +569,16 @@ function createStableGapRepository() {
       dockerhub: 'docker.io/miacx/honeybot',
     },
   };
+}
+
+function advanceBetaFixtureToStable(
+  fixture: ReturnType<typeof createBetaRepository>,
+): void {
+  writePackage(fixture.repository, '1.1.0');
+  runGit(['add', 'package.json'], fixture.repository);
+  runGit(['commit', '--message', 'stable 1.1.0'], fixture.repository);
+  runGit(['tag', 'v1.1.0'], fixture.repository);
+  runGit(['push', 'origin', 'main', '--tags'], fixture.repository);
 }
 
 function createBetaRepository() {

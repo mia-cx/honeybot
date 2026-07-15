@@ -182,12 +182,7 @@ export function promoteLatestBeta(runtime: BetaRuntime): BetaPromotionResult {
         successorMode: 'none',
       };
     }
-    const selected = selectLatestCompleteBeta(
-      runtime,
-      baselineRef,
-      capturedTip,
-      cwd,
-    );
+    const selected = selectLatestCompleteBeta(runtime, capturedTip, cwd);
     if (!selected) {
       const finalTip = fetchMainAndTags(remote, branch, cwd);
       return {
@@ -217,12 +212,7 @@ export function promoteLatestBeta(runtime: BetaRuntime): BetaPromotionResult {
         digest: selected.publication.digest,
       };
     }
-    const confirmed = selectLatestCompleteBeta(
-      runtime,
-      baselineRef,
-      finalTip,
-      cwd,
-    );
+    const confirmed = selectLatestCompleteBeta(runtime, finalTip, cwd);
     if (
       confirmed?.identity.version === selected.identity.version &&
       confirmed.identity.ref === selected.identity.ref &&
@@ -248,17 +238,16 @@ export function promoteLatestBeta(runtime: BetaRuntime): BetaPromotionResult {
 
 function selectLatestCompleteBeta(
   runtime: BetaRuntime,
-  baselineRef: string,
   capturedTip: string,
   cwd: string,
 ) {
-  const firstParent = new Set(
-    firstParentCommits(`${baselineRef}..${capturedTip}`, cwd),
+  const firstParentPositions = new Map(
+    firstParentCommits(capturedTip, cwd).map((ref, position) => [ref, position]),
   );
   let selected:
     | {
         identity: ReleaseIdentity;
-        distance: number;
+        position: number;
         publication: NonNullable<ReturnType<typeof publicationComplete>>;
       }
     | undefined;
@@ -275,8 +264,20 @@ function selectLatestCompleteBeta(
       continue;
     }
     const ref = resolveTagCommit(tag, cwd);
-    if (ref === null || !firstParent.has(ref)) continue;
-    const distance = firstParentDistance(baselineRef, ref, cwd);
+    if (ref === null) continue;
+    const position = firstParentPositions.get(ref);
+    if (position === undefined) continue;
+
+    const baselineVersion = packageVersionAt(ref, cwd);
+    const baselineRef = resolveStableTagCommit(baselineVersion, cwd);
+    const baselinePosition =
+      baselineRef === null ? undefined : firstParentPositions.get(baselineRef);
+    if (baselinePosition === undefined || baselinePosition >= position) {
+      throw new Error(
+        `Beta tag ${tag} has no preceding first-parent stable baseline v${baselineVersion}`,
+      );
+    }
+    const distance = position - baselinePosition;
     const release = releaseIntentAt(runtime, ref, cwd);
     if (
       !release ||
@@ -297,8 +298,8 @@ function selectLatestCompleteBeta(
       runtime.adapter,
     );
     if (!publication) continue;
-    if (!selected || distance > selected.distance) {
-      selected = { identity, distance, publication };
+    if (!selected || position > selected.position) {
+      selected = { identity, position, publication };
     }
   }
   return selected;
