@@ -47,7 +47,10 @@ jobs:
 
   version:
     name: Create or update the Changesets release PR
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'update-version-pr'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.mode == 'update-version-pr'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -95,7 +98,11 @@ jobs:
 
   stable:
     name: Reconcile stable releases
-    if: github.event_name == 'push' || inputs.mode == 'reconcile-stable'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main' &&
+       inputs.mode == 'reconcile-stable')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -171,7 +178,10 @@ jobs:
 
   adopt-legacy:
     name: Adopt the v1.0.1 stable baseline
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'adopt-v1.0.1'
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.mode == 'adopt-v1.0.1'
     runs-on: ubuntu-latest
     environment: stable-release
     permissions:

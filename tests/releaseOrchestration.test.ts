@@ -51,7 +51,82 @@ describe('workflow dispatch routing', () => {
       }
     }
   });
+
+  it('keeps privileged manual dispatch jobs on the trusted main ref', () => {
+    const expectations = [
+      {
+        workflow: '.github/workflows/container.yml',
+        job: 'reconcile',
+        predicates: [
+          "github.event_name == 'push'",
+          "github.event_name == 'workflow_dispatch'",
+          "github.ref == 'refs/heads/main'",
+          "inputs.mode == 'reconcile-beta'",
+        ],
+      },
+      {
+        workflow: '.github/workflows/container.yml',
+        job: 'promote',
+        predicates: [
+          "needs.reconcile.result == 'success'",
+          "github.event_name == 'workflow_dispatch'",
+          "github.ref == 'refs/heads/main'",
+          "inputs.mode == 'promote-aliases'",
+        ],
+      },
+      {
+        workflow: '.github/workflows/release.yml',
+        job: 'version',
+        predicates: [
+          "github.event_name == 'workflow_dispatch'",
+          "github.ref == 'refs/heads/main'",
+          "inputs.mode == 'update-version-pr'",
+        ],
+      },
+      {
+        workflow: '.github/workflows/release.yml',
+        job: 'stable',
+        predicates: [
+          "github.event_name == 'push'",
+          "github.event_name == 'workflow_dispatch'",
+          "github.ref == 'refs/heads/main'",
+          "inputs.mode == 'reconcile-stable'",
+        ],
+      },
+      {
+        workflow: '.github/workflows/release.yml',
+        job: 'adopt-legacy',
+        predicates: [
+          "github.event_name == 'workflow_dispatch'",
+          "github.ref == 'refs/heads/main'",
+          "inputs.mode == 'adopt-v1.0.1'",
+        ],
+      },
+    ];
+
+    for (const expectation of expectations) {
+      const workflow = readFileSync(
+        join(process.cwd(), expectation.workflow),
+        'utf8',
+      );
+      const job = workflowJob(workflow, expectation.job);
+      for (const predicate of expectation.predicates) {
+        expect(job).toContain(predicate);
+      }
+    }
+  });
 });
+
+function workflowJob(workflow: string, jobName: string): string {
+  const lines = workflow.split('\n');
+  const start = lines.indexOf(`  ${jobName}:`);
+  if (start < 0) throw new Error(`Workflow job ${jobName} is missing`);
+  const relativeEnd = lines
+    .slice(start + 1)
+    .findIndex((line) => /^ {2}[a-z][a-z0-9-]*:$/.test(line));
+  const end = relativeEnd < 0 ? lines.length : start + 1 + relativeEnd;
+  return lines.slice(start, end).join('\n');
+}
 
 describe('stable release discovery', () => {
   it('finds Changesets version transitions at their exact first-parent commit', () => {

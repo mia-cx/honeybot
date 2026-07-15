@@ -25,7 +25,11 @@ env:
 jobs:
   reconcile:
     name: Reconcile immutable beta publications
-    if: github.event_name == 'push' || inputs.mode == 'reconcile-beta'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main' &&
+       inputs.mode == 'reconcile-beta')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -88,7 +92,10 @@ jobs:
     needs: reconcile
     if: >-
       always() && !cancelled() &&
-      (inputs.mode == 'promote-aliases' || needs.reconcile.result == 'success')
+      (needs.reconcile.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main' &&
+        inputs.mode == 'promote-aliases'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
