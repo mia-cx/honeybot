@@ -52,6 +52,19 @@ describe('workflow dispatch routing', () => {
     }
   });
 
+  it('parses workflow job boundaries with CRLF line endings', () => {
+    const workflow = [
+      'jobs:',
+      '  version:',
+      '    if: trusted',
+      '    runs-on: ubuntu-latest',
+      '  stable:',
+      '    if: trusted',
+    ].join('\r\n');
+
+    expect(workflowJob(workflow, 'version')).toContain('    if: trusted');
+  });
+
   it('keeps privileged manual dispatch jobs on the trusted main ref', () => {
     const expectations = [
       {
@@ -118,7 +131,7 @@ describe('workflow dispatch routing', () => {
 });
 
 function workflowJob(workflow: string, jobName: string): string {
-  const lines = workflow.split('\n');
+  const lines = workflow.split(/\r?\n/);
   const start = lines.indexOf(`  ${jobName}:`);
   if (start < 0) throw new Error(`Workflow job ${jobName} is missing`);
   const relativeEnd = lines
