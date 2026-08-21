@@ -133,6 +133,55 @@ describe('workflow dispatch routing', () => {
     }
   });
 
+  it('gates credential-writing jobs and rejects stale approved revisions', () => {
+    const expectations = [
+      ['.github/workflows/container.yml', 'reconcile'],
+      ['.github/workflows/container.yml', 'promote'],
+      ['.github/workflows/release.yml', 'version'],
+      ['.github/workflows/release.yml', 'stable'],
+      ['.github/workflows/release.yml', 'adopt-legacy'],
+    ] as const;
+
+    for (const [workflowPath, jobName] of expectations) {
+      const workflow = readFileSync(join(process.cwd(), workflowPath), 'utf8');
+      const job = workflowJob(workflow, jobName);
+      expect(job).toContain('environment: stable-release');
+      expect(job).toContain('ref: ${{ github.sha }}');
+      expect(job).toContain('persist-credentials: false');
+      expect(job).toContain('Verify approved revision is still live main');
+      expect(job).toContain(
+        'refs/heads/main:refs/remotes/origin/main',
+      );
+      expect(job).toContain(
+        'git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)',
+      );
+    }
+  });
+
+  it('creates and exposes the release App token only after trusted setup', () => {
+    const workflow = readFileSync(
+      join(process.cwd(), '.github/workflows/release.yml'),
+      'utf8',
+    );
+    const job = workflowJob(workflow, 'version');
+    const install = job.indexOf('name: Install dependencies');
+    const liveMainCheck = job.indexOf(
+      'name: Verify approved revision is still live main',
+    );
+    const createToken = job.indexOf('name: Create release automation token');
+    const changesets = job.indexOf('name: Create version pull request');
+
+    expect(install).toBeGreaterThan(-1);
+    expect(liveMainCheck).toBeGreaterThan(install);
+    expect(createToken).toBeGreaterThan(liveMainCheck);
+    expect(changesets).toBeGreaterThan(createToken);
+    expect(job).not.toContain('persist-credentials: true');
+    expect(job).not.toContain('token: ${{ steps.release-token.outputs.token }}');
+    expect(job).toContain('credential.helper');
+    expect(job).toContain('password=$GITHUB_TOKEN');
+    expect(job).toContain('Remove App Git authentication helper');
+  });
+
   it('schedules state recovery after an interrupted beta run', () => {
     const workflow = readFileSync(
       join(process.cwd(), '.github/workflows/container.yml'),

@@ -34,6 +34,7 @@ jobs:
        github.ref == 'refs/heads/main' &&
        inputs.mode == 'reconcile-beta')
     runs-on: ubuntu-latest
+    environment: stable-release
     permissions:
       contents: write
       packages: write
@@ -47,6 +48,7 @@ jobs:
       - name: Checkout full history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -70,6 +72,11 @@ jobs:
 
       - name: Set up crane
         uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify approved revision is still live main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Login GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -100,6 +107,7 @@ jobs:
         github.ref == 'refs/heads/main' &&
         inputs.mode == 'promote-aliases'))
     runs-on: ubuntu-latest
+    environment: stable-release
     permissions:
       contents: read
       packages: write
@@ -114,6 +122,7 @@ jobs:
       - name: Checkout full history
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -134,6 +143,11 @@ jobs:
 
       - name: Set up crane
         uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify approved revision is still live main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Login GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
