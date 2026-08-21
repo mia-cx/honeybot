@@ -109,9 +109,9 @@ export class DockerBuildxAdapter implements PublicationAdapter {
     if (!isRecord(value.image))
       throw new Error(`Unable to read image configs for ${reference}`);
 
-    const platformLabels = Object.values(value.image).map((image) =>
-      extractLabels(image, reference),
-    );
+    const platformLabels = Object.entries(value.image)
+      .filter(([platform]) => !platform.startsWith('unknown/'))
+      .map(([, image]) => extractLabels(image, reference));
     if (platformLabels.length === 0)
       throw new Error(`No platform images found for ${reference}`);
     const labels = platformLabels[0];

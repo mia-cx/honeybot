@@ -118,6 +118,30 @@ describe('registry publication adapter', () => {
     });
   });
 
+  it('ignores provenance attestations when comparing platform labels', () => {
+    const labels = releaseLabels(identity, repository);
+    const adapter = new DockerBuildxAdapter({
+      capture: () =>
+        JSON.stringify({
+          manifest: { digest },
+          image: {
+            'linux/amd64': { config: { Labels: labels } },
+            'linux/arm64': { config: { Labels: labels } },
+            'unknown/unknown': { config: {} },
+          },
+        }),
+      stream: () => {
+        throw new Error('inspect must not use the streaming command path');
+      },
+    });
+
+    expect(adapter.inspect('ghcr.io/mia-cx/honeybot:v1.2.0-beta.3')).toEqual({
+      reference: 'ghcr.io/mia-cx/honeybot:v1.2.0-beta.3',
+      digest,
+      labels,
+    });
+  });
+
   it.each([{}, { config: 'invalid' }])(
     'rejects a malformed platform image config %#',
     (platformImage) => {

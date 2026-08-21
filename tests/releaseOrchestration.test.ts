@@ -180,6 +180,26 @@ describe('workflow dispatch routing', () => {
     expect(job).toContain('credential.helper');
     expect(job).toContain('password=$GITHUB_TOKEN');
     expect(job).toContain('Remove App Git authentication helper');
+    const jobPermissions = job.slice(
+      job.indexOf('    permissions:'),
+      job.indexOf('    concurrency:'),
+    );
+    expect(jobPermissions).toContain('contents: read');
+    expect(jobPermissions).not.toContain('pull-requests: write');
+  });
+
+  it('passes reviewed legacy identity inputs through the package script', () => {
+    const packageJson = JSON.parse(
+      readFileSync(join(process.cwd(), 'package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    const command = packageJson.scripts['release:adopt-v1.0.1'];
+
+    expect(command).toContain(
+      '--expected-legacy-digest "$EXPECTED_LEGACY_DIGEST"',
+    );
+    expect(command).toContain(
+      '--expected-legacy-revision "$EXPECTED_LEGACY_REVISION"',
+    );
   });
 
   it('schedules state recovery after an interrupted beta run', () => {

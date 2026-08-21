@@ -87,6 +87,23 @@ describe('release Git adapter', () => {
     );
     expect(describeError('plain failure')).toBe('plain failure');
   });
+
+  it('redacts raw, encoded, and URL-embedded credentials from diagnostics', () => {
+    const token = 'release-token-value';
+    const encoded = Buffer.from(`x-access-token:${token}`).toString('base64');
+    const diagnostic = describeError(
+      new Error(
+        `push failed: ${token} AUTHORIZATION: basic ${encoded} https://user:password@example.com`,
+      ),
+      { RELEASE_GITHUB_TOKEN: token },
+    );
+
+    expect(diagnostic).toContain('push failed');
+    expect(diagnostic).not.toContain(token);
+    expect(diagnostic).not.toContain(encoded);
+    expect(diagnostic).not.toContain('user:password');
+    expect(diagnostic.match(/\[redacted\]/g)?.length).toBeGreaterThanOrEqual(3);
+  });
 });
 
 function createRepository(): string {

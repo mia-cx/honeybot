@@ -145,8 +145,37 @@ export function fetchTag(
   }
 }
 
-export function describeError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+export function describeError(
+  error: unknown,
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  let message = error instanceof Error ? error.message : String(error);
+  const secrets = Object.entries(environment)
+    .filter(
+      ([name, value]) =>
+        value !== undefined &&
+        value.length >= 4 &&
+        /(token|secret|password|private.?key|authorization|credential)/i.test(
+          name,
+        ),
+    )
+    .flatMap(([, value]) => {
+      if (!value) return [];
+      return [
+        value,
+        encodeURIComponent(value),
+        Buffer.from(`x-access-token:${value}`).toString('base64'),
+      ];
+    })
+    .sort((left, right) => right.length - left.length);
+  for (const secret of secrets) message = message.replaceAll(secret, '[redacted]');
+  return message
+    .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, '$1[redacted]@')
+    .replace(/\b(basic|bearer)\s+[a-z0-9+/_=.-]+/gi, '$1 [redacted]')
+    .replace(
+      /\b(token|secret|password|private[-_ ]?key|authorization|credential)(\s*[:=]\s*)\S+/gi,
+      '$1$2[redacted]',
+    );
 }
 
 export function configureAutomationIdentity(cwd = process.cwd()): void {

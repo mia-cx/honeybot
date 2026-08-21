@@ -54,8 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: stable-release
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     concurrency:
       group: release-version-main
       cancel-in-progress: false

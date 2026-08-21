@@ -142,7 +142,7 @@ Immutable beta reconciliation (`push` or `reconcile-beta` mode):
 4. From a ready baseline, scan every first-parent commit through the captured live tip. In a detached worktree at each exact commit, parse Changesets status; skip no-release snapshots and stable release transitions, and collect every current-epoch eligible integration oldest-first.
 5. For each candidate, derive `<next-version>-beta.<N>` from that snapshot and its first-parent distance from the ready baseline tag. Preflight the immutable beta Git tag by comparing its peeled commit target before registry writes, reconcile exact/full-SHA references through `containerPublication`, then create the Git tag only after verified publication.
 6. Treat already complete candidates as idempotent no-ops and recover partial-valid candidates from their canonical digest without rebuilding. Any conflicting tag, digest, or identity label stops later candidates before their writes.
-7. Re-fetch the live tip after the pass. If new eligible history appeared, report that `reconcile-beta` successor work is required; the promotion job performs the dispatch with its restricted `actions: write` permission.
+7. Re-fetch the live tip after the pass. If it changed for any reason—including a no-Changeset commit or stable transition—report that `reconcile-beta` successor work is required; the promotion job performs the dispatch with its restricted `actions: write` permission so the new snapshot is classified explicitly.
 
 Use one branch-wide beta-publication concurrency group with `cancel-in-progress: false`. GitHub may replace pending runs, but every surviving run scans live first-parent state and reconciles all still-eligible current-epoch commits, so correctness does not depend on receiving every push event.
 
