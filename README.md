@@ -318,7 +318,7 @@ Actions:
 
 ## Image tags
 
-`main` is the integration and beta channel. A `main` commit with pending Changesets release intent publishes a transient version such as `1.2.3-beta.4` without committing that prerelease version. Merging the Changesets release PR creates the immutable stable `vX.Y.Z` Git tag and publishes the matching production image.
+`main` is the integration and beta channel. A `main` commit with pending release intent publishes a transient version such as `1.2.3-beta.4` without committing that prerelease version. Merging a manually prepared version PR creates the immutable stable `vX.Y.Z` Git tag and publishes the matching production image.
 
 Stable version `1.2.3` publishes:
 
@@ -353,9 +353,9 @@ pnpm eval:fixtures  # run classifier fixture evals
 pnpm seed:fixtures  # seed fixture evidence corpus
 ```
 
-GitHub Actions runs CI on PRs and pushes to `main`. Eligible `main` integrations publish multi-arch beta images; merging the Changesets release PR publishes stable images from that exact merge commit.
+GitHub Actions runs CI on PRs and pushes to `main`. Eligible `main` integrations publish multi-arch beta images; merging a version PR prepared with `pnpm changeset version` publishes stable images from that exact merge commit.
 
-Release automation requires `DOCKERHUB_TOKEN`, `RELEASE_APP_ID`, and `RELEASE_APP_PRIVATE_KEY` repository secrets. The GitHub App should be installed only on this repository with contents and pull-request write permissions so Changesets-authored release PR updates trigger normal required CI. Protect `main` before enabling the automatic publishers: require pull requests and CI, block force pushes and deletion, and limit direct pushes. Configure the `stable-release` GitHub environment with required reviewers for the one-time `v1.0.1` legacy-baseline adoption; automatic push and scheduled reconciliation jobs do not use that manual gate. The `Release` workflow exposes guarded recovery modes for stable reconciliation and adoption, and adoption requires freshly inspected, reviewer-approved legacy digest and revision inputs rather than checked-in registry state.
+Release automation requires the repository-level `DOCKERHUB_TOKEN` secret. Prepare stable versions manually with `pnpm changeset version`, review the generated version and changelog, and merge that version PR through protected `main`; no release GitHub App is required. Configure the `stable-release` GitHub environment with required reviewers for the one-time `v1.0.1` legacy-baseline adoption; automatic push and scheduled reconciliation jobs do not use that manual gate. The `Release` workflow exposes guarded recovery modes for stable reconciliation and adoption, and adoption requires freshly inspected, reviewer-approved legacy digest and revision inputs rather than checked-in registry state.
 
 ## Docs
 

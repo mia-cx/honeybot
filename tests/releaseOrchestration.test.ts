@@ -59,14 +59,14 @@ describe('workflow dispatch routing', () => {
   it('parses workflow job boundaries with CRLF line endings', () => {
     const workflow = [
       'jobs:',
-      '  version:',
+      '  stable:',
       '    if: trusted',
       '    runs-on: ubuntu-latest',
-      '  stable:',
+      '  adopt-legacy:',
       '    if: trusted',
     ].join('\r\n');
 
-    expect(workflowJob(workflow, 'version')).toContain('    if: trusted');
+    expect(workflowJob(workflow, 'stable')).toContain('    if: trusted');
   });
 
   it('keeps privileged manual dispatch jobs on the trusted main ref', () => {
@@ -90,15 +90,6 @@ describe('workflow dispatch routing', () => {
           "github.event_name == 'workflow_dispatch'",
           "github.ref == 'refs/heads/main'",
           "inputs.mode == 'promote-aliases'",
-        ],
-      },
-      {
-        workflow: '.github/workflows/release.yml',
-        job: 'version',
-        predicates: [
-          "github.event_name == 'workflow_dispatch'",
-          "github.ref == 'refs/heads/main'",
-          "inputs.mode == 'update-version-pr'",
         ],
       },
       {
@@ -138,7 +129,6 @@ describe('workflow dispatch routing', () => {
     const automaticJobs = [
       ['.github/workflows/container.yml', 'reconcile'],
       ['.github/workflows/container.yml', 'promote'],
-      ['.github/workflows/release.yml', 'version'],
       ['.github/workflows/release.yml', 'stable'],
     ] as const;
 
@@ -183,36 +173,6 @@ describe('workflow dispatch routing', () => {
     expect(workflowJob(containerWorkflow, 'promote')).not.toContain(
       'EXPECTED_MAIN_SHA',
     );
-  });
-
-  it('creates and exposes the release App token only after trusted setup', () => {
-    const workflow = readFileSync(
-      join(process.cwd(), '.github/workflows/release.yml'),
-      'utf8',
-    );
-    const job = workflowJob(workflow, 'version');
-    const install = job.indexOf('name: Install dependencies');
-    const liveMainCheck = job.indexOf(
-      'name: Verify workflow revision is still live main',
-    );
-    const createToken = job.indexOf('name: Create release automation token');
-    const changesets = job.indexOf('name: Create version pull request');
-
-    expect(install).toBeGreaterThan(-1);
-    expect(liveMainCheck).toBeGreaterThan(install);
-    expect(createToken).toBeGreaterThan(liveMainCheck);
-    expect(changesets).toBeGreaterThan(createToken);
-    expect(job).not.toContain('persist-credentials: true');
-    expect(job).not.toContain('token: ${{ steps.release-token.outputs.token }}');
-    expect(job).toContain('credential.helper');
-    expect(job).toContain('password=\\$GITHUB_TOKEN');
-    expect(job).toContain('Remove App Git authentication helper');
-    const jobPermissions = job.slice(
-      job.indexOf('    permissions:'),
-      job.indexOf('    concurrency:'),
-    );
-    expect(jobPermissions).toContain('contents: read');
-    expect(jobPermissions).not.toContain('pull-requests: write');
   });
 
   it('passes reviewed legacy identity inputs through the package script', () => {

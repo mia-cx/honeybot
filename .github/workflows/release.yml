@@ -15,7 +15,6 @@ on:
         type: choice
         default: reconcile-stable
         options:
-          - update-version-pr
           - reconcile-stable
           - adopt-v1.0.1
       expected-legacy-digest:
@@ -35,83 +34,6 @@ env:
   DOCKERHUB_REPOSITORY: honeybot
 
 jobs:
-  version-dispatch:
-    name: Queue a live-main Changesets update
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch version PR update from the current main tip
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run release.yml --ref main -f mode=update-version-pr
-
-  version:
-    name: Create or update the Changesets release PR
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      github.ref == 'refs/heads/main' &&
-      inputs.mode == 'update-version-pr'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    concurrency:
-      group: release-version-main
-      cancel-in-progress: false
-    steps:
-      - name: Checkout approved main revision
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          cache: pnpm
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Verify workflow revision is still live main
-        run: |
-          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
-          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
-          git branch --force main HEAD
-
-      - name: Create release automation token
-        id: release-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          permission-contents: write
-          permission-pull-requests: write
-
-      - name: Configure step-scoped App Git authentication
-        run: >-
-          git config --local credential.helper
-          "!f() { test \"\$1\" = get && printf \"%s\\n\" \"username=x-access-token\" \"password=\$GITHUB_TOKEN\"; }; f"
-
-      - name: Create version pull request
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
-        with:
-          title: 'chore(release): version packages'
-          commit: 'chore(release): version packages'
-        env:
-          GITHUB_TOKEN: ${{ steps.release-token.outputs.token }}
-
-      - name: Remove App Git authentication helper
-        if: always()
-        run: git config --local --unset-all credential.helper || true
-
   stable:
     name: Reconcile stable releases
     if: >-
