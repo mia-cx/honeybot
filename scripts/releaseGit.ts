@@ -59,7 +59,9 @@ export function runStreamingCommand(
     throw new Error(`${command} was terminated by signal ${result.signal}`);
   }
   if (result.status !== 0) {
-    throw new Error(`${command} failed with exit code ${result.status ?? 'unknown'}`);
+    throw new Error(
+      `${command} failed with exit code ${result.status ?? 'unknown'}`,
+    );
   }
 }
 
@@ -124,22 +126,27 @@ export function fetchTag(
   tag: string,
   remote = 'origin',
   cwd = process.cwd(),
-): void {
+): boolean {
   validateTagName(tag, cwd);
   try {
     runGit(
       ['fetch', '--force', remote, `refs/tags/${tag}:refs/tags/${tag}`],
       cwd,
     );
+    return true;
   } catch (error) {
     if (
       error instanceof Error &&
       /couldn't find remote ref|remote ref does not exist/i.test(error.message)
     ) {
-      return;
+      return false;
     }
     throw error;
   }
+}
+
+export function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function configureAutomationIdentity(cwd = process.cwd()): void {

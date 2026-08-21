@@ -1,4 +1,11 @@
-import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,10 +29,12 @@ import {
 } from './releaseMetadata.js';
 import {
   createAnnotatedTag,
+  describeError,
   fetchMainAndTags,
   fetchTag,
   firstParentCommits,
   firstParentDistance,
+  isAncestor,
   listTags,
   packageVersionAt,
   pushTag,
@@ -79,6 +88,15 @@ export function reconcileBetaReleases(
   const stableTag = `v${stableVersion}`;
   fetchTag(stableTag, remote, cwd);
   const tagCommit = resolveStableTagCommit(stableVersion, cwd);
+  if (
+    tagCommit !== null &&
+    (!isAncestor(tagCommit, capturedTip, cwd) ||
+      !new Set(firstParentCommits(capturedTip, cwd)).has(tagCommit))
+  ) {
+    throw new Error(
+      `Stable baseline ${stableTag} is not on live main first-parent history`,
+    );
+  }
   let stablePublicationComplete = false;
   if (tagCommit !== null) {
     stablePublicationComplete =
@@ -126,7 +144,7 @@ export function reconcileBetaReleases(
       ref: candidate,
     };
     const tag = `v${version}`;
-    fetchTag(tag, remote, cwd);
+    const remoteTagExists = fetchTag(tag, remote, cwd);
     const existingTag = resolveTagCommit(tag, cwd);
     if (existingTag !== null && existingTag !== candidate) {
       throw new Error(
@@ -143,8 +161,8 @@ export function reconcileBetaReleases(
       runtime.adapter,
     );
 
-    if (existingTag === null) {
-      createAnnotatedTag(tag, candidate, cwd);
+    if (!remoteTagExists) {
+      if (existingTag === null) createAnnotatedTag(tag, candidate, cwd);
       pushTag(tag, remote, cwd);
     }
     const verifiedTag = resolveTagCommit(tag, cwd);
@@ -242,7 +260,10 @@ function selectLatestCompleteBeta(
   cwd: string,
 ) {
   const firstParentPositions = new Map(
-    firstParentCommits(capturedTip, cwd).map((ref, position) => [ref, position]),
+    firstParentCommits(capturedTip, cwd).map((ref, position) => [
+      ref,
+      position,
+    ]),
   );
   let selected:
     | {
@@ -313,7 +334,7 @@ function releaseIntentAt(
   return runtime.changesetReleaseAt?.(ref, cwd) ?? changesetReleaseAt(ref, cwd);
 }
 
-function changesetReleaseAt(ref: string, cwd: string) {
+export function changesetReleaseAt(ref: string, cwd: string) {
   const cli = resolve(cwd, 'node_modules', '@changesets', 'cli', 'bin.js');
   return withDetachedWorktree(
     ref,
@@ -323,6 +344,12 @@ function changesetReleaseAt(ref: string, cwd: string) {
       );
       const output = join(temporary, 'status.json');
       try {
+        const changesetDirectory = join(worktree, '.changeset');
+        if (!existsSync(changesetDirectory)) return null;
+        const fragments = readdirSync(changesetDirectory).filter(
+          (name) => name.endsWith('.md') && name !== 'README.md',
+        );
+        if (fragments.length === 0) return null;
         runCommand(process.execPath, [cli, 'status', '--output', output], {
           cwd: worktree,
         });
@@ -374,8 +401,10 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    console.error('Beta release reconciliation failed.');
+  main().catch((error) => {
+    console.error(
+      `Beta release reconciliation failed: ${describeError(error)}`,
+    );
     process.exitCode = 1;
   });
 }

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Recover interrupted state after main becomes quiet.
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -26,7 +29,7 @@ jobs:
   reconcile:
     name: Reconcile immutable beta publications
     if: >-
-      github.event_name == 'push' ||
+      github.event_name == 'push' || github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' &&
        github.ref == 'refs/heads/main' &&
        inputs.mode == 'reconcile-beta')

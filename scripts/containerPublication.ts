@@ -19,6 +19,7 @@ import {
 import {
   runCommand,
   runStreamingCommand,
+  describeError,
   withDetachedWorktree,
 } from './releaseGit.js';
 
@@ -498,8 +499,10 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    console.error('Immutable container publication reconciliation failed.');
+  main().catch((error) => {
+    console.error(
+      `Immutable container publication reconciliation failed: ${describeError(error)}`,
+    );
     process.exitCode = 1;
   });
 }

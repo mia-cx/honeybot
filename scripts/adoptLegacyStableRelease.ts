@@ -16,6 +16,7 @@ import {
 } from './releaseMetadata.js';
 import {
   createAnnotatedTag,
+  describeError,
   fetchTag,
   packageVersionAt,
   pushTag,
@@ -66,7 +67,7 @@ export function adoptLegacyStableRelease(
   const references = imageReferences(identity, input.repositories);
   const expectedLabels = releaseLabels(identity, input.repository);
   const tag = `v${input.version}`;
-  fetchTag(tag, remote, cwd);
+  const remoteTagExists = fetchTag(tag, remote, cwd);
   const existingTag = resolveTagCommit(tag, cwd);
   if (existingTag !== null && existingTag !== input.ref) {
     throw new Error(
@@ -74,7 +75,7 @@ export function adoptLegacyStableRelease(
     );
   }
 
-  if (existingTag !== null) {
+  if (remoteTagExists && existingTag !== null) {
     const complete = publicationComplete(
       {
         identity,
@@ -180,7 +181,7 @@ export function adoptLegacyStableRelease(
       'Legacy adoption did not establish complete immutable state',
     );
 
-  createAnnotatedTag(tag, input.ref, cwd);
+  if (existingTag === null) createAnnotatedTag(tag, input.ref, cwd);
   pushTag(tag, remote, cwd);
   if (resolveTagCommit(tag, cwd) !== input.ref)
     throw new Error(`Tag ${tag} failed final verification`);
@@ -243,8 +244,10 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    console.error('Guarded legacy stable adoption failed.');
+  main().catch((error) => {
+    console.error(
+      `Guarded legacy stable adoption failed: ${describeError(error)}`,
+    );
     process.exitCode = 1;
   });
 }

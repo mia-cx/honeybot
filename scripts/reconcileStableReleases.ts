@@ -19,6 +19,7 @@ import {
 } from './releaseMetadata.js';
 import {
   createAnnotatedTag,
+  describeError,
   fetchMainAndTags,
   fetchTag,
   firstParentCommits,
@@ -72,20 +73,20 @@ export function reconcileStableReleases(
   const reconciled: string[] = [];
   for (const candidate of findStableCandidates(baseline.ref, tip, cwd)) {
     const tag = `v${candidate.version}`;
-    fetchTag(tag, remote, cwd);
+    const remoteTagExists = fetchTag(tag, remote, cwd);
     const existingTag = resolveTagCommit(tag, cwd);
     if (existingTag !== null && existingTag !== candidate.ref) {
       throw new Error(
         `Stable tag ${tag} peels to ${existingTag}, expected ${candidate.ref}`,
       );
     }
-    if (existingTag === null) {
+    if (!remoteTagExists) {
       if (!runtime.allowTagCreation) {
         throw new Error(
           `Stable tag ${tag} is absent and this recovery run cannot create tags`,
         );
       }
-      createAnnotatedTag(tag, candidate.ref, cwd);
+      if (existingTag === null) createAnnotatedTag(tag, candidate.ref, cwd);
       pushTag(tag, remote, cwd);
     }
     if (resolveTagCommit(tag, cwd) !== candidate.ref) {
@@ -279,8 +280,10 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
-    console.error('Stable release reconciliation failed.');
+  main().catch((error) => {
+    console.error(
+      `Stable release reconciliation failed: ${describeError(error)}`,
+    );
     process.exitCode = 1;
   });
 }

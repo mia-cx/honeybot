@@ -9,6 +9,9 @@ import {
   AUTOMATION_GIT_NAME,
   configureAutomationIdentity,
   createAnnotatedTag,
+  describeError,
+  fetchTag,
+  pushTag,
   resolveStableTagCommit,
   resolveTagCommit,
   runGit,
@@ -60,6 +63,29 @@ describe('release Git adapter', () => {
     expect(() => resolveStableTagCommit('2.0.0', repository)).toThrow(
       'does not point to package version 2.0.0',
     );
+  });
+
+  it('distinguishes a local-only tag from a confirmed remote tag', () => {
+    const repository = createRepository();
+    const remote = mkdtempSync(join(tmpdir(), 'honeybot-release-remote-'));
+    repositories.push(remote);
+    runGit(['init', '--bare'], remote);
+    runGit(['remote', 'add', 'origin', remote], repository);
+    runGit(['push', '--set-upstream', 'origin', 'main'], repository);
+
+    const commit = runGit(['rev-parse', 'HEAD'], repository);
+    createAnnotatedTag('v1.0.0', commit, repository);
+
+    expect(fetchTag('v1.0.0', 'origin', repository)).toBe(false);
+    pushTag('v1.0.0', 'origin', repository);
+    expect(fetchTag('v1.0.0', 'origin', repository)).toBe(true);
+  });
+
+  it('formats caught release errors without discarding their message', () => {
+    expect(describeError(new Error('conflicting immutable tag'))).toBe(
+      'conflicting immutable tag',
+    );
+    expect(describeError('plain failure')).toBe('plain failure');
   });
 });
 

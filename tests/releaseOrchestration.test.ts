@@ -15,7 +15,11 @@ import type {
   ImageObservation,
   PublicationAdapter,
 } from '../scripts/containerPublication.js';
-import { promoteLatestBeta } from '../scripts/reconcileBetaReleases.js';
+import {
+  changesetReleaseAt,
+  promoteLatestBeta,
+  reconcileBetaReleases,
+} from '../scripts/reconcileBetaReleases.js';
 import {
   findStableCandidates,
   reconcileStableReleases,
@@ -128,6 +132,18 @@ describe('workflow dispatch routing', () => {
       }
     }
   });
+
+  it('schedules state recovery after an interrupted beta run', () => {
+    const workflow = readFileSync(
+      join(process.cwd(), '.github/workflows/container.yml'),
+      'utf8',
+    );
+
+    expect(workflow).toContain("cron: '17 * * * *'");
+    expect(workflowJob(workflow, 'reconcile')).toContain(
+      "github.event_name == 'schedule'",
+    );
+  });
 });
 
 function workflowJob(workflow: string, jobName: string): string {
@@ -234,6 +250,44 @@ describe('stable release discovery', () => {
 });
 
 describe('beta alias convergence', () => {
+  it('treats a commit with no pending Changeset fragments as no release intent', () => {
+    const repository = createRepository();
+    rmSync(join(repository, '.changeset', 'feature.md'));
+    runGit(['add', '--all'], repository);
+    runGit(['commit', '--message', 'consume release intent'], repository);
+    const ref = runGit(['rev-parse', 'HEAD'], repository);
+
+    expect(changesetReleaseAt(ref, repository)).toBeNull();
+  });
+
+  it('rejects a stable beta baseline outside main first-parent history', () => {
+    const fixture = createBetaRepository();
+    runGit(['tag', '--delete', 'v1.0.0'], fixture.repository);
+    runGit(['tag', 'v1.0.0', fixture.side], fixture.repository);
+    runGit(
+      ['push', '--force', 'origin', 'refs/tags/v1.0.0'],
+      fixture.repository,
+    );
+    const adapter = new AliasRepairAdapter(fixture.repositories, [
+      { channel: 'stable', version: '1.0.0', ref: fixture.side },
+    ]);
+
+    expect(() =>
+      reconcileBetaReleases({
+        adapter,
+        repositories: fixture.repositories,
+        repository: 'mia-cx/honeybot',
+        cwd: fixture.repository,
+        changesetReleaseAt: () => ({
+          name: 'honeybot',
+          type: 'minor',
+          oldVersion: '1.0.0',
+          newVersion: '1.1.0',
+        }),
+      }),
+    ).toThrow('not on live main first-parent history');
+  });
+
   it('repairs aliases from the previous beta epoch after its stable release', () => {
     const fixture = createBetaRepository();
     advanceBetaFixtureToStable(fixture);
