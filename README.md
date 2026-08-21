@@ -355,7 +355,7 @@ pnpm seed:fixtures  # seed fixture evidence corpus
 
 GitHub Actions runs CI on PRs and pushes to `main`. Eligible `main` integrations publish multi-arch beta images; merging the Changesets release PR publishes stable images from that exact merge commit.
 
-Release automation requires `DOCKERHUB_TOKEN`, `RELEASE_APP_ID`, and `RELEASE_APP_PRIVATE_KEY` repository secrets. The GitHub App should be installed only on this repository with contents and pull-request write permissions so Changesets-authored release PR updates trigger normal required CI. Configure the `stable-release` GitHub environment with required reviewers. The `Release` workflow exposes guarded manual recovery modes for stable reconciliation and the one-time `v1.0.1` baseline adoption; adoption requires freshly inspected, reviewer-approved legacy digest and revision inputs rather than checked-in registry state.
+Release automation requires `DOCKERHUB_TOKEN`, `RELEASE_APP_ID`, and `RELEASE_APP_PRIVATE_KEY` repository secrets. The GitHub App should be installed only on this repository with contents and pull-request write permissions so Changesets-authored release PR updates trigger normal required CI. Protect `main` before enabling the automatic publishers: require pull requests and CI, block force pushes and deletion, and limit direct pushes. Configure the `stable-release` GitHub environment with required reviewers for the one-time `v1.0.1` legacy-baseline adoption; automatic push and scheduled reconciliation jobs do not use that manual gate. The `Release` workflow exposes guarded recovery modes for stable reconciliation and adoption, and adoption requires freshly inspected, reviewer-approved legacy digest and revision inputs rather than checked-in registry state.
 
 ## Docs
 

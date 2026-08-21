@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  schedule:
+    # Recover interrupted stable publication after main becomes quiet.
+    - cron: '47 * * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -52,7 +55,6 @@ jobs:
       github.ref == 'refs/heads/main' &&
       inputs.mode == 'update-version-pr'
     runs-on: ubuntu-latest
-    environment: stable-release
     permissions:
       contents: read
     concurrency:
@@ -78,10 +80,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify approved revision is still live main
+      - name: Verify workflow revision is still live main
         run: |
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          git branch --force main HEAD
 
       - name: Create release automation token
         id: release-token
@@ -112,12 +115,11 @@ jobs:
   stable:
     name: Reconcile stable releases
     if: >-
-      github.event_name == 'push' ||
+      github.event_name == 'push' || github.event_name == 'schedule' ||
       (github.event_name == 'workflow_dispatch' &&
        github.ref == 'refs/heads/main' &&
        inputs.mode == 'reconcile-stable')
     runs-on: ubuntu-latest
-    environment: stable-release
     permissions:
       contents: write
       packages: write
@@ -161,10 +163,11 @@ jobs:
       - name: Set up crane
         uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
 
-      - name: Verify approved revision is still live main
+      - name: Verify workflow revision is still live main
         run: |
           git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          git branch --force main HEAD
 
       - name: Login GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4

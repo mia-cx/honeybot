@@ -76,6 +76,7 @@ describe('workflow dispatch routing', () => {
         job: 'reconcile',
         predicates: [
           "github.event_name == 'push'",
+          "github.event_name == 'schedule'",
           "github.event_name == 'workflow_dispatch'",
           "github.ref == 'refs/heads/main'",
           "inputs.mode == 'reconcile-beta'",
@@ -133,33 +134,40 @@ describe('workflow dispatch routing', () => {
     }
   });
 
-  it('gates credential-writing jobs and rejects stale approved revisions', () => {
-    const expectations = [
+  it('binds automatic jobs to protected live main without manual gates', () => {
+    const automaticJobs = [
       ['.github/workflows/container.yml', 'reconcile'],
       ['.github/workflows/container.yml', 'promote'],
       ['.github/workflows/release.yml', 'version'],
       ['.github/workflows/release.yml', 'stable'],
-      ['.github/workflows/release.yml', 'adopt-legacy'],
     ] as const;
 
-    for (const [workflowPath, jobName] of expectations) {
+    for (const [workflowPath, jobName] of automaticJobs) {
       const workflow = readFileSync(join(process.cwd(), workflowPath), 'utf8');
       const job = workflowJob(workflow, jobName);
-      expect(job).toContain('environment: stable-release');
+      expect(job).not.toContain('environment: stable-release');
       expect(job).toContain('ref: ${{ github.sha }}');
       expect(job).toContain('persist-credentials: false');
-      expect(job).toContain('Verify approved revision is still live main');
+      expect(job).toContain('Verify workflow revision is still live main');
       expect(job).toContain(
         'refs/heads/main:refs/remotes/origin/main',
       );
       expect(job).toContain(
         'git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)',
       );
+      expect(job).toContain('git branch --force main HEAD');
     }
+
+    const releaseWorkflow = readFileSync(
+      join(process.cwd(), '.github/workflows/release.yml'),
+      'utf8',
+    );
+    expect(workflowJob(releaseWorkflow, 'adopt-legacy')).toContain(
+      'environment: stable-release',
+    );
 
     for (const [workflowPath, jobName] of [
       ['.github/workflows/container.yml', 'reconcile'],
-      ['.github/workflows/container.yml', 'promote'],
       ['.github/workflows/release.yml', 'stable'],
     ] as const) {
       const workflow = readFileSync(join(process.cwd(), workflowPath), 'utf8');
@@ -167,6 +175,14 @@ describe('workflow dispatch routing', () => {
         'EXPECTED_MAIN_SHA: ${{ github.sha }}',
       );
     }
+
+    const containerWorkflow = readFileSync(
+      join(process.cwd(), '.github/workflows/container.yml'),
+      'utf8',
+    );
+    expect(workflowJob(containerWorkflow, 'promote')).not.toContain(
+      'EXPECTED_MAIN_SHA',
+    );
   });
 
   it('creates and exposes the release App token only after trusted setup', () => {
@@ -177,7 +193,7 @@ describe('workflow dispatch routing', () => {
     const job = workflowJob(workflow, 'version');
     const install = job.indexOf('name: Install dependencies');
     const liveMainCheck = job.indexOf(
-      'name: Verify approved revision is still live main',
+      'name: Verify workflow revision is still live main',
     );
     const createToken = job.indexOf('name: Create release automation token');
     const changesets = job.indexOf('name: Create version pull request');
@@ -213,14 +229,23 @@ describe('workflow dispatch routing', () => {
     );
   });
 
-  it('schedules state recovery after an interrupted beta run', () => {
-    const workflow = readFileSync(
+  it('schedules state recovery after interrupted publication runs', () => {
+    const containerWorkflow = readFileSync(
       join(process.cwd(), '.github/workflows/container.yml'),
       'utf8',
     );
 
-    expect(workflow).toContain("cron: '17 * * * *'");
-    expect(workflowJob(workflow, 'reconcile')).toContain(
+    expect(containerWorkflow).toContain("cron: '17 * * * *'");
+    expect(workflowJob(containerWorkflow, 'reconcile')).toContain(
+      "github.event_name == 'schedule'",
+    );
+
+    const releaseWorkflow = readFileSync(
+      join(process.cwd(), '.github/workflows/release.yml'),
+      'utf8',
+    );
+    expect(releaseWorkflow).toContain("cron: '47 * * * *'");
+    expect(workflowJob(releaseWorkflow, 'stable')).toContain(
       "github.event_name == 'schedule'",
     );
   });
