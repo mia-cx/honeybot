@@ -313,15 +313,17 @@ export function publicationComplete(
   const observations = references.map((reference) =>
     adapter.inspect(reference),
   );
-  if (observations.some((observation) => observation === null)) return null;
-  const complete = observations.filter(
+  const present = observations.filter(
     (item): item is ImageObservation => item !== null,
   );
-  assertObservationsMatch(complete, input.identity, labels);
+  if (present.length > 0) {
+    assertObservationsMatch(present, input.identity, labels);
+  }
+  if (observations.some((observation) => observation === null)) return null;
   return {
     state: 'complete',
-    digest: complete[0]?.digest ?? fail('Missing digest'),
-    canonicalReference: complete[0]?.reference ?? fail('Missing reference'),
+    digest: present[0]?.digest ?? fail('Missing digest'),
+    canonicalReference: present[0]?.reference ?? fail('Missing reference'),
     references,
   };
 }

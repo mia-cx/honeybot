@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   DockerBuildxAdapter,
+  publicationComplete,
   promoteMovingAliases,
   reconcilePublication,
   type BuildRequest,
@@ -287,6 +288,23 @@ describe('immutable container publication', () => {
       reconcilePublication({ identity, repositories, repository }, adapter),
     ).toThrow('Conflicting org.opencontainers.image.revision');
     expect(adapter.builds).toHaveLength(0);
+    expect(adapter.operations).toHaveLength(0);
+  });
+
+  it('does not let a missing reference hide a present identity conflict', () => {
+    const adapter = new FakeAdapter();
+    adapter.images.set('ghcr.io/mia-cx/honeybot:v1.2.0-beta.3', {
+      reference: 'ghcr.io/mia-cx/honeybot:v1.2.0-beta.3',
+      digest,
+      labels: {
+        ...releaseLabels(identity, repository),
+        'org.opencontainers.image.revision': 'wrong',
+      },
+    });
+
+    expect(() =>
+      publicationComplete({ identity, repositories, repository }, adapter),
+    ).toThrow('Conflicting org.opencontainers.image.revision');
     expect(adapter.operations).toHaveLength(0);
   });
 

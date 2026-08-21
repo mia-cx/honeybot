@@ -156,6 +156,17 @@ describe('workflow dispatch routing', () => {
         'git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)',
       );
     }
+
+    for (const [workflowPath, jobName] of [
+      ['.github/workflows/container.yml', 'reconcile'],
+      ['.github/workflows/container.yml', 'promote'],
+      ['.github/workflows/release.yml', 'stable'],
+    ] as const) {
+      const workflow = readFileSync(join(process.cwd(), workflowPath), 'utf8');
+      expect(workflowJob(workflow, jobName)).toContain(
+        'EXPECTED_MAIN_SHA: ${{ github.sha }}',
+      );
+    }
   });
 
   it('creates and exposes the release App token only after trusted setup', () => {
@@ -227,6 +238,24 @@ function workflowJob(workflow: string, jobName: string): string {
 }
 
 describe('stable release discovery', () => {
+  it('rejects a stable run whose fetched tip differs from its approved SHA', () => {
+    const fixture = createStableGapRepository();
+    const adapter = new StableGapAdapter(fixture);
+
+    expect(() =>
+      reconcileStableReleases({
+        adapter,
+        repositories: fixture.repositories,
+        repository: 'mia-cx/honeybot',
+        allowTagCreation: true,
+        cwd: fixture.repository,
+        expectedTip: fixture.baseline,
+      }),
+    ).toThrow('differs from approved revision');
+    expect(adapter.builds).toHaveLength(0);
+    expect(adapter.copies).toHaveLength(0);
+  });
+
   it('finds Changesets version transitions at their exact first-parent commit', () => {
     const repository = createRepository();
     const baseline = runGit(['rev-parse', 'HEAD'], repository);
@@ -319,6 +348,57 @@ describe('stable release discovery', () => {
 });
 
 describe('beta alias convergence', () => {
+  it('rejects a beta run whose fetched tip differs from its approved SHA', () => {
+    const fixture = createBetaRepository();
+    const adapter = new AliasRepairAdapter(fixture.repositories, []);
+
+    expect(() =>
+      reconcileBetaReleases({
+        adapter,
+        repositories: fixture.repositories,
+        repository: 'mia-cx/honeybot',
+        cwd: fixture.repository,
+        expectedTip: fixture.baseline,
+      }),
+    ).toThrow('differs from approved revision');
+    expect(adapter.promotedSources).toHaveLength(0);
+  });
+
+  it('fails closed on malformed tags in the immutable beta namespace', () => {
+    const fixture = createBetaRepository();
+    runGit(
+      ['tag', 'v1.2.0-beta.foo', fixture.second],
+      fixture.repository,
+    );
+    runGit(
+      ['push', 'origin', 'refs/tags/v1.2.0-beta.foo'],
+      fixture.repository,
+    );
+    const adapter = new AliasRepairAdapter(fixture.repositories, [
+      {
+        channel: 'beta',
+        version: '1.1.0-beta.2',
+        ref: fixture.second,
+      },
+    ]);
+
+    expect(() =>
+      promoteLatestBeta({
+        adapter,
+        repositories: fixture.repositories,
+        repository: 'mia-cx/honeybot',
+        cwd: fixture.repository,
+        changesetReleaseAt: () => ({
+          name: 'honeybot',
+          type: 'minor',
+          oldVersion: '1.0.0',
+          newVersion: '1.1.0',
+        }),
+      }),
+    ).toThrow('Malformed immutable beta tag v1.2.0-beta.foo');
+    expect(adapter.promotedSources).toHaveLength(0);
+  });
+
   it('treats a commit with no pending Changeset fragments as no release intent', () => {
     const repository = createRepository();
     rmSync(join(repository, '.changeset', 'feature.md'));

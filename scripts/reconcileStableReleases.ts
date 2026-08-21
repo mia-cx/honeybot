@@ -18,6 +18,7 @@ import {
   type ReleaseIdentity,
 } from './releaseMetadata.js';
 import {
+  assertExpectedTip,
   createAnnotatedTag,
   describeError,
   fetchMainAndTags,
@@ -52,6 +53,7 @@ export interface StableRuntime {
   allowTagCreation: boolean;
   remote?: string;
   branch?: string;
+  expectedTip?: string | undefined;
   cwd?: string;
 }
 
@@ -62,6 +64,7 @@ export function reconcileStableReleases(
   const remote = runtime.remote ?? 'origin';
   const branch = runtime.branch ?? 'main';
   const tip = fetchMainAndTags(remote, branch, cwd);
+  assertExpectedTip(tip, runtime.expectedTip);
   const before = findCompleteStableReleases(runtime, tip);
   const baseline = before[0];
   if (!baseline) {
@@ -274,6 +277,7 @@ async function main(): Promise<void> {
     repositories: getRepositories(),
     repository,
     allowTagCreation: !process.argv.includes('--existing-tags-only'),
+    expectedTip: process.env.EXPECTED_MAIN_SHA,
   });
   writeOutputs(result);
   console.log('Stable release reconciliation completed.');

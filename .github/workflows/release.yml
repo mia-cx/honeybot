@@ -181,6 +181,7 @@ jobs:
 
       - name: Reconcile stable history
         env:
+          EXPECTED_MAIN_SHA: ${{ github.sha }}
           MANUAL_RECOVERY: ${{ github.event_name == 'workflow_dispatch' }}
           RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

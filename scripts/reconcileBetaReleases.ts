@@ -28,6 +28,7 @@ import {
   type ReleaseIdentity,
 } from './releaseMetadata.js';
 import {
+  assertExpectedTip,
   createAnnotatedTag,
   describeError,
   fetchMainAndTags,
@@ -66,6 +67,7 @@ export interface BetaRuntime {
   repository: string;
   remote?: string;
   branch?: string;
+  expectedTip?: string | undefined;
   cwd?: string;
   changesetReleaseAt?: (ref: string, cwd: string) => ChangesetRelease | null;
 }
@@ -77,6 +79,7 @@ export function reconcileBetaReleases(
   const remote = runtime.remote ?? 'origin';
   const branch = runtime.branch ?? 'main';
   const capturedTip = fetchMainAndTags(remote, branch, cwd);
+  assertExpectedTip(capturedTip, runtime.expectedTip);
   const stableVersion = packageVersionAt(capturedTip, cwd);
   const stableSemVer = parseSemVer(stableVersion);
   if (stableSemVer.prerelease !== null) {
@@ -187,6 +190,7 @@ export function promoteLatestBeta(runtime: BetaRuntime): BetaPromotionResult {
   const remote = runtime.remote ?? 'origin';
   const branch = runtime.branch ?? 'main';
   let capturedTip = fetchMainAndTags(remote, branch, cwd);
+  assertExpectedTip(capturedTip, runtime.expectedTip);
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const stableVersion = packageVersionAt(capturedTip, cwd);
@@ -275,15 +279,15 @@ function selectLatestCompleteBeta(
 
   for (const tag of listTags('v*-beta.*', cwd)) {
     const version = tag.slice(1);
-    let ordinal: number;
+    let parsed: ReturnType<typeof parseSemVer>;
     try {
-      const parsed = parseSemVer(version);
-      const match = /^beta\.([1-9]\d*)$/.exec(parsed.prerelease ?? '');
-      if (!match) continue;
-      ordinal = Number(match[1]);
+      parsed = parseSemVer(version);
     } catch {
-      continue;
+      throw new Error(`Malformed immutable beta tag ${tag}`);
     }
+    const match = /^beta\.([1-9]\d*)$/.exec(parsed.prerelease ?? '');
+    if (!match) throw new Error(`Malformed immutable beta tag ${tag}`);
+    const ordinal = Number(match[1]);
     const ref = resolveTagCommit(tag, cwd);
     if (ref === null) continue;
     const position = firstParentPositions.get(ref);
@@ -390,6 +394,7 @@ async function main(): Promise<void> {
     adapter: new DockerBuildxAdapter(),
     repositories: getRepositories(),
     repository,
+    expectedTip: process.env.EXPECTED_MAIN_SHA,
   };
   const mode = parseMode(process.argv.slice(2));
   const result =

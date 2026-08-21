@@ -94,6 +94,7 @@ jobs:
       - name: Reconcile beta history
         id: reconcile
         env:
+          EXPECTED_MAIN_SHA: ${{ github.sha }}
           RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: pnpm tsx scripts/reconcileBetaReleases.ts --mode reconcile
 
@@ -164,6 +165,8 @@ jobs:
 
       - name: Reconcile beta aliases
         id: promote
+        env:
+          EXPECTED_MAIN_SHA: ${{ github.sha }}
         run: pnpm tsx scripts/reconcileBetaReleases.ts --mode promote
 
       - name: Dispatch successor reconciliation

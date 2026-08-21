@@ -89,6 +89,19 @@ export function fetchMainAndTags(
   );
 }
 
+export function assertExpectedTip(
+  actualTip: string,
+  expectedTip: string | undefined,
+): void {
+  if (expectedTip === undefined) return;
+  const expected = requireFullCommitSha(expectedTip);
+  if (actualTip !== expected) {
+    throw new Error(
+      `Live main tip ${actualTip} differs from approved revision ${expected}`,
+    );
+  }
+}
+
 export function resolveTagCommit(
   tag: string,
   cwd = process.cwd(),
