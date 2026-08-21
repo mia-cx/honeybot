@@ -4,28 +4,71 @@ on:
   push:
     branches:
       - main
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  schedule:
+    # Recover interrupted stable publication after main becomes quiet.
+    - cron: '47 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Stable recovery operation
+        required: true
+        type: choice
+        default: reconcile-stable
+        options:
+          - reconcile-stable
+          - adopt-v1.0.1
+      expected-legacy-digest:
+        description: Reviewed current sha256 digest for both legacy v1.0.1 registry refs
+        required: false
+        type: string
+      expected-legacy-revision:
+        description: Reviewed full OCI revision for both legacy v1.0.1 registry refs
+        required: false
+        type: string
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+
+env:
+  DOCKERHUB_USERNAME: miacx
+  DOCKERHUB_REPOSITORY: honeybot
 
 jobs:
-  version:
-    name: Version packages
+  stable:
+    name: Reconcile stable releases
+    if: >-
+      github.event_name == 'push' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main' &&
+       inputs.mode == 'reconcile-stable')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: write
+    concurrency:
+      group: stable-publication-main
+      cancel-in-progress: false
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure release tagger identity
+        run: |
+          git config --local user.name 'github-actions[bot]'
+          git config --local user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          test "$(git config --local --get user.name)" = 'github-actions[bot]'
+          test "$(git config --local --get user.email)" = '41898282+github-actions[bot]@users.noreply.github.com'
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24
           cache: pnpm
@@ -33,10 +76,136 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create version pull request
-        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+      - name: Enable arm64 builds
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Create Docker builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify workflow revision is still live main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          git branch --force main HEAD
+
+      - name: Login GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
-          title: "chore(release): version packages"
-          commit: "chore(release): version packages"
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Reconcile stable history
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_MAIN_SHA: ${{ github.sha }}
+          MANUAL_RECOVERY: ${{ github.event_name == 'workflow_dispatch' }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          args=()
+          if [[ "$MANUAL_RECOVERY" == 'true' ]]; then
+            args+=(--existing-tags-only)
+          fi
+          pnpm tsx scripts/reconcileStableReleases.ts "${args[@]}"
+
+      - name: Dispatch deferred beta reconciliation
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run container.yml --ref main -f mode=reconcile-beta
+
+  adopt-legacy:
+    name: Adopt the v1.0.1 stable baseline
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.mode == 'adopt-v1.0.1'
+    runs-on: ubuntu-latest
+    environment: stable-release
+    permissions:
+      contents: write
+      packages: write
+      actions: write
+    concurrency:
+      group: stable-publication-main
+      cancel-in-progress: false
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Enable arm64 builds
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+
+      - name: Create Docker builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify approved revision is still live main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+
+      - name: Login GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Validate reviewed legacy identity inputs
+        env:
+          EXPECTED_LEGACY_DIGEST: ${{ inputs['expected-legacy-digest'] }}
+          EXPECTED_LEGACY_REVISION: ${{ inputs['expected-legacy-revision'] }}
+        run: |
+          [[ "$EXPECTED_LEGACY_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$EXPECTED_LEGACY_REVISION" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Adopt legacy stable release
+        env:
+          EXPECTED_LEGACY_DIGEST: ${{ inputs['expected-legacy-digest'] }}
+          EXPECTED_LEGACY_REVISION: ${{ inputs['expected-legacy-revision'] }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          pnpm tsx scripts/adoptLegacyStableRelease.ts
+          --version 1.0.1
+          --ref 67813a8ec9ef2cfc4ae6d66cec88345f567243ed
+          --expected-legacy-digest "$EXPECTED_LEGACY_DIGEST"
+          --expected-legacy-revision "$EXPECTED_LEGACY_REVISION"
+
+      - name: Dispatch stable reconciliation
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref main -f mode=reconcile-stable

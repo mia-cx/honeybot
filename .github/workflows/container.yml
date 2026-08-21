@@ -4,110 +4,175 @@ on:
   push:
     branches:
       - main
-    tags:
-      - 'v*.*.*'
-
-concurrency:
-  group: container-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  schedule:
+    # Recover interrupted state after main becomes quiet.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Reconciliation mode
+        required: true
+        type: choice
+        default: reconcile-beta
+        options:
+          - reconcile-beta
+          - promote-aliases
 
 permissions:
   contents: read
-  packages: write
 
 env:
   DOCKERHUB_USERNAME: miacx
-  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
   DOCKERHUB_REPOSITORY: honeybot
 
 jobs:
-  build:
-    name: Container image
+  reconcile:
+    name: Reconcile immutable beta publications
+    if: >-
+      github.event_name == 'push' || github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.ref == 'refs/heads/main' &&
+       inputs.mode == 'reconcile-beta')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    concurrency:
+      group: beta-publication-main
+      cancel-in-progress: false
+    outputs:
+      state: ${{ steps.reconcile.outputs.state }}
+      successor-needed: ${{ steps.reconcile.outputs.successor-needed }}
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v7
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
       - name: Enable arm64 builds
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
 
       - name: Create Docker builder
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
-      - name: Compute image tags
-        id: image
-        shell: bash
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify workflow revision is still live main
         run: |
-          set -euo pipefail
-
-          version=$(node -p "require('./package.json').version")
-          if [[ ! "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-.+)?$ ]]; then
-            echo "package.json version must be semver, got: $version" >&2
-            exit 1
-          fi
-
-          major="${BASH_REMATCH[1]}"
-          minor="${BASH_REMATCH[2]}"
-          prerelease="${BASH_REMATCH[4]:-}"
-          ghcr="ghcr.io/${{ github.repository }}"
-          dockerhub="docker.io/${{ env.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPOSITORY }}"
-
-          if [[ "$prerelease" == *beta* ]]; then
-            suffixes=("v${version}" "v${major}.${minor}-beta" "v${major}-beta" "beta" "sha-${GITHUB_SHA::7}")
-          elif [[ -z "$prerelease" ]]; then
-            suffixes=("v${version}" "v${major}.${minor}" "v${major}" "latest" "sha-${GITHUB_SHA::7}")
-          else
-            suffixes=("v${version}" "sha-${GITHUB_SHA::7}")
-          fi
-
-          tags=()
-          for suffix in "${suffixes[@]}"; do
-            tags+=("${ghcr}:${suffix}")
-            tags+=("${dockerhub}:${suffix}")
-          done
-
-          labels=(
-            "org.opencontainers.image.title=honeybot"
-            "org.opencontainers.image.description=Discord moderation bot for honeypot and scam raid detection"
-            "org.opencontainers.image.source=https://github.com/${{ github.repository }}"
-            "org.opencontainers.image.revision=${GITHUB_SHA}"
-            "org.opencontainers.image.version=${version}"
-          )
-
-          {
-            echo "version=${version}"
-            echo 'tags<<EOF'
-            printf '%s\n' "${tags[@]}"
-            echo 'EOF'
-            echo 'labels<<EOF'
-            printf '%s\n' "${labels[@]}"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-          printf 'Publishing package version %s as:\n' "$version"
-          printf '  %s\n' "${tags[@]}"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          git branch --force main HEAD
 
       - name: Login GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
         with:
           username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push image
-        uses: docker/build-push-action@v7
+      - name: Reconcile beta history
+        id: reconcile
+        env:
+          EXPECTED_MAIN_SHA: ${{ github.sha }}
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm tsx scripts/reconcileBetaReleases.ts --mode reconcile
+
+  promote:
+    name: Reconcile moving beta aliases
+    needs: reconcile
+    if: >-
+      always() && !cancelled() &&
+      (needs.reconcile.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.ref == 'refs/heads/main' &&
+        inputs.mode == 'promote-aliases'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      actions: write
+    concurrency:
+      group: beta-alias-promotion
+      cancel-in-progress: false
+    outputs:
+      successor-needed: ${{ steps.promote.outputs.successor-needed }}
+      successor-mode: ${{ steps.promote.outputs.successor-mode }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          context: .
-          file: docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.image.outputs.tags }}
-          labels: ${{ steps.image.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create Docker builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@6da1ae018866400525525ce74ff892880c099987 # v0.5
+
+      - name: Verify workflow revision is still live main
+        run: |
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
+          git branch --force main HEAD
+
+      - name: Login GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login Docker Hub
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Reconcile beta aliases
+        id: promote
+        run: pnpm tsx scripts/reconcileBetaReleases.ts --mode promote
+
+      - name: Dispatch successor reconciliation
+        if: >-
+          needs.reconcile.outputs.successor-needed == 'true' ||
+          steps.promote.outputs.successor-mode != 'none'
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEXT_MODE: ${{ needs.reconcile.outputs.successor-needed == 'true' && 'reconcile-beta' || steps.promote.outputs.successor-mode }}
+        run: gh workflow run container.yml --ref main -f mode="$NEXT_MODE"
