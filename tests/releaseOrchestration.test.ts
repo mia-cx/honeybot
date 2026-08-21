@@ -178,7 +178,7 @@ describe('workflow dispatch routing', () => {
     expect(job).not.toContain('persist-credentials: true');
     expect(job).not.toContain('token: ${{ steps.release-token.outputs.token }}');
     expect(job).toContain('credential.helper');
-    expect(job).toContain('password=$GITHUB_TOKEN');
+    expect(job).toContain('password=\\$GITHUB_TOKEN');
     expect(job).toContain('Remove App Git authentication helper');
     const jobPermissions = job.slice(
       job.indexOf('    permissions:'),

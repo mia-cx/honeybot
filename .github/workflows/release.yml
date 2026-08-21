@@ -95,7 +95,7 @@ jobs:
       - name: Configure step-scoped App Git authentication
         run: >-
           git config --local credential.helper
-          '!f() { test "$1" = get && printf "%s\n" "username=x-access-token" "password=$GITHUB_TOKEN"; }; f'
+          "!f() { test \"\$1\" = get && printf \"%s\\n\" \"username=x-access-token\" \"password=\$GITHUB_TOKEN\"; }; f"
 
       - name: Create version pull request
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
