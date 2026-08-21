@@ -16,7 +16,6 @@ import {
 } from './releaseMetadata.js';
 import {
   createAnnotatedTag,
-  describeError,
   fetchTag,
   packageVersionAt,
   pushTag,
@@ -244,10 +243,8 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    console.error(
-      `Guarded legacy stable adoption failed: ${describeError(error)}`,
-    );
+  main().catch(() => {
+    console.error('Guarded legacy stable adoption failed.');
     process.exitCode = 1;
   });
 }

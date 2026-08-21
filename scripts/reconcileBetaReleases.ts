@@ -30,7 +30,6 @@ import {
 import {
   assertExpectedTip,
   createAnnotatedTag,
-  describeError,
   fetchMainAndTags,
   fetchTag,
   firstParentCommits,
@@ -406,10 +405,8 @@ async function main(): Promise<void> {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  main().catch((error) => {
-    console.error(
-      `Beta release reconciliation failed: ${describeError(error)}`,
-    );
+  main().catch(() => {
+    console.error('Beta release reconciliation failed.');
     process.exitCode = 1;
   });
 }
