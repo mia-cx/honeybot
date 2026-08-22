@@ -1,5 +1,11 @@
 # honeybot
 
+## 1.1.1
+
+### Patch Changes
+
+- [#14](https://github.com/mia-cx/honeybot/pull/14) [`69e976b`](https://github.com/mia-cx/honeybot/commit/69e976b9a2062117cf51839ec5c3b91cbefe7391) Thanks [@mia-riezebos](https://github.com/mia-riezebos)! - Render cross-channel graphs with readable container fonts and use one configured minimum window for repeats with or without attachments.
+
 ## 1.1.0
 
 ### Minor Changes
