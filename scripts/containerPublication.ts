@@ -201,13 +201,10 @@ export class DockerBuildxAdapter implements PublicationAdapter {
   ): void {
     assertRegistryRelationship(sourceReference, destinationReference, 'same');
     const sourceRepository = referenceRepository(sourceReference);
-    this.commands.stream('docker', [
-      'buildx',
-      'imagetools',
-      'create',
-      '--tag',
-      destinationReference,
+    this.commands.stream('crane', [
+      'copy',
       `${sourceRepository}@${digest}`,
+      destinationReference,
     ]);
   }
 

@@ -174,7 +174,7 @@ export function findStableCandidates(
         `Invalid stable version transition ${previousVersion} -> ${version} at ${commit}`,
       );
     }
-    validateChangesetsReleaseCommit(parent, commit, version, cwd);
+    validateStableReleaseCommit(commit, version, cwd);
     candidates.push({ version, ref: commit });
   }
   return candidates;
@@ -221,8 +221,7 @@ function findCompleteStableReleases(
   );
 }
 
-function validateChangesetsReleaseCommit(
-  parent: string,
+function validateStableReleaseCommit(
   commit: string,
   version: string,
   cwd: string,
@@ -236,21 +235,6 @@ function validateChangesetsReleaseCommit(
   ) {
     throw new Error(
       `Stable transition ${version} at ${commit} is missing its CHANGELOG entry`,
-    );
-  }
-  const changes = runGit(
-    ['diff', '--name-status', parent, commit, '--', '.changeset'],
-    cwd,
-  );
-  const consumed = changes
-    .split('\n')
-    .some(
-      (line) =>
-        /^D\s+\.changeset\/.+\.md$/.test(line) && !line.endsWith('/README.md'),
-    );
-  if (!consumed) {
-    throw new Error(
-      `Stable transition ${version} at ${commit} consumed no Changeset fragments`,
     );
   }
 }
