@@ -103,7 +103,10 @@ describe('DuplicateDetector', () => {
     expect(svg).toContain('2 ≤ channels &lt; 32.5');
     expect(svg).toContain('2ch · 5s');
     expect(svg).toContain('13ch · 29m54s');
+    expect(svg).toContain('32ch · 1h');
+    expect(svg).not.toContain('12ch ·');
     expect(svg).toContain('fill-opacity="0.88"');
+    expect(svg).toContain('font-family="DejaVu Sans, sans-serif"');
 
     const image = await renderCrosschannelCurveImage(config);
     expect(image.filename).toBe('honeybot-crosschannel-curve.png');
@@ -144,11 +147,11 @@ describe('DuplicateDetector', () => {
     });
   });
 
-  it('uses a 2-second minimum window for text-only duplicates', () => {
+  it('uses the configured minimum window for text-only duplicates', () => {
     const now = vi.spyOn(Date, 'now');
 
-    expect(matchesDuplicateAfter(2_000, now)).toBe(true);
-    expect(matchesDuplicateAfter(2_001, now)).toBe(false);
+    expect(matchesDuplicateAfter(5_000, now)).toBe(true);
+    expect(matchesDuplicateAfter(5_001, now)).toBe(false);
   });
 
   it('retains the configured minimum window for attachment-bearing duplicates', () => {
@@ -162,7 +165,7 @@ describe('DuplicateDetector', () => {
     expect(matchesDuplicateAfter(5_001, now, attachments)).toBe(false);
   });
 
-  it('uses the attachment window when either duplicate has attachments', () => {
+  it('uses the same configured window regardless of which repeat has attachments', () => {
     const now = vi.spyOn(Date, 'now');
 
     expect(matchesDuplicateAfter(4_000, now, [[attachment()], []])).toBe(true);

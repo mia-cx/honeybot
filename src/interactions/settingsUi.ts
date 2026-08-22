@@ -9,7 +9,6 @@ import {
   type InteractionUpdateOptions,
   type MessageCreateOptions,
 } from 'discord.js';
-import { crosschannelTextOnlyMinimumWindowSeconds } from '../domain/defaults.js';
 import type {
   GuildConfig,
   ModelPurpose,
@@ -224,7 +223,7 @@ const settingsParentByChildId = new Map(
 );
 
 const settingLabels: Record<EditableSetting, string> = {
-  crosschannelMinimumWindowSeconds: 'Attachment minimum window seconds',
+  crosschannelMinimumWindowSeconds: 'Minimum window seconds',
   crosschannelWindowSeconds: 'Crosschannel max window seconds',
   crosschannelWindowSteepness: 'Crosschannel S-curve steepness',
   crosschannelWindowMidpointChannels: 'Crosschannel S-curve midpoint channels',
@@ -741,7 +740,7 @@ function crosschannelControls(context: SettingsRenderContext): RawComponent[] {
     settingsSection(
       'Match curve',
       ({ config }) =>
-        `Messages must repeat across **${config.crosschannelChannelThreshold}+** distinct channels. Text-only repeats use a **${formatDurationSeconds(crosschannelTextOnlyMinimumWindowSeconds)}** minimum at 2 channels. Repeats with attachments use the configured **${formatDurationSeconds(config.crosschannelMinimumWindowSeconds)}** minimum. Both follow the S-curve toward **${formatDurationSeconds(config.crosschannelWindowSeconds)}** max, with steepness **${config.crosschannelWindowSteepness}** and midpoint **${config.crosschannelWindowMidpointChannels}** channels.`,
+        `Messages must repeat across **${config.crosschannelChannelThreshold}+** distinct channels. All repeats use the configured **${formatDurationSeconds(config.crosschannelMinimumWindowSeconds)}** minimum, then follow the S-curve toward **${formatDurationSeconds(config.crosschannelWindowSeconds)}** max, with steepness **${config.crosschannelWindowSteepness}** and midpoint **${config.crosschannelWindowMidpointChannels}** channels.`,
       ({ crosschannelCurveImage }) => [
         ...(crosschannelCurveImage
           ? [

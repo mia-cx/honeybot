@@ -278,7 +278,7 @@ Notes:
 | `HONEYBOT_DEFAULT_MODERATOR_USER_IDS` | empty list | Comma-separated default case-moderator user IDs. |
 | `HONEYBOT_DEFAULT_MODERATOR_ROLE_IDS` | empty list | Comma-separated default case-moderator role IDs. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_ENABLED` | `true` | Enables cross-channel repeated-content trigger for newly initialized guilds. |
-| `HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS` | `5` | Minimum cross-channel match window for candidates with attachments. Text-only candidates use a fixed 2-second minimum. |
+| `HONEYBOT_DEFAULT_CROSSCHANNEL_MINIMUM_WINDOW_SECONDS` | `5` | Minimum cross-channel match window for every repeated-content candidate. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_SECONDS` | `3600` | Maximum/asymptotic cross-channel match window. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_STEEPNESS` | `0.49` | Steepness for the normalized logistic cross-channel window curve. |
 | `HONEYBOT_DEFAULT_CROSSCHANNEL_WINDOW_MIDPOINT_CHANNELS` | `13` | Channel count at the midpoint of the cross-channel window curve. |

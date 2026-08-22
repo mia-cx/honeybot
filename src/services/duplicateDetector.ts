@@ -1,5 +1,4 @@
 import type { Message } from 'discord.js';
-import { crosschannelTextOnlyMinimumWindowSeconds } from '../domain/defaults.js';
 import type { GuildConfig } from '../domain/types.js';
 import { domains, normalizeText } from '../utils/fingerprints.js';
 
@@ -8,7 +7,6 @@ type DuplicateEntry = {
   channelId: string;
   messageId: string;
   timestamp: number;
-  hasAttachments: boolean;
 };
 
 export type DuplicateMessageRef = {
@@ -52,7 +50,6 @@ export class DuplicateDetector {
       channelId: message.channelId,
       messageId: message.id,
       timestamp: now,
-      hasAttachments: message.attachments.size > 0,
     });
     this.entries.set(key, fresh.slice(-config.crosschannelMaxEntriesPerUser));
 
@@ -91,18 +88,9 @@ function matchingWindow(
     if (channelCount < config.crosschannelChannelThreshold) continue;
 
     const elapsedSeconds = (latest.timestamp - candidate[0]!.timestamp) / 1000;
-    const minimumWindowSeconds = candidate.some(
-      (entry) => entry.hasAttachments,
-    )
-      ? config.crosschannelMinimumWindowSeconds
-      : crosschannelTextOnlyMinimumWindowSeconds;
     if (
       elapsedSeconds <=
-      crosschannelAllowedWindowSeconds(
-        channelCount,
-        config,
-        minimumWindowSeconds,
-      )
+      crosschannelAllowedWindowSeconds(channelCount, config)
     ) {
       return candidate;
     }
@@ -121,9 +109,9 @@ export function crosschannelAllowedWindowSeconds(
     | 'crosschannelWindowSteepness'
     | 'crosschannelWindowMidpointChannels'
   >,
-  minimumWindowSeconds = config.crosschannelMinimumWindowSeconds,
 ) {
   if (channelCount < 2) return 0;
+  const minimumWindowSeconds = config.crosschannelMinimumWindowSeconds;
   const sigmoid = (x: number) =>
     1 /
     (1 +
