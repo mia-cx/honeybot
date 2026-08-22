@@ -217,11 +217,10 @@ describe('settings UI', () => {
       'settings:edit:crosschannelWindowSeconds:triggers_crosschannel',
     ]);
     expect(textContent(crosschannelComponents)).toContain(
-      'Text-only repeats use a **2s** minimum',
+      'All repeats use the configured **5s** minimum',
     );
-    expect(textContent(crosschannelComponents)).toContain(
-      'Repeats with attachments use the configured **5s** minimum',
-    );
+    expect(textContent(crosschannelComponents)).not.toContain('Text-only');
+    expect(textContent(crosschannelComponents)).not.toContain('attachments');
 
     const graphReply = settingsReply(
       config,
@@ -465,6 +464,22 @@ describe('settings UI', () => {
     expect(
       settingEditModal('retentionCaseDays', '180', 'config').toJSON(),
     ).toMatchObject({ custom_id: 'settings:modal:retentionCaseDays:config' });
+    expect(
+      settingEditModal(
+        'crosschannelMinimumWindowSeconds',
+        '5',
+        'triggers_crosschannel',
+      ).toJSON(),
+    ).toMatchObject({
+      title: 'Minimum window seconds',
+      components: [
+        {
+          components: [
+            expect.objectContaining({ label: 'Minimum window seconds' }),
+          ],
+        },
+      ],
+    });
     expect(policyDurationModal('punishment', null).toJSON()).toMatchObject({
       custom_id: 'settings:policyModal:duration:punishment',
     });

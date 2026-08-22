@@ -29,10 +29,11 @@ FROM base AS runtime
 ARG HONEYBOT_UID=10001
 ARG HONEYBOT_GID=10001
 
-ENV NODE_ENV=production
+ENV NODE_ENV=production \
+    XDG_CACHE_HOME=/app/.cache
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates \
+  && apt-get install -y --no-install-recommends ca-certificates fontconfig fonts-dejavu-core \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --system --gid "${HONEYBOT_GID}" honeybot \
   && useradd --system --uid "${HONEYBOT_UID}" --gid honeybot --home-dir /app honeybot
@@ -42,8 +43,8 @@ COPY --from=build --chown=honeybot:honeybot /app/node_modules ./node_modules
 COPY --from=build --chown=honeybot:honeybot /app/dist ./dist
 COPY --from=build --chown=honeybot:honeybot /app/prompts ./prompts
 
-RUN mkdir -p data/images \
-  && chown -R honeybot:honeybot data
+RUN mkdir -p data/images .cache/fontconfig \
+  && chown -R honeybot:honeybot data .cache
 
 USER honeybot
 VOLUME ["/app/data"]

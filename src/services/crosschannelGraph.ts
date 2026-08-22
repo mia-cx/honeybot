@@ -32,13 +32,23 @@ export function crosschannelCurveSvg(config: GuildConfig) {
   );
   const xMaxPoint = Math.max(xMin, Math.ceil(xMaxExclusive) - 1);
   const yMax = config.crosschannelWindowSeconds * 1.1;
-  const labeledPoints = Array.from(
+  const integerPoints = Array.from(
     { length: xMaxPoint - xMin + 1 },
     (_, index) => xMin + index,
   ).map((channelCount) => ({
     channelCount,
     seconds: Math.round(crosschannelAllowedWindowSeconds(channelCount, config)),
   }));
+  const annotationPoints = integerPoints.filter(
+    ({ channelCount }) =>
+      channelCount === xMin ||
+      channelCount === xMaxPoint ||
+      channelCount === config.crosschannelWindowMidpointChannels ||
+      ((channelCount - xMin) % 3 === 0 &&
+        Math.abs(
+          channelCount - config.crosschannelWindowMidpointChannels,
+        ) >= 2),
+  );
   const curvePoints = Array.from({ length: 240 }, (_, index) => {
     const ratio = index / 239;
     const channelCount = xMin + (xMaxExclusive - xMin) * ratio;
@@ -67,32 +77,32 @@ export function crosschannelCurveSvg(config: GuildConfig) {
 <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="100%" height="100%" fill="#111827"/>
   <rect x="${margin.left}" y="${margin.top}" width="${plotWidth}" height="${plotHeight}" rx="18" fill="#0f172a" stroke="#334155" stroke-width="2"/>
-  <text x="${margin.left}" y="38" fill="#facc15" font-family="Inter, Arial, sans-serif" font-size="28" font-weight="700">Cross-channel detection window</text>
-  <text x="${margin.left}" y="64" fill="#cbd5e1" font-family="Inter, Arial, sans-serif" font-size="17">x: 2 ≤ channels &lt; ${formatNumber(xMaxExclusive)} · y: 0 ≤ seconds &lt; ${formatDurationSeconds(Math.round(yMax))}</text>
+  <text x="${margin.left}" y="38" fill="#facc15" font-family="DejaVu Sans, sans-serif" font-size="28" font-weight="700">Cross-channel detection window</text>
+  <text x="${margin.left}" y="64" fill="#cbd5e1" font-family="DejaVu Sans, sans-serif" font-size="17">x: 2 ≤ channels &lt; ${formatNumber(xMaxExclusive)} · y: 0 ≤ seconds &lt; ${formatDurationSeconds(Math.round(yMax))}</text>
 
   ${yTicks
     .map(
       (tick) => `
   <line x1="${margin.left}" y1="${y(tick).toFixed(2)}" x2="${margin.left + plotWidth}" y2="${y(tick).toFixed(2)}" stroke="#1e293b" stroke-width="1"/>
-  <text x="${margin.left - 12}" y="${(y(tick) + 5).toFixed(2)}" fill="#94a3b8" font-family="Inter, Arial, sans-serif" font-size="14" text-anchor="end">${formatDurationSeconds(tick)}</text>`,
+  <text x="${margin.left - 12}" y="${(y(tick) + 5).toFixed(2)}" fill="#94a3b8" font-family="DejaVu Sans, sans-serif" font-size="14" text-anchor="end">${formatDurationSeconds(tick)}</text>`,
     )
     .join('')}
 
-  ${labeledPoints
+  ${integerPoints
     .map(
       (point) => `
   <line x1="${x(point.channelCount).toFixed(2)}" y1="${margin.top}" x2="${x(point.channelCount).toFixed(2)}" y2="${margin.top + plotHeight}" stroke="#1e293b" stroke-width="1"/>
-  <text x="${x(point.channelCount).toFixed(2)}" y="${height - 42}" fill="#94a3b8" font-family="Inter, Arial, sans-serif" font-size="13" text-anchor="middle">${point.channelCount}</text>`,
+  <text x="${x(point.channelCount).toFixed(2)}" y="${height - 42}" fill="#94a3b8" font-family="DejaVu Sans, sans-serif" font-size="13" text-anchor="middle">${point.channelCount}</text>`,
     )
     .join('')}
 
   <line x1="${margin.left}" y1="${margin.top + plotHeight}" x2="${margin.left + plotWidth}" y2="${margin.top + plotHeight}" stroke="#64748b" stroke-width="2"/>
   <line x1="${margin.left}" y1="${margin.top}" x2="${margin.left}" y2="${margin.top + plotHeight}" stroke="#64748b" stroke-width="2"/>
-  <text x="${margin.left + plotWidth / 2}" y="${height - 16}" fill="#cbd5e1" font-family="Inter, Arial, sans-serif" font-size="16" text-anchor="middle">Distinct channels</text>
-  <text x="28" y="${margin.top + plotHeight / 2}" fill="#cbd5e1" font-family="Inter, Arial, sans-serif" font-size="16" text-anchor="middle" transform="rotate(-90 28 ${margin.top + plotHeight / 2})">Allowed seconds</text>
+  <text x="${margin.left + plotWidth / 2}" y="${height - 16}" fill="#cbd5e1" font-family="DejaVu Sans, sans-serif" font-size="16" text-anchor="middle">Distinct channels</text>
+  <text x="28" y="${margin.top + plotHeight / 2}" fill="#cbd5e1" font-family="DejaVu Sans, sans-serif" font-size="16" text-anchor="middle" transform="rotate(-90 28 ${margin.top + plotHeight / 2})">Allowed seconds</text>
   <path d="${path}" fill="none" stroke="#facc15" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 
-  ${labeledPoints
+  ${annotationPoints
     .map((point) => {
       const pointX = x(point.channelCount);
       const pointY = y(point.seconds);
@@ -125,7 +135,7 @@ export function crosschannelCurveSvg(config: GuildConfig) {
   <circle cx="${pointX.toFixed(2)}" cy="${pointY.toFixed(2)}" r="6" fill="#fde68a" stroke="#92400e" stroke-width="2"/>
   <g transform="translate(${labelX.toFixed(2)} ${labelY.toFixed(2)})">
     <rect x="${rectX.toFixed(2)}" y="-10" width="${(labelWidth + 12).toFixed(2)}" height="20" rx="5" fill="#0f172a" fill-opacity="0.88" stroke="#1e293b" stroke-width="1"/>
-    <text x="0" y="1" fill="#e2e8f0" font-family="Inter, Arial, sans-serif" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle">${label}</text>
+    <text x="0" y="1" fill="#e2e8f0" font-family="DejaVu Sans, sans-serif" font-size="11" font-weight="700" text-anchor="middle" dominant-baseline="middle">${label}</text>
   </g>`;
     })
     .join('')}

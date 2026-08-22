@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
@@ -30,6 +30,20 @@ const repositories = {
 const repository = 'mia-cx/honeybot';
 const digest =
   'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+
+describe('runtime image', () => {
+  it('installs fontconfig and a sans-serif font for rendered settings graphs', () => {
+    const dockerfile = readFileSync('docker/Dockerfile', 'utf8');
+    const runtimeStage = dockerfile.slice(
+      dockerfile.indexOf('FROM base AS runtime'),
+    );
+
+    expect(runtimeStage).toContain('fontconfig');
+    expect(runtimeStage).toContain('fonts-dejavu-core');
+    expect(runtimeStage).toContain('XDG_CACHE_HOME=/app/.cache');
+    expect(runtimeStage).toContain('.cache/fontconfig');
+  });
+});
 
 describe('registry publication adapter', () => {
   it('uses a real registry transfer for cross-registry copies', () => {
