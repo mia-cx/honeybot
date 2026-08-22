@@ -41,7 +41,7 @@ import {
   type FileStorage,
   type StoredFile,
 } from '../storage/fileStorage.js';
-import type { Message } from 'discord.js';
+import type { Attachment, Message } from 'discord.js';
 import { FairQueue } from '../queues/fairQueue.js';
 import { resolveImageContentType } from '../storage/imageNormalization.js';
 import { logger } from '../logger.js';
@@ -100,6 +100,17 @@ const caseOperationTransitions = {
 >;
 
 export type CaseOperation = keyof typeof caseOperationTransitions;
+
+export type KnownScamImageImportResult = {
+  added: number;
+  skipped: number;
+  failed: number;
+  items: Array<{
+    name: string;
+    status: 'added' | 'skipped' | 'failed';
+    detail: string;
+  }>;
+};
 
 type CaseOperationTransition = (typeof caseOperationTransitions)[CaseOperation];
 
@@ -1222,6 +1233,160 @@ export class CaseStore {
       result,
     );
     return result;
+  }
+
+  async importKnownScamImages(
+    guildId: string,
+    attachments: Iterable<Attachment>,
+    actorId: string,
+    reason?: string | null,
+  ): Promise<KnownScamImageImportResult> {
+    const items: KnownScamImageImportResult['items'] = [];
+    for (const attachment of attachments) {
+      items.push(
+        await this.importKnownScamImage(guildId, attachment, actorId, reason),
+      );
+    }
+    return {
+      added: items.filter((item) => item.status === 'added').length,
+      skipped: items.filter((item) => item.status === 'skipped').length,
+      failed: items.filter((item) => item.status === 'failed').length,
+      items,
+    };
+  }
+
+  private async importKnownScamImage(
+    guildId: string,
+    attachment: Attachment,
+    actorId: string,
+    reason?: string | null,
+  ): Promise<KnownScamImageImportResult['items'][number]> {
+    const name = attachment.name || `${attachment.id}.bin`;
+    if (!resolveImageContentType(attachment.contentType, name)) {
+      return {
+        name,
+        status: 'failed',
+        detail: 'Discord did not identify this file as a supported image.',
+      };
+    }
+    if (attachment.size > MAX_ATTACHMENT_BYTES) {
+      return {
+        name,
+        status: 'failed',
+        detail: `File exceeds the ${MAX_ATTACHMENT_BYTES / 1024 / 1024} MiB limit.`,
+      };
+    }
+
+    let stored: StoredFile | null = null;
+    let storedReferenced = false;
+    try {
+      stored = await this.storage.saveFromUrl(
+        attachment.url,
+        ['global-corpus'],
+        name,
+        {
+          contentType: attachment.contentType,
+          expectedSizeBytes: attachment.size,
+        },
+      );
+      const existing = await this.db
+        .select()
+        .from(knownImages)
+        .where(
+          and(
+            eq(knownImages.sha256, stored.sha256),
+            eq(knownImages.scope, 'global'),
+          ),
+        )
+        .get();
+      storedReferenced = existing?.storageKey === stored.storageKey;
+      if (
+        existing?.status === 'approved' &&
+        existing.embeddingProvider &&
+        existing.embeddingModel &&
+        existing.embeddingDimensions &&
+        existing.embeddingVectorJson
+      ) {
+        if (existing.storageKey !== stored.storageKey) {
+          await this.storage.remove(stored.storageKey);
+        }
+        return {
+          name,
+          status: 'skipped',
+          detail: 'This image is already in the global corpus.',
+        };
+      }
+
+      const bytes = await this.storage.read(stored.storageKey);
+      const embedding = await this.embedder?.embedImage(guildId, {
+        contentType: stored.contentType,
+        name: stored.fileName,
+        url: attachment.url,
+        storageKey: stored.storageKey,
+        dataUrl: `data:${stored.contentType};base64,${bytes.toString('base64')}`,
+      });
+      if (!embedding) {
+        if (!storedReferenced) await this.storage.remove(stored.storageKey);
+        return {
+          name,
+          status: 'failed',
+          detail: 'Honeybot could not create an image embedding.',
+        };
+      }
+
+      const now = new Date().toISOString();
+      const values = {
+        sha256: stored.sha256,
+        perceptualHash: null,
+        storageKey: existing?.storageKey ?? stored.storageKey,
+        embeddingProvider: embedding.provider,
+        embeddingModel: embedding.model,
+        embeddingDimensions: embedding.dimensions,
+        embeddingVectorJson: JSON.stringify(embedding.vector),
+        description: `Known scam image uploaded through Discord: ${name}`,
+        scamReason:
+          reason?.trim() || 'Added from a trusted Honeybot admin upload.',
+        sourceCaseId: null,
+        sourceDiscordAttachmentId: attachment.id,
+        approvedBy: actorId,
+        scope: 'global',
+        guildId: null,
+        status: 'approved',
+        updatedAt: now,
+      } as const;
+      if (existing) {
+        await this.db
+          .update(knownImages)
+          .set(values)
+          .where(eq(knownImages.id, existing.id));
+        if (existing.storageKey !== stored.storageKey) {
+          await this.storage.remove(stored.storageKey);
+        }
+      } else {
+        await this.db.insert(knownImages).values({
+          id: randomUUID(),
+          ...values,
+          createdAt: now,
+        });
+        storedReferenced = true;
+      }
+      return {
+        name,
+        status: 'added',
+        detail: existing
+          ? 'Repaired the existing corpus entry.'
+          : 'Added to the global corpus.',
+      };
+    } catch (error) {
+      if (stored && !storedReferenced) {
+        await this.storage.remove(stored.storageKey).catch(() => {});
+      }
+      return {
+        name,
+        status: 'failed',
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   async addEvent(

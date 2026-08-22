@@ -71,6 +71,14 @@ import {
   caseReviewUncertainUpdate,
 } from '../interactions/caseReviewUi.js';
 import type { GuildSettings } from '../domain/types.js';
+import {
+  CORPUS_UPLOAD_ANOTHER_ID,
+  CORPUS_UPLOAD_FILES_ID,
+  CORPUS_UPLOAD_MODAL_ID,
+  CORPUS_UPLOAD_REASON_ID,
+  corpusUploadModal,
+  corpusUploadReply,
+} from '../interactions/corpusUi.js';
 
 const COMPONENTS_V2 = 1 << 15;
 const EPHEMERAL = 1 << 6;
@@ -216,6 +224,17 @@ export async function handleInteractionCreate(
   }
 
   if (interaction.isButton()) {
+    if (interaction.customId === CORPUS_UPLOAD_ANOTHER_ID) {
+      if (!(await hasGlobalAuthority(interaction))) {
+        await interaction.reply({
+          content: 'Nope. Honeybot global admin access required.',
+          ephemeral: true,
+        });
+        return;
+      }
+      await interaction.showModal(corpusUploadModal());
+      return;
+    }
     if (interaction.customId.startsWith('admin:corpus:')) {
       if (!(await hasGlobalAuthority(interaction))) {
         await interaction.reply({
@@ -320,6 +339,21 @@ export async function handleInteractionCreate(
       return;
     }
     await handleSettingsPolicyRoleSelect(interaction, deps);
+    return;
+  }
+
+  if (
+    interaction.isModalSubmit() &&
+    interaction.customId === CORPUS_UPLOAD_MODAL_ID
+  ) {
+    if (!(await hasGlobalAuthority(interaction))) {
+      await interaction.reply({
+        content: 'Nope. Honeybot global admin access required.',
+        ephemeral: true,
+      });
+      return;
+    }
+    await handleCorpusUpload(interaction, deps);
     return;
   }
 
@@ -509,6 +543,10 @@ async function handleCommand(
         });
         return;
       }
+      if (sub === 'upload-corpus') {
+        await interaction.showModal(corpusUploadModal());
+        return;
+      }
       if (sub === 'verbose') {
         const enabled = await toggleVerboseLogging(deps.db);
         await interaction.reply({
@@ -578,6 +616,27 @@ async function handleCommand(
 }
 
 type CorpusType = 'all' | 'text' | 'image';
+
+async function handleCorpusUpload(
+  interaction: ModalSubmitInteraction<'cached'>,
+  deps: InteractionDependencies,
+) {
+  const attachments = interaction.fields.getUploadedFiles(
+    CORPUS_UPLOAD_FILES_ID,
+    true,
+  );
+  const reason = interaction.fields
+    .getTextInputValue(CORPUS_UPLOAD_REASON_ID)
+    ?.trim();
+  await interaction.deferReply({ ephemeral: true });
+  const result = await deps.caseStore.importKnownScamImages(
+    interaction.guildId,
+    attachments.values(),
+    interaction.user.id,
+    reason || null,
+  );
+  await interaction.editReply(corpusUploadReply(result));
+}
 
 async function replyWithKnownCorpus(
   interaction: ChatInputCommandInteraction<'cached'>,

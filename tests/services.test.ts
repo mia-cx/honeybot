@@ -3135,6 +3135,57 @@ describe('CaseStore', () => {
     database.sqlite.close();
   });
 
+  it('imports a Discord image batch into the global corpus with partial results', async () => {
+    const database = testDatabase();
+    const storage = fakeStorage();
+    const embedder = {
+      embedText: vi.fn(async () => null),
+      embedImage: vi.fn(async (): Promise<EmbeddingResult> => ({
+        provider: 'openrouter',
+        model: 'image-embed',
+        dimensions: 3,
+        vector: [0, 1, 0],
+      })),
+    };
+    const store = new CaseStore(database.db, storage, embedder);
+
+    const result = await store.importKnownScamImages(
+      'guild',
+      [
+        attachment({ id: 'first', name: 'first.png' }),
+        attachment({ id: 'duplicate', name: 'duplicate.png' }),
+        attachment({
+          id: 'document',
+          name: 'notes.txt',
+          contentType: 'text/plain',
+        }),
+      ] as any,
+      'admin',
+      'Collected QR phishing campaign',
+    );
+
+    expect(result).toMatchObject({ added: 1, skipped: 1, failed: 1 });
+    expect(result.items.map((item) => item.status)).toEqual([
+      'added',
+      'skipped',
+      'failed',
+    ]);
+    expect(embedder.embedImage).toHaveBeenCalledTimes(1);
+    expect(storage.saveFromUrl).toHaveBeenCalledTimes(2);
+    const rows = await database.db.select().from(knownImages);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      sourceDiscordAttachmentId: 'first',
+      approvedBy: 'admin',
+      scope: 'global',
+      status: 'approved',
+      scamReason: 'Collected QR phishing campaign',
+      embeddingModel: 'image-embed',
+    });
+
+    database.sqlite.close();
+  });
+
   it('ignores approved corpus rows that are missing embeddings', async () => {
     const database = testDatabase();
     const store = new CaseStore(database.db, fakeStorage());
