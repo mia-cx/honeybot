@@ -273,7 +273,7 @@ describe('stable release discovery', () => {
     ]);
   });
 
-  it('rejects a manual version bump without consumed Changesets', () => {
+  it('accepts a manual version bump with a matching changelog entry', () => {
     const repository = createRepository();
     const baseline = runGit(['rev-parse', 'HEAD'], repository);
     writePackage(repository, '1.1.0');
@@ -282,9 +282,9 @@ describe('stable release discovery', () => {
     runGit(['commit', '--message', 'manual version bump'], repository);
     const tip = runGit(['rev-parse', 'HEAD'], repository);
 
-    expect(() => findStableCandidates(baseline, tip, repository)).toThrow(
-      'consumed no Changeset fragments',
-    );
+    expect(findStableCandidates(baseline, tip, repository)).toEqual([
+      { version: '1.1.0', ref: tip },
+    ]);
   });
 
   it('does not let a later complete release hide an earlier incomplete transition', () => {

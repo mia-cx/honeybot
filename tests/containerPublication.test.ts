@@ -73,7 +73,7 @@ describe('registry publication adapter', () => {
     ]);
   });
 
-  it('uses Buildx only for registry-local retags', () => {
+  it('uses authenticated crane copies for registry-local retags', () => {
     const commands: Array<{ command: string; args: string[] }> = [];
     const adapter = new DockerBuildxAdapter({
       capture: () => '',
@@ -90,14 +90,11 @@ describe('registry publication adapter', () => {
 
     expect(commands).toEqual([
       {
-        command: 'docker',
+        command: 'crane',
         args: [
-          'buildx',
-          'imagetools',
-          'create',
-          '--tag',
-          'ghcr.io/mia-cx/honeybot:beta',
+          'copy',
           `ghcr.io/mia-cx/honeybot@${digest}`,
+          'ghcr.io/mia-cx/honeybot:beta',
         ],
       },
     ]);
