@@ -73,48 +73,47 @@ const publicationCommands: PublicationCommandExecutor = {
 };
 
 export class DockerBuildxAdapter implements PublicationAdapter {
+  private readonly labelsByDigest = new Map<string, Record<string, string>>();
+
   constructor(
     private readonly commands: PublicationCommandExecutor = publicationCommands,
   ) {}
 
   inspect(reference: string): ImageObservation | null {
-    let output: string;
+    let digest: string;
     try {
-      output = this.commands.capture('docker', [
-        'buildx',
-        'imagetools',
-        'inspect',
-        reference,
-        '--format',
-        '{{json .}}',
-      ]);
+      digest = this.commands.capture('crane', ['digest', reference]).trim();
     } catch (error) {
       if (
         error instanceof Error &&
-        /manifest unknown|not found/i.test(error.message)
+        /manifest unknown|not found|name unknown|manifest_unknown|name_unknown|404/i.test(
+          error.message,
+        )
       )
         return null;
       throw error;
     }
 
-    const value: unknown = JSON.parse(output);
-    if (
-      !isRecord(value) ||
-      !isRecord(value.manifest) ||
-      typeof value.manifest.digest !== 'string'
-    ) {
+    if (!/^sha256:[0-9a-f]{64}$/.test(digest))
       throw new Error(`Unable to read digest for ${reference}`);
-    }
-    if (!isRecord(value.image))
-      throw new Error(`Unable to read image configs for ${reference}`);
 
-    const platformLabels = Object.entries(value.image)
-      .filter(([platform]) => !platform.startsWith('unknown/'))
-      .map(([, image]) => extractLabels(image, reference));
-    if (platformLabels.length === 0)
-      throw new Error(`No platform images found for ${reference}`);
-    const labels = platformLabels[0];
-    if (!labels) throw new Error(`No labels found for ${reference}`);
+    const labels =
+      this.labelsByDigest.get(digest) ?? this.readPlatformLabels(reference);
+    this.labelsByDigest.set(digest, labels);
+    return { reference, digest, labels };
+  }
+
+  private readPlatformLabels(reference: string) {
+    const platformLabels = ['linux/amd64', 'linux/arm64'].map((platform) => {
+      const output = this.commands.capture('crane', [
+        'config',
+        reference,
+        '--platform',
+        platform,
+      ]);
+      return extractLabels(JSON.parse(output), reference);
+    });
+    const labels = platformLabels[0] ?? {};
     for (const candidate of platformLabels.slice(1)) {
       if (
         JSON.stringify(sortedRecord(candidate)) !==
@@ -123,8 +122,7 @@ export class DockerBuildxAdapter implements PublicationAdapter {
         throw new Error(`Platform labels disagree for ${reference}`);
       }
     }
-
-    return { reference, digest: value.manifest.digest, labels };
+    return labels;
   }
 
   build(request: BuildRequest): string {
