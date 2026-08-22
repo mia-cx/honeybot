@@ -1,5 +1,11 @@
 # honeybot
 
+## 1.1.3
+
+### Patch Changes
+
+- Add `/info` for ephemeral deployment, coverage, corpus, case, model, and health statistics, with operational diagnostics limited to Honeybot managers.
+
 ## 1.1.2
 
 ### Patch Changes

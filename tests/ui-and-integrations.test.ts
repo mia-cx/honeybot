@@ -34,6 +34,7 @@ import {
   corpusUploadModal,
   corpusUploadReply,
 } from '../src/interactions/corpusUi.js';
+import { infoReply } from '../src/interactions/infoUi.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -86,6 +87,7 @@ describe('command registration', () => {
       options?: Array<{ name: string }>;
     }>;
     expect(commands.map((command) => command.name)).toEqual([
+      'info',
       'settings',
       'admin',
       'Mark case as known scam',
@@ -97,13 +99,75 @@ describe('command registration', () => {
         ?.options?.map((option: { name: string }) => option.name),
     ).toEqual(['add', 'corpus', 'upload-corpus', 'verbose']);
     expect(
-      commands.find((command) => command.name === 'settings')?.integrationTypes,
-    ).toEqual([0]);
+      commands
+        .filter((command) => ['info', 'settings'].includes(command.name))
+        .map((command) => command.integrationTypes),
+    ).toEqual([[0], [0]]);
     expect(
       commands
         .filter((command) => command.name !== 'settings')
         .map((command) => command.integrationTypes),
-    ).toEqual([[1], [1], [1]]);
+    ).toEqual([[0], [1], [1], [1]]);
+  });
+
+  it('builds public info with manager-only diagnostics', () => {
+    const input = {
+      version: '1.2.3',
+      revision: '1234567890abcdef',
+      startedAt: new Date('2026-08-22T08:00:00Z'),
+      discordLatencyMs: 42,
+      guildCount: 3,
+      monitoredChannelCount: 7,
+      corpus: { texts: 11, images: 29, missingEmbeddings: 0 },
+      cases: { last24Hours: 2, last7Days: 8, retained: 40 },
+      models: [
+        {
+          purpose: 'text_classifier' as const,
+          provider: 'openrouter',
+          modelId: 'text-model',
+          ready: true,
+        },
+        {
+          purpose: 'image_classifier' as const,
+          provider: 'openrouter',
+          modelId: 'image-model',
+          ready: true,
+        },
+        {
+          purpose: 'text_embeddings' as const,
+          provider: 'openrouter',
+          modelId: 'text-embed',
+          ready: true,
+        },
+        {
+          purpose: 'image_embeddings' as const,
+          provider: 'openrouter',
+          modelId: 'image-embed',
+          ready: true,
+        },
+      ],
+      diagnostics: {
+        failedAnalysesLast24Hours: 1,
+        lastCorpusUpdate: new Date('2026-08-22T07:00:00Z'),
+        memoryRssBytes: 128 * 1024 * 1024,
+        modelQueue: { active: 1, queued: 2 },
+        moderationQueue: { active: 0, queued: 0 },
+      },
+    };
+
+    const publicReply = infoReply(input, false);
+    const managerReply = infoReply(input, true);
+    const publicEmbed = publicReply.embeds[0].toJSON();
+    const managerEmbed = managerReply.embeds[0].toJSON();
+
+    expect(publicReply.ephemeral).toBe(false);
+    expect(managerReply.ephemeral).toBe(true);
+    expect(publicEmbed.fields?.map(({ name }) => name)).not.toContain(
+      'Manager diagnostics',
+    );
+    expect(JSON.stringify(publicEmbed)).toContain('v1.2.3');
+    expect(JSON.stringify(managerEmbed)).toContain('1234567890ab');
+    expect(JSON.stringify(managerEmbed)).toContain('1 active, 2 queued');
   });
 
   it('builds the global corpus batch upload flow', () => {

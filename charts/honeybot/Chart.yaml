@@ -3,7 +3,7 @@ name: honeybot
 description: A Discord moderation bot for honeypot and scam raid detection.
 type: application
 version: 0.1.0
-appVersion: "0.1.0"
+appVersion: "1.1.3"
 keywords:
   - discord
   - moderation

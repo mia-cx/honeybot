@@ -155,6 +155,10 @@ export class DockerBuildxAdapter implements PublicationAdapter {
           '--provenance=mode=max',
           '--metadata-file',
           metadataFile,
+          '--build-arg',
+          `HONEYBOT_VERSION=${request.identity.version}`,
+          '--build-arg',
+          `HONEYBOT_REVISION=${request.identity.ref}`,
         ];
         for (const reference of request.references)
           args.push('--tag', reference);
