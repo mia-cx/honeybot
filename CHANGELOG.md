@@ -1,5 +1,11 @@
 # honeybot
 
+## 1.1.2
+
+### Patch Changes
+
+- Add a Discord-native batch upload flow for trusted global admins to normalize, embed, deduplicate, and add collected scam images to the known corpus.
+
 ## 1.1.1
 
 ### Patch Changes
