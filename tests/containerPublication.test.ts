@@ -109,13 +109,8 @@ describe('registry publication adapter', () => {
 
   it('observes a structurally valid image with no OCI labels', () => {
     const adapter = new DockerBuildxAdapter({
-      capture: () =>
-        JSON.stringify({
-          manifest: { digest },
-          image: {
-            'linux/amd64': { config: {} },
-          },
-        }),
+      capture: (_command, args) =>
+        args[0] === 'digest' ? digest : JSON.stringify({ config: {} }),
       stream: () => {
         throw new Error('inspect must not use the streaming command path');
       },
@@ -133,15 +128,10 @@ describe('registry publication adapter', () => {
   it('ignores provenance attestations when comparing platform labels', () => {
     const labels = releaseLabels(identity, repository);
     const adapter = new DockerBuildxAdapter({
-      capture: () =>
-        JSON.stringify({
-          manifest: { digest },
-          image: {
-            'linux/amd64': { config: { Labels: labels } },
-            'linux/arm64': { config: { Labels: labels } },
-            'unknown/unknown': { config: {} },
-          },
-        }),
+      capture: (_command, args) =>
+        args[0] === 'digest'
+          ? digest
+          : JSON.stringify({ config: { Labels: labels } }),
       stream: () => {
         throw new Error('inspect must not use the streaming command path');
       },
@@ -158,11 +148,8 @@ describe('registry publication adapter', () => {
     'rejects a malformed platform image config %#',
     (platformImage) => {
       const adapter = new DockerBuildxAdapter({
-        capture: () =>
-          JSON.stringify({
-            manifest: { digest },
-            image: { 'linux/amd64': platformImage },
-          }),
+        capture: (_command, args) =>
+          args[0] === 'digest' ? digest : JSON.stringify(platformImage),
         stream: () => {
           throw new Error('inspect must not use the streaming command path');
         },
@@ -173,6 +160,38 @@ describe('registry publication adapter', () => {
       ).toThrow('Image config missing');
     },
   );
+
+  it('uses authenticated crane reads and reuses labels by digest', () => {
+    const commands: Array<{ command: string; args: string[] }> = [];
+    const labels = releaseLabels(identity, repository);
+    const adapter = new DockerBuildxAdapter({
+      capture: (command, args) => {
+        commands.push({ command, args });
+        return args[0] === 'digest'
+          ? digest
+          : JSON.stringify({ config: { Labels: labels } });
+      },
+      stream: () => {
+        throw new Error('inspect must not use the streaming command path');
+      },
+    });
+
+    adapter.inspect('ghcr.io/mia-cx/honeybot:v1.2.0-beta.3');
+    adapter.inspect('docker.io/miacx/honeybot:v1.2.0-beta.3');
+
+    expect(commands.map(({ command }) => command)).toEqual([
+      'crane',
+      'crane',
+      'crane',
+      'crane',
+    ]);
+    expect(commands.map(({ args }) => args[0])).toEqual([
+      'digest',
+      'config',
+      'config',
+      'digest',
+    ]);
+  });
 
   it('streams image build output instead of capturing it in memory', () => {
     const streamed: Array<{ command: string; args: string[] }> = [];
