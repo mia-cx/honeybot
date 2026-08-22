@@ -79,6 +79,8 @@ import {
   corpusUploadModal,
   corpusUploadReply,
 } from '../interactions/corpusUi.js';
+import { infoReply } from '../interactions/infoUi.js';
+import { collectHoneybotInfo } from '../services/info.js';
 
 const COMPONENTS_V2 = 1 << 15;
 const EPHEMERAL = 1 << 6;
@@ -116,6 +118,7 @@ export type InteractionDependencies = {
   caseStore: CaseStore;
   db: Db;
   moderationQueue: FairQueue;
+  modelQueue: FairQueue;
   storage: FileStorage;
   additionalSignalModels?: SettingsAdditionalSignalConfig;
 };
@@ -397,6 +400,7 @@ async function canUseCommand(
   interaction: ChatInputCommandInteraction<'cached'>,
   deps: InteractionDependencies,
 ) {
+  if (interaction.commandName === 'info') return true;
   if (
     interaction.commandName === 'admin' ||
     interaction.commandName === 'honeybot-team' ||
@@ -413,6 +417,32 @@ async function handleCommand(
   deps: InteractionDependencies,
 ) {
   switch (interaction.commandName) {
+    case 'info': {
+      const showDiagnostics = await canConfigureHoneybot(
+        interaction,
+        deps.configStore,
+      );
+      const guildConfigs = await Promise.all(
+        [...interaction.client.guilds.cache.keys()].map((guildId) =>
+          deps.configStore.getGuildConfig(guildId),
+        ),
+      );
+      const info = await collectHoneybotInfo({
+        db: deps.db,
+        modelStore: deps.modelStore,
+        modelQueue: deps.modelQueue,
+        moderationQueue: deps.moderationQueue,
+        guildId: interaction.guildId,
+        guildCount: interaction.client.guilds.cache.size,
+        monitoredChannelCount: guildConfigs.reduce(
+          (total, config) => total + config.honeypotChannelIds.length,
+          0,
+        ),
+        discordLatencyMs: interaction.client.ws.ping,
+      });
+      await interaction.reply(infoReply(info, showDiagnostics));
+      return;
+    }
     case 'settings': {
       await interaction.reply(
         await settingsReplyForGuild(deps, interaction.guildId),

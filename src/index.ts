@@ -190,6 +190,7 @@ client.on(Events.InteractionCreate, (interaction) => {
     modelStore,
     caseStore,
     db: database.db,
+    modelQueue,
     moderationQueue,
     storage,
     additionalSignalModels: {

@@ -28,9 +28,13 @@ FROM base AS runtime
 
 ARG HONEYBOT_UID=10001
 ARG HONEYBOT_GID=10001
+ARG HONEYBOT_VERSION=dev
+ARG HONEYBOT_REVISION=unknown
 
 ENV NODE_ENV=production \
-    XDG_CACHE_HOME=/app/.cache
+    XDG_CACHE_HOME=/app/.cache \
+    HONEYBOT_VERSION=${HONEYBOT_VERSION} \
+    HONEYBOT_REVISION=${HONEYBOT_REVISION}
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends ca-certificates fontconfig fonts-dejavu-core \

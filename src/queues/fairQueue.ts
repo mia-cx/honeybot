@@ -17,6 +17,11 @@ type FairQueueOptions = {
   maxPendingPerGroup?: number;
 };
 
+export type QueueStats = {
+  active: number;
+  queued: number;
+};
+
 export class QueueCapacityError extends Error {}
 
 export class FairQueue {
@@ -67,6 +72,17 @@ export class FairQueue {
       this.groupQueues.set(groupKey, queue as Job<unknown>[]);
       void this.drain();
     });
+  }
+
+  stats(): QueueStats {
+    const queued = [...this.groupQueues.values()].reduce(
+      (total, queue) => total + queue.length,
+      0,
+    );
+    return {
+      active: Math.max(0, this.globalOutstanding - queued),
+      queued,
+    };
   }
 
   private async drain() {

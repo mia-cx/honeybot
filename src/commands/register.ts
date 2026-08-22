@@ -21,6 +21,11 @@ const userInstallGuildCommand = {
 const honeybotCommands = [
   {
     ...guildInstallCommand,
+    name: 'info',
+    description: 'Show Honeybot version, activity, corpus, and health stats',
+  },
+  {
+    ...guildInstallCommand,
     name: 'settings',
     description: 'Open the interactive Honeybot settings panel for this server',
   },
