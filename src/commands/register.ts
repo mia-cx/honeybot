@@ -79,6 +79,11 @@ const honeybotCommands = [
       },
       {
         type: ApplicationCommandOptionType.Subcommand,
+        name: 'upload-corpus',
+        description: 'Add known scam images to the corpus in batches',
+      },
+      {
+        type: ApplicationCommandOptionType.Subcommand,
         name: 'verbose',
         description: 'Toggle full model request/response console logging',
       },

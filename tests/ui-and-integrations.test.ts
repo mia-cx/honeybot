@@ -27,6 +27,13 @@ import {
 import { loadClassifierPrompt } from '../src/services/prompts.js';
 import { FileStorage } from '../src/storage/fileStorage.js';
 import { testDatabase } from './helpers.js';
+import {
+  CORPUS_UPLOAD_ANOTHER_ID,
+  CORPUS_UPLOAD_FILES_ID,
+  CORPUS_UPLOAD_MODAL_ID,
+  corpusUploadModal,
+  corpusUploadReply,
+} from '../src/interactions/corpusUi.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -88,7 +95,7 @@ describe('command registration', () => {
       commands
         .find((command) => command.name === 'admin')
         ?.options?.map((option: { name: string }) => option.name),
-    ).toEqual(['add', 'corpus', 'verbose']);
+    ).toEqual(['add', 'corpus', 'upload-corpus', 'verbose']);
     expect(
       commands.find((command) => command.name === 'settings')?.integrationTypes,
     ).toEqual([0]);
@@ -97,6 +104,55 @@ describe('command registration', () => {
         .filter((command) => command.name !== 'settings')
         .map((command) => command.integrationTypes),
     ).toEqual([[1], [1], [1]]);
+  });
+
+  it('builds the global corpus batch upload flow', () => {
+    const modal = corpusUploadModal().toJSON();
+
+    expect(modal).toMatchObject({
+      custom_id: CORPUS_UPLOAD_MODAL_ID,
+      title: 'Add known scam images',
+      components: [
+        {
+          type: 18,
+          component: {
+            type: 19,
+            custom_id: CORPUS_UPLOAD_FILES_ID,
+            min_values: 1,
+            max_values: 10,
+          },
+        },
+        { type: 18, component: { type: 4, required: false } },
+      ],
+    });
+
+    const reply = corpusUploadReply({
+      added: 1,
+      skipped: 1,
+      failed: 1,
+      items: [
+        { name: 'new.png', status: 'added', detail: 'Added.' },
+        { name: 'known.png', status: 'skipped', detail: 'Already known.' },
+        { name: 'bad.png', status: 'failed', detail: 'Invalid image.' },
+      ],
+    });
+    expect(reply.content).toContain('Added 1, skipped 1, failed 1.');
+    expect(reply.content).toContain('Failed `bad.png`: Invalid image.');
+    expect(reply.components[0]?.components[0]?.toJSON()).toMatchObject({
+      custom_id: CORPUS_UPLOAD_ANOTHER_ID,
+      label: 'Add another batch',
+    });
+    const fullBatchReply = corpusUploadReply({
+      added: 0,
+      skipped: 0,
+      failed: 10,
+      items: Array.from({ length: 10 }, (_, index) => ({
+        name: `${index}-${'x'.repeat(100)}.png`,
+        status: 'failed' as const,
+        detail: 'Provider error '.repeat(20),
+      })),
+    });
+    expect(fullBatchReply.content.length).toBeLessThanOrEqual(2_000);
   });
 });
 
@@ -402,7 +458,10 @@ describe('case review UI', () => {
     const client = {
       guilds: {
         cache: new Map([
-          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
+          [
+            'guild',
+            { channels: { fetch: vi.fn(async () => channel) } },
+          ],
         ]),
       },
     };
@@ -455,10 +514,7 @@ describe('case review UI', () => {
     const client = {
       guilds: {
         cache: new Map([
-          [
-            'guild',
-            { channels: { fetch: vi.fn(async () => channel) } },
-          ],
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
         ]),
       },
     };

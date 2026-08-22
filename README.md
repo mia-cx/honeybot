@@ -25,6 +25,7 @@ It is built for self-hosting: SQLite for persistence, filesystem evidence storag
 - Text and multimodal image classifiers through OpenRouter-compatible model config.
 - Per-guild policies for prevention and final punishment.
 - Components V2 `/settings`, case review, corpus listing, and punishment DM UI.
+- Global admins can upload known scam images to the corpus in Discord with `/admin upload-corpus`.
 - Moderator review buttons with separate case-moderator and Honeybot-configuration access.
 - Optional global admin workflows for known scam corpus and global bans.
 - Persistent SQLite state under `/app/data`.
