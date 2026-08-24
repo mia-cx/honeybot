@@ -522,10 +522,7 @@ describe('case review UI', () => {
     const client = {
       guilds: {
         cache: new Map([
-          [
-            'guild',
-            { channels: { fetch: vi.fn(async () => channel) } },
-          ],
+          ['guild', { channels: { fetch: vi.fn(async () => channel) } }],
         ]),
       },
     };
@@ -593,18 +590,10 @@ describe('case review UI', () => {
     ];
 
     await expect(
-      refreshRecoveredCaseReviews(
-        client as any,
-        caseStore as any,
-        recovered,
-      ),
+      refreshRecoveredCaseReviews(client as any, caseStore as any, recovered),
     ).resolves.toEqual({ updated: 0, reposted: 0, skipped: 0, failed: 1 });
     await expect(
-      refreshRecoveredCaseReviews(
-        client as any,
-        caseStore as any,
-        recovered,
-      ),
+      refreshRecoveredCaseReviews(client as any, caseStore as any, recovered),
     ).resolves.toEqual({ updated: 1, reposted: 0, skipped: 0, failed: 0 });
 
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -958,6 +947,110 @@ describe('OpenRouterScamClassifier', () => {
       confidence: 0.99,
       rationale: 'textbook scam',
     });
+  });
+
+  it('retries a malformed successful response', async () => {
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response('{"choices":[{"message":{"content":"unfinished', {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'not_scam',
+                    scam_likelihood: 0.01,
+                    reason: 'The message is benign test text.',
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+      undefined,
+      { maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
+    );
+
+    await expect(
+      classifier.classify(cachedMessage(), classifierContext()),
+    ).resolves.toMatchObject({ verdict: 'not_scam', confidence: 0.01 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives malformed classifier output back to the model for repair', async () => {
+    const malformed =
+      '{"likelihood":"not_scam","scam_likelihood":0.01,"reason":"unfinished';
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: malformed } }],
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    likelihood: 'not_scam',
+                    scam_likelihood: 0.01,
+                    reason: 'The message is benign test text.',
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+      );
+    const classifier = new OpenRouterScamClassifier(
+      {
+        get: vi.fn(async () => ({
+          provider: 'openrouter',
+          modelId: 'model',
+          apiKey: 'key',
+          apiKeyHint: null,
+        })),
+      } as any,
+      immediateQueue(),
+      undefined,
+      { maxAttempts: 2, initialDelayMs: 1, maxDelayMs: 1 },
+    );
+
+    await expect(
+      classifier.classify(cachedMessage(), classifierContext()),
+    ).resolves.toMatchObject({ verdict: 'not_scam', confidence: 0.01 });
+    const repairBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    expect(repairBody.messages.at(-2)).toEqual({
+      role: 'assistant',
+      content: malformed,
+    });
+    expect(repairBody.messages.at(-1).content).toContain(
+      'malformed or truncated',
+    );
   });
 
   it('runs text additional signal models with the same text primary prompt payload', async () => {

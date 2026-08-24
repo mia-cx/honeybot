@@ -202,7 +202,7 @@ describe('DuplicateDetector', () => {
 });
 
 describe('handleMessageCreate', () => {
-  it('reuses pending cases only when prevention is log-only', async () => {
+  it('reuses pending cases for every prevention action', async () => {
     const database = testDatabase();
     const config = defaultGuildConfig({
       honeypotChannelIds: ['honey'],
@@ -248,9 +248,101 @@ describe('handleMessageCreate', () => {
 
     await handleMessageCreate(third, dependencies);
 
-    expect(await database.db.select().from(cases)).toHaveLength(2);
+    expect(await database.db.select().from(cases)).toHaveLength(1);
     expect(await database.db.select().from(caseMessages)).toHaveLength(3);
 
+    database.sqlite.close();
+  });
+
+  it('adds a concurrent third duplicate to the first cross-channel case', async () => {
+    const database = testDatabase();
+    const config = defaultGuildConfig({ moderationChannelId: 'review' });
+    config.policies.crosschannel_prevention.actionType = 'timeout';
+    config.policies.crosschannel_prevention.deleteMessages = false;
+
+    const guild = fakeDiscordGuild([]);
+    type ReviewMessage = {
+      id: string;
+      channelId: string;
+      components: unknown[];
+      edit: (update: { components: unknown[] }) => Promise<ReviewMessage>;
+    };
+    const reviewMessages = new Map<string, ReviewMessage>();
+    const reviewChannel = {
+      isTextBased: () => true,
+      messages: {
+        fetch: vi.fn(async (messageId: string) =>
+          reviewMessages.get(messageId),
+        ),
+      },
+      send: vi.fn(async (payload: { components: unknown[] }) => {
+        const reviewMessage: ReviewMessage = {
+          id: `review-${reviewMessages.size + 1}`,
+          channelId: 'review',
+          components: payload.components,
+          edit: vi.fn(async (update: { components: unknown[] }) => {
+            reviewMessage.components = update.components;
+            return reviewMessage;
+          }),
+        };
+        reviewMessages.set(reviewMessage.id, reviewMessage);
+        return reviewMessage;
+      }),
+    };
+    guild.channels.fetch.mockResolvedValue(reviewChannel);
+    const messages = ['c1', 'c2', 'c3'].map((channelId, index) => {
+      const message = fakeDiscordMessage({
+        id: `m${index + 1}`,
+        channelId,
+        content: 'same duplicate',
+        guild,
+      });
+      guild.register(message);
+      return message;
+    });
+
+    let releasePrevention: () => void = () => undefined;
+    const preventionGate = new Promise<void>((resolve) => {
+      releasePrevention = resolve;
+    });
+    const moderationQueue = {
+      enqueue: vi.fn(async (_guildId, job) => {
+        await preventionGate;
+        return job();
+      }),
+    };
+    const dependencies = {
+      configStore: { getGuildConfig: vi.fn(async () => config) },
+      messageCache: new MessageCache(),
+      duplicateDetector: new DuplicateDetector(),
+      caseStore: new CaseStore(database.db, fakeStorage()),
+      analyzer: {
+        analyze: vi.fn(async (): Promise<AnalysisResult> => ({
+          confidence: 0,
+          shouldPunish: false,
+          reason: 'done',
+          evidence: [],
+        })),
+      },
+      moderationQueue,
+      storage: fakeStorage(),
+    } as any;
+
+    await handleMessageCreate(messages[0]!, dependencies);
+    const handling = Promise.all([
+      handleMessageCreate(messages[1]!, dependencies),
+      handleMessageCreate(messages[2]!, dependencies),
+    ]);
+    await vi.waitFor(() =>
+      expect(moderationQueue.enqueue).toHaveBeenCalledTimes(2),
+    );
+
+    expect(await database.db.select().from(cases)).toHaveLength(1);
+    expect(await database.db.select().from(caseMessages)).toHaveLength(2);
+
+    releasePrevention();
+    await handling;
+    expect(reviewChannel.send).toHaveBeenCalledOnce();
     database.sqlite.close();
   });
 
