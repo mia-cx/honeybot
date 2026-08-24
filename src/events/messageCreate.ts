@@ -98,15 +98,12 @@ async function handleTriggeredMessage(
         : 'crosschannel_prevention'
     ];
   const moderationReason = `Honeybot ${triggerType} prevention`;
-  const caseRow = await dependencies.caseStore.getOrCreateCase(
-    {
-      guildId: message.guildId,
-      userId: message.author.id,
-      triggerType,
-      reason: moderationReason,
-    },
-    { reusePending: policy.actionType === 'log' },
-  );
+  const caseRow = await dependencies.caseStore.getOrCreateCase({
+    guildId: message.guildId,
+    userId: message.author.id,
+    triggerType,
+    reason: moderationReason,
+  });
   const persisted = await dependencies.caseStore.attachMessage(
     caseRow.id,
     message,
@@ -554,6 +551,8 @@ function analysisProgressStatus(
   }
 }
 
+const caseReviewUpdateTails = new Map<string, Promise<void>>();
+
 async function upsertReviewIfConfigured(
   message: Message<true>,
   caseId: string,
@@ -569,61 +568,86 @@ async function upsertReviewIfConfigured(
     punishmentReady: boolean;
   },
 ) {
-  if (!guildConfig.moderationChannelId) return;
-  const channel = await message.guild.channels.fetch(
-    guildConfig.moderationChannelId,
-  );
-  if (!channel?.isTextBased()) return;
+  const moderationChannelId = guildConfig.moderationChannelId;
+  if (!moderationChannelId) return;
+  return withCaseReviewUpdate(caseId, async () => {
+    const channel = await message.guild.channels.fetch(moderationChannelId);
+    if (!channel?.isTextBased()) return;
 
-  const attachments = await dependencies.caseStore.listCaseAttachments(caseId);
-  const triggerType =
-    message.channelId ===
-    guildConfig.honeypotChannelIds.find((id) => id === message.channelId)
-      ? 'honeypot'
-      : 'crosschannel';
-  const payload = {
-    caseId,
-    userId: message.author.id,
-    channelId: message.channelId,
-    triggerType,
-    duplicateChannelIds: state.duplicateChannelIds,
-    moderatorUserIds: guildConfig.moderatorUsers,
-    moderatorRoleIds: guildConfig.moderatorRoles,
-    status: state.status,
-    reason: state.reason,
-    messageContent: message.content,
-    attachments,
-    storage: dependencies.storage,
-    prevention:
-      guildConfig.policies[
-        triggerType === 'honeypot'
-          ? 'honeypot_prevention'
-          : 'crosschannel_prevention'
-      ],
-    punishment: guildConfig.policies.punishment,
-    preventionOutcome: state.preventionOutcome,
-    triggerMessageDeleted: state.triggerMessageDeleted,
-    analysis: state.analysis,
-    punishmentReady: state.punishmentReady,
-  };
-  const caseRow = await dependencies.caseStore.getCase(caseId);
+    const attachments =
+      await dependencies.caseStore.listCaseAttachments(caseId);
+    const triggerType =
+      message.channelId ===
+      guildConfig.honeypotChannelIds.find((id) => id === message.channelId)
+        ? 'honeypot'
+        : 'crosschannel';
+    const payload = {
+      caseId,
+      userId: message.author.id,
+      channelId: message.channelId,
+      triggerType,
+      duplicateChannelIds: state.duplicateChannelIds,
+      moderatorUserIds: guildConfig.moderatorUsers,
+      moderatorRoleIds: guildConfig.moderatorRoles,
+      status: state.status,
+      reason: state.reason,
+      messageContent: message.content,
+      attachments,
+      storage: dependencies.storage,
+      prevention:
+        guildConfig.policies[
+          triggerType === 'honeypot'
+            ? 'honeypot_prevention'
+            : 'crosschannel_prevention'
+        ],
+      punishment: guildConfig.policies.punishment,
+      preventionOutcome: state.preventionOutcome,
+      triggerMessageDeleted: state.triggerMessageDeleted,
+      analysis: state.analysis,
+      punishmentReady: state.punishmentReady,
+    };
+    const caseRow = await dependencies.caseStore.getCase(caseId);
 
-  if (caseRow?.reviewMessageId && 'messages' in channel) {
-    const existing = await channel.messages
-      .fetch(caseRow.reviewMessageId)
-      .catch(() => null);
-    if (existing) {
-      await existing.edit(caseReviewEdit(payload, existing.components));
-      return;
+    if (caseRow?.reviewMessageId && 'messages' in channel) {
+      const existing = await channel.messages
+        .fetch(caseRow.reviewMessageId)
+        .catch(() => null);
+      if (existing) {
+        await existing.edit(caseReviewEdit(payload, existing.components));
+        return;
+      }
+    }
+
+    const reviewMessage = await channel.send(caseReviewMessage(payload));
+    await dependencies.caseStore.setReviewMessage(
+      caseId,
+      reviewMessage.channelId,
+      reviewMessage.id,
+    );
+  });
+}
+
+async function withCaseReviewUpdate<T>(
+  caseId: string,
+  update: () => Promise<T>,
+) {
+  const predecessor = caseReviewUpdateTails.get(caseId) ?? Promise.resolve();
+  let release: () => void = () => undefined;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tail = predecessor.catch(() => undefined).then(() => pending);
+  caseReviewUpdateTails.set(caseId, tail);
+
+  await predecessor.catch(() => undefined);
+  try {
+    return await update();
+  } finally {
+    release();
+    if (caseReviewUpdateTails.get(caseId) === tail) {
+      caseReviewUpdateTails.delete(caseId);
     }
   }
-
-  const reviewMessage = await channel.send(caseReviewMessage(payload));
-  await dependencies.caseStore.setReviewMessage(
-    caseId,
-    reviewMessage.channelId,
-    reviewMessage.id,
-  );
 }
 
 async function attempt<T>(label: string, operation: () => Promise<T>) {
