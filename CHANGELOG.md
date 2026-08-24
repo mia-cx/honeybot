@@ -1,5 +1,11 @@
 # honeybot
 
+## 1.1.4
+
+### Patch Changes
+
+- Keep concurrent duplicate messages in one active moderation case and repair or retry malformed classifier responses before marking the classifier unavailable.
+
 ## 1.1.3
 
 ### Patch Changes
