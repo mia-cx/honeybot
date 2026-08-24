@@ -34,6 +34,29 @@ type AdditionalSignalModels = {
   image: AdditionalSignalModelSet;
 };
 
+type ModelRetryOptions = {
+  maxAttempts: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+};
+
+const defaultModelRetryOptions: ModelRetryOptions = {
+  maxAttempts: 3,
+  initialDelayMs: 300,
+  maxDelayMs: 15_000,
+};
+
+class MalformedClassifierOutputError extends Error {
+  constructor(
+    message: string,
+    readonly requestBody: OpenRouterRequestBody,
+    readonly rawResponse: string,
+  ) {
+    super(message);
+    this.name = 'MalformedClassifierOutputError';
+  }
+}
+
 export class OpenRouterScamClassifier implements ScamClassifier {
   constructor(
     private readonly modelStore: ModelStore,
@@ -42,23 +65,35 @@ export class OpenRouterScamClassifier implements ScamClassifier {
       text: { provider: 'openrouter', models: [] },
       image: { provider: 'openrouter', models: [] },
     },
+    private readonly retryOptions = defaultModelRetryOptions,
   ) {}
 
   async classify(
     message: CachedMessage,
     context: ClassifierEvidenceContext,
   ): Promise<ClassificationResult> {
-    return this.queue.enqueue(message.guildId, async () => {
-      const hasImages = message.attachments.some(isModelImageAttachment);
-      const purpose = hasImages ? 'image_classifier' : 'text_classifier';
-      const systemPrompt = await loadClassifierPrompt(
-        hasImages ? 'scam-image' : 'scam-text',
-      );
-      const config = await this.modelStore.get(message.guildId, purpose);
-      const content = contentFor(message, context, hasImages);
+    const hasImages = message.attachments.some(isModelImageAttachment);
+    const purpose = hasImages ? 'image_classifier' : 'text_classifier';
+    const systemPrompt = await loadClassifierPrompt(
+      hasImages ? 'scam-image' : 'scam-text',
+    );
+    const config = await this.modelStore.get(message.guildId, purpose);
+    const content = contentFor(message, context, hasImages);
 
-      return openRouterJsonClassification(config, systemPrompt, content);
-    });
+    return retryModelCall(
+      (previousError) =>
+        this.queue.enqueue(message.guildId, () =>
+          openRouterJsonClassification(
+            config,
+            systemPrompt,
+            content,
+            previousError instanceof MalformedClassifierOutputError
+              ? previousError
+              : null,
+          ),
+        ),
+      this.retryOptions,
+    );
   }
 
   async additionalSignals(
@@ -70,27 +105,54 @@ export class OpenRouterScamClassifier implements ScamClassifier {
       ? this.additionalSignalModels.image
       : this.additionalSignalModels.text;
     if (signalConfig.models.length === 0) return [];
-    return this.queue.enqueue(message.guildId, async () => {
-      const systemPrompt = await loadClassifierPrompt(
-        hasImages ? 'scam-image' : 'scam-text',
+    const systemPrompt = await loadClassifierPrompt(
+      hasImages ? 'scam-image' : 'scam-text',
+    );
+    const content = contentFor(message, context, hasImages);
+    return Promise.all(
+      signalConfig.models.map(async (modelId) => {
+        const result = await retryModelCall(
+          (previousError) =>
+            this.queue.enqueue(message.guildId, () =>
+              openRouterJsonClassification(
+                this.modelStore.providerConfig(signalConfig.provider, modelId),
+                systemPrompt,
+                content,
+                previousError instanceof MalformedClassifierOutputError
+                  ? previousError
+                  : null,
+              ),
+            ),
+          this.retryOptions,
+        ).catch((error: unknown) => ({
+          verdict: 'needs_review' as const,
+          confidence: 0,
+          rationale: `Additional signal unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          labels: [],
+        }));
+        return { ...result, modelId };
+      }),
+    );
+  }
+}
+
+async function retryModelCall<T>(
+  operation: (previousError: unknown | null) => Promise<T>,
+  options: ModelRetryOptions,
+): Promise<T> {
+  let previousError: unknown | null = null;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation(previousError);
+    } catch (error) {
+      if (attempt >= options.maxAttempts) throw error;
+      previousError = error;
+      const delayMs = Math.min(
+        options.maxDelayMs,
+        options.initialDelayMs * 2 ** (attempt - 1),
       );
-      const content = contentFor(message, context, hasImages);
-      return Promise.all(
-        signalConfig.models.map(async (modelId) => {
-          const result = await openRouterJsonClassification(
-            this.modelStore.providerConfig(signalConfig.provider, modelId),
-            systemPrompt,
-            content,
-          ).catch((error: unknown) => ({
-            verdict: 'needs_review' as const,
-            confidence: 0,
-            rationale: `Additional signal unavailable: ${error instanceof Error ? error.message : String(error)}`,
-            labels: [],
-          }));
-          return { ...result, modelId };
-        }),
-      );
-    });
+      await sleep(delayMs);
+    }
   }
 }
 
@@ -98,6 +160,7 @@ async function openRouterJsonClassification(
   config: { provider: string; modelId: string | null; apiKey: string | null },
   systemPrompt: string,
   content: unknown[],
+  repair: MalformedClassifierOutputError | null = null,
 ): Promise<ClassificationResult> {
   if (config.provider !== 'openrouter' || !config.apiKey || !config.modelId) {
     return {
@@ -108,19 +171,21 @@ async function openRouterJsonClassification(
     };
   }
 
-  const requestBody: OpenRouterRequestBody = {
-    model: config.modelId,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content },
-    ],
-    response_format: { type: 'json_object' },
-    temperature: 0,
-  };
+  const requestBody: OpenRouterRequestBody = repair
+    ? malformedOutputRepairRequest(repair)
+    : {
+        model: config.modelId,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0,
+      };
   const { response, responseText } = await openRouterCompletion(
     requestBody,
     config.apiKey,
-    'openrouter.classifier',
+    repair ? 'openrouter.classifier.malformed_repair' : 'openrouter.classifier',
   );
 
   if (!response.ok) {
@@ -136,12 +201,29 @@ async function openRouterJsonClassification(
   if (!raw) throw new Error('OpenRouter classifier returned no content');
 
   const parsed = await repairMissingReason(
-    parseClassifierResult(raw),
+    parseRepairableClassifierResult(raw, requestBody),
     requestBody,
     config.apiKey,
     raw,
   );
   return classificationResultFromParsed(parsed);
+}
+
+function malformedOutputRepairRequest(
+  error: MalformedClassifierOutputError,
+): OpenRouterRequestBody {
+  return {
+    ...error.requestBody,
+    messages: [
+      ...error.requestBody.messages,
+      { role: 'assistant', content: error.rawResponse },
+      {
+        role: 'user',
+        content:
+          'Your previous JSON was malformed or truncated. Repair that output instead of classifying the case again. Return strict JSON only with likelihood, scam_likelihood, and a non-empty reason.',
+      },
+    ],
+  };
 }
 
 async function openRouterCompletion(
@@ -203,8 +285,23 @@ async function repairMissingReason(
   const json = parseOpenRouterResponse(responseText);
   const raw = json.choices[0]?.message.content;
   if (!raw) return parsed;
-  const repaired = parseClassifierResult(raw);
+  const repaired = parseRepairableClassifierResult(raw, repairRequestBody);
   return repaired.reasonMissing ? parsed : repaired;
+}
+
+function parseRepairableClassifierResult(
+  raw: string,
+  requestBody: OpenRouterRequestBody,
+) {
+  try {
+    return parseClassifierResult(raw);
+  } catch (error) {
+    throw new MalformedClassifierOutputError(
+      error instanceof Error ? error.message : String(error),
+      requestBody,
+      raw,
+    );
+  }
 }
 
 function classificationResultFromParsed(
@@ -596,6 +693,10 @@ async function fetchWithTimeout(
 
 function truncate(value: string, max: number) {
   return value.length <= max ? value : `${value.slice(0, max - 1)}…`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export { loadClassifierPrompt };

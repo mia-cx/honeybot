@@ -79,8 +79,7 @@ void caseStore
       error: error instanceof Error ? error.message : String(error),
     });
   });
-const recoveredCaseOperations =
-  await caseStore.recoverInterruptedOperations();
+const recoveredCaseOperations = await caseStore.recoverInterruptedOperations();
 const uncertainCaseReviews = await caseStore.listUncertainCaseReviews();
 if (recoveredCaseOperations > 0) {
   logger.warn('Recovered interrupted case operations', {
@@ -88,16 +87,25 @@ if (recoveredCaseOperations > 0) {
     uncertainCaseOperations: uncertainCaseReviews.length,
   });
 }
-const classifier = new OpenRouterScamClassifier(modelStore, modelQueue, {
-  text: {
-    provider: env.ADDITIONAL_TEXT_SIGNAL_PROVIDER,
-    models: env.ADDITIONAL_TEXT_SIGNAL_MODELS,
+const classifier = new OpenRouterScamClassifier(
+  modelStore,
+  modelQueue,
+  {
+    text: {
+      provider: env.ADDITIONAL_TEXT_SIGNAL_PROVIDER,
+      models: env.ADDITIONAL_TEXT_SIGNAL_MODELS,
+    },
+    image: {
+      provider: env.ADDITIONAL_IMAGE_SIGNAL_PROVIDER,
+      models: env.ADDITIONAL_IMAGE_SIGNAL_MODELS,
+    },
   },
-  image: {
-    provider: env.ADDITIONAL_IMAGE_SIGNAL_PROVIDER,
-    models: env.ADDITIONAL_IMAGE_SIGNAL_MODELS,
+  {
+    maxAttempts: env.MODEL_RETRY_MAX_ATTEMPTS,
+    initialDelayMs: env.MODEL_RETRY_INITIAL_DELAY_MS,
+    maxDelayMs: env.MODEL_RETRY_MAX_DELAY_MS,
   },
-});
+);
 const analyzer = new EvidenceAnalyzer(caseStore, classifier, embedder);
 const globalBanService = new GlobalBanService(
   database.db,
@@ -139,11 +147,7 @@ client.once(Events.ClientReady, (readyClient) => {
         });
     })
     .then(() =>
-      refreshRecoveredCaseReviews(
-        readyClient,
-        caseStore,
-        uncertainCaseReviews,
-      ),
+      refreshRecoveredCaseReviews(readyClient, caseStore, uncertainCaseReviews),
     )
     .then((recoverySummary) => {
       if (
