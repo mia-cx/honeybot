@@ -241,14 +241,14 @@ export function getRepositories(
   environment: NodeJS.ProcessEnv = process.env,
 ): RegistryRepositories {
   const githubRepository = environment.GITHUB_REPOSITORY;
-  const dockerhubUsername = environment.DOCKERHUB_USERNAME;
+  const dockerhubNamespace = environment.DOCKERHUB_NAMESPACE;
   const dockerhubRepository = environment.DOCKERHUB_REPOSITORY ?? 'honeybot';
   if (!githubRepository) throw new Error('GITHUB_REPOSITORY is required');
-  if (!dockerhubUsername) throw new Error('DOCKERHUB_USERNAME is required');
+  if (!dockerhubNamespace) throw new Error('DOCKERHUB_NAMESPACE is required');
 
   return {
     ghcr: `ghcr.io/${githubRepository}`,
-    dockerhub: `docker.io/${dockerhubUsername}/${dockerhubRepository}`,
+    dockerhub: `docker.io/${dockerhubNamespace}/${dockerhubRepository}`,
   };
 }
 
