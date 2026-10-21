@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-slim AS base
+FROM node:24.22.1-slim AS base
 
 ENV PNPM_HOME=/pnpm \
     PATH=/pnpm:$PATH
