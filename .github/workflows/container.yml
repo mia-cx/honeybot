@@ -22,7 +22,9 @@ permissions:
   contents: read
 
 env:
-  DOCKERHUB_USERNAME: miacx
+  # The org-wide DOCKERHUB_TOKEN belongs to kalebosmier, a member of the miacx org.
+  DOCKERHUB_USERNAME: kalebosmier
+  DOCKERHUB_NAMESPACE: miacx
   DOCKERHUB_REPOSITORY: honeybot
 
 jobs:
