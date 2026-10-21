@@ -1,5 +1,11 @@
 # honeybot
 
+## 1.1.5
+
+### Patch Changes
+
+- Run on Node.js 24.22.1, which fixes the October 2026 Node.js security release vulnerabilities, including the Brotli decoder out-of-bounds write (CVE-2026-111497).
+
 ## 1.1.4
 
 ### Patch Changes
