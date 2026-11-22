@@ -1,5 +1,12 @@
 # Honeybot
 
+<a href="https://0rwx.com">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://0rwx.com/static/AI-W-dark.svg">
+    <img alt="AI:W" src="https://0rwx.com/static/AI-W-light.svg" height="48">
+  </picture>
+</a>
+
 Honeybot is a Discord.js moderation bot for catching scam and spam raids with honeypot channels, cross-channel repeat detection, known-scam evidence, embeddings, classifiers, and moderator review.
 
 It is built for self-hosting: SQLite for persistence, filesystem evidence storage, Docker images, and Kubernetes/k3s manifests are all first-class deployment paths.
