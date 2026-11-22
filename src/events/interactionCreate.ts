@@ -1303,6 +1303,14 @@ async function handleSettingsModal(
     return;
   }
 
+  if (!interaction.isFromMessage()) {
+    await interaction.reply({
+      content: 'Please reopen settings and try again.',
+      ephemeral: true,
+    });
+    return;
+  }
+
   if (interaction.customId.startsWith('settings:modelModal:')) {
     const purpose = interaction.customId.split(':')[2];
     if (!isModelPurpose(purpose)) {
@@ -1329,8 +1337,8 @@ async function handleSettingsModal(
       provider,
       modelId,
     );
-    await interaction.reply(
-      await settingsReplyForGuild(
+    await interaction.update(
+      await settingsUpdateForGuild(
         deps,
         interaction.guildId,
         modelPageForPurpose(purpose),
@@ -1353,8 +1361,8 @@ async function handleSettingsModal(
       purpose,
       interaction.fields.getTextInputValue('api_key'),
     );
-    await interaction.reply(
-      await settingsReplyForGuild(
+    await interaction.update(
+      await settingsUpdateForGuild(
         deps,
         interaction.guildId,
         modelPageForPurpose(purpose),
@@ -1388,8 +1396,8 @@ async function handleSettingsModal(
       ...config.policies[scope],
       durationSeconds,
     });
-    await interaction.reply(
-      await settingsReplyForGuild(
+    await interaction.update(
+      await settingsUpdateForGuild(
         deps,
         interaction.guildId,
         pageForPolicyScope(scope),
@@ -1419,8 +1427,8 @@ async function handleSettingsModal(
   }
 
   await deps.configStore.setSetting(interaction.guildId, key, value);
-  await interaction.reply(
-    await settingsReplyForGuild(
+  await interaction.update(
+    await settingsUpdateForGuild(
       deps,
       interaction.guildId,
       pageFromValue(pageValue),
